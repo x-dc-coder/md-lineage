@@ -410,6 +410,7 @@ preset 可包含基础 Schema、关系词表、默认 severity、路径 override
 | `MDL3xx` | 仓库身份和关系 |
 | `MDL4xx` | Markdown link/anchor |
 | `MDL5xx` | 仓库策略 |
+| `MDL6xx` | 行尾与编码卫生 |
 | `MDL9xx` | 配置或内部状态 |
 
 初始诊断：
@@ -430,6 +431,8 @@ preset 可包含基础 Schema、关系词表、默认 severity、路径 override
 - `MDL305`：关系形成禁止的环。
 - `MDL401`：Markdown 文件链接不存在。
 - `MDL402`：Markdown heading anchor 不存在。
+- `MDL601`：文件内混用多种行尾符。
+- `MDL602`：行尾符与仓库策略不符（默认 LF，见 `docs/line-ending-management.md`）。
 
 ### 8.2 严重级别
 
