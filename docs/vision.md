@@ -55,6 +55,15 @@ Every derived relationship should be traceable to its source document, relevant 
 - Agent tools for metadata suggestions, search, impact analysis, and validation.
 - A local-first workflow suitable for Claude Code and other MCP-capable agents.
 
+## Problem classes the product covers
+
+Four recurring failure modes of Markdown repositories define the product pillars:
+
+1. **Unknown cross-document relationships.** Dependencies, refinements, and supersessions live in prose and are invisible to tools. Pillar: relationship indexing with evidence-backed proposals and impact analysis.
+2. **Broken syntax and metadata.** Front Matter that fails to parse, IDs that collide, relation targets that resolve to nothing. Pillar: one validator core behind LSP, CLI, CI, and MCP with stable diagnostic codes.
+3. **Cross-platform hygiene.** Editing the same repository from WSL and Windows silently flips line endings and every file shows as modified. Pillar: line-ending detection, repair, and prevention (`docs/line-ending-management.md`).
+4. **Layout drift.** Documents accumulate in directories that no longer match their role. Pillar: declarative directory conventions validated as diagnostics (`docs/dir-conventions.md`, design open).
+
 ## Not goals for the first version
 
 - Replacing Git or the authoring workflow.

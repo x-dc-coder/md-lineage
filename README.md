@@ -1,6 +1,6 @@
 # MDLineage
 
-**MDLineage** is a change-aware context index for Markdown repositories. It helps coding agents discover how documents relate, understand what a document change may affect, and keep document metadata useful and current.
+**MDLineage** is a change-aware context index and validation toolkit for Markdown repositories. It helps coding agents discover how documents relate, understand what a document change may affect, keep document metadata useful and current, and keeps the documents themselves healthy — from syntax to directory layout.
 
 The project combines two ideas:
 
@@ -14,6 +14,15 @@ The goal is not to make every agent query depend on a large graph index. Most da
 The name combines **MD**, for Markdown, with **Lineage**, for traceable relationships, provenance, and change impact. It describes the product’s purpose without tying it to a particular graph database, embedding model, or RAG framework.
 
 The display name is **MDLineage** and the repository name is **md-lineage**.
+
+## Product pillars
+
+MDLineage addresses four classes of problems that Markdown repositories hit in real use:
+
+1. **Relationship indexing.** Cross-document relations (`depends_on`, `refines`, `supersedes`, …) are proposed with evidence by semantic analysis, confirmed into Front Matter, and used for impact analysis when documents change.
+2. **Syntax and metadata validation.** One validator core serves editor diagnostics (LSP), CLI checks, CI, and MCP: Front Matter boundaries, YAML, JSON Schema, cross-file semantics such as duplicate IDs and unresolved relation targets, with stable diagnostic codes.
+3. **Line-ending hygiene.** Cross-platform (WSL/Windows) editing silently flips line endings and produces phantom diffs. MDLineage detects, repairs, and prevents line-ending drift; see [Line-ending management](docs/line-ending-management.md).
+4. **Directory convention constraints.** Repositories can declare which kinds of documents belong where; layout drift is reported as diagnostics and moves are proposed with their impact. Design is still open; see [Directory conventions](docs/dir-conventions.md).
 
 ## Initial design
 
@@ -29,6 +38,9 @@ The display name is **MDLineage** and the repository name is **md-lineage**.
 - [Product vision](docs/vision.md)
 - [Architecture](docs/architecture.md)
 - [Front Matter specification draft](docs/frontmatter-spec.md)
+- [Realtime validation via remark-language-server](docs/remark-language-server-solution.md)
+- [Line-ending management](docs/line-ending-management.md)
+- [Directory conventions (open design)](docs/dir-conventions.md)
 - [Open-source project landscape](docs/open-source-landscape.md)
 - [Initial roadmap](docs/roadmap.md)
 

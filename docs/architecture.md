@@ -8,6 +8,7 @@ MDLineage separates repository-authored facts from generated indexes. Front Matt
 flowchart TD
   A[Markdown files] --> B[Parser: body, headings, Front Matter, links]
   B --> C[Deterministic index: IDs, link edges, validation]
+  B --> C2[Hygiene checks: line endings, layout policy]
   B --> D[Candidate discovery: lexical search, embeddings, entities]
   D --> E[LLM analysis: relation and theme proposals with evidence]
   E --> F[Reviewable metadata patch]
@@ -15,6 +16,7 @@ flowchart TD
   C --> H[Derived graph and search index]
   G --> H
   H --> I[Agent tools: search, impact, validate]
+  C2 --> I
   B --> J[Git diff / changed-file detection]
   J --> C
   J --> D
