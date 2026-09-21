@@ -1,0 +1,28 @@
+{
+  "name": "@mdlineage/cli",
+  "version": "0.0.0",
+  "description": "mdlineage command line: single-document and repository Markdown validation through @mdlineage/validator.",
+  "type": "module",
+  "main": "./dist/main.js",
+  "bin": {
+    "mdlineage": "./dist/main.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/check.d.ts",
+      "import": "./dist/check.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --import tsx --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@mdlineage/validator": "*",
+    "glob": "^10.5.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0"
+  }
+}

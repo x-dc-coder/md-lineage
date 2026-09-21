@@ -2,6 +2,12 @@
 .DS_Store
 Thumbs.db
 .idea/
-.vscode/
+.vscode/*
+!.vscode/settings.json
+.vscode/*.local
 *.log
 logs/
+
+# MDLineage build and dependency output
+node_modules/
+dist/

@@ -1,0 +1,4 @@
+{
+  "//": "remark-language-server / vscode-remark settings (docs/remark-language-server-solution.md §6.3). `remark.requireConfig: true` means a repository with no .remarkrc.* is not processed at all, which prevents a contributor's personal plugins from silently producing different diagnostics than CI.",
+  "remark.requireConfig": true
+}

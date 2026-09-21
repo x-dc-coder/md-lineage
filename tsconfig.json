@@ -1,0 +1,8 @@
+{
+  "files": [],
+  "references": [
+    { "path": "packages/validator" },
+    { "path": "packages/remark-lint-mdlineage" },
+    { "path": "packages/cli" }
+  ]
+}

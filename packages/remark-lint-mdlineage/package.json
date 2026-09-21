@@ -1,0 +1,34 @@
+{
+  "name": "@mdlineage/remark-lint-mdlineage",
+  "version": "0.0.0",
+  "description": "remark-lint rule that runs the @mdlineage/validator single-document stack on the in-memory buffer.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --import tsx --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@mdlineage/validator": "*",
+    "unified-lint-rule": "^3.0.1",
+    "vfile-message": "^4.0.2"
+  },
+  "devDependencies": {
+    "@types/mdast": "^4.0.4",
+    "@types/unist": "^3.0.3",
+    "remark-frontmatter": "^5.0.0",
+    "remark-gfm": "^4.0.0",
+    "remark-lint": "^10.0.1",
+    "remark-parse": "^11.0.0",
+    "remark-stringify": "^11.0.0",
+    "unified": "^11.0.0"
+  }
+}
