@@ -8,13 +8,13 @@ Markdown repositories organize documents by directory, but nothing enforces that
 
 Typical cases MDLineage should cover:
 
-- Design documents that belong in a versioned docs tree but sit in the repository root, which is what happened in this repository before `docs/` was adopted.
+- Design documents that belong in a versioned docs tree but sit in the repository root — a common starting state this repository also went through before its current `docs/` layout.
 - A document that changes role (a draft guide becomes a policy) without moving to the directory its new kind requires.
 - Directories whose contents have drifted from their declared purpose, such as `docs/policies/` accumulating how-to guides.
 
 ## Direction
 
-Treat directory layout as a declarative repository policy, validated by the same engine and configuration as every other check:
+Treat directory layout as a declarative repository policy, validated by the same engine and configuration as every other check. Layout rules form a dedicated `layout:` block in `mdlineage.config.yaml` — a sibling of, not a reuse of, the generic `policies:` DSL (Section 7.3 of the validation design), with its own config-schema section so the two never share ambiguous keys such as `forbid`:
 
 ~~~yaml
 # mdlineage.config.yaml
@@ -27,14 +27,15 @@ layout:
     require:
       kind: policy
       authority: canonical
-    forbid:
-      status: [draft]
+    forbidStatus: [draft]
   - match: notes/**
     require:
       frontmatter: optional
 ~~~
 
-This reuses the policy layer already specified in `docs/remark-language-server-solution.md` (Section 7.3): declarations compile to stable diagnostic codes, and the config schema validates them with editor completion.
+Layout checks are planned for the reserved `MDL5xx` policy block (the alternative of a separate `MDL7xx` block is the last open question below).
+
+This block validates through the same config schema, diagnostic protocol, and editor completion as the rest of MDLineage configuration; declarations compile to stable diagnostic codes like any other rule.
 
 Three capabilities layer on top:
 
@@ -57,4 +58,4 @@ These decisions are deliberately deferred:
 2. Is `kind` in Front Matter the source of truth that paths must match, or do paths define kind where Front Matter is silent?
 3. How are exceptions declared and expired (explicit allowlist entries, time-boxed suppressions, or per-directory overrides)?
 4. Does MDLineage ever execute the move itself (producing a WorkspaceEdit across the repository), or only emit a report that the agent applies?
-5. Which diagnostic-code block covers layout (`MDL5xx` policy codes versus a new `MDL7xx` block)?
+5. Which diagnostic-code block covers layout — the default plan is the reserved `MDL5xx` policy block (as annotated above); a separate `MDL7xx` block remains the fallback if policy codes crowd out other strategy rules.

@@ -8,7 +8,7 @@ Pillars referenced below are the four product pillars defined in `README.md`: re
 - Parse Markdown AST, YAML Front Matter, relative links, and anchors. (P2)
 - Validate IDs, relation targets, and broken links. (P2)
 - Ship the validator rule contract: `mdlineage-v1.schema.json`, config schema, initial MDLxxx diagnostic codes, and fixtures. (P2, per `docs/remark-language-server-solution.md` M0)
-- Enforce repository line endings via `.gitattributes` and document the policy. (P3, done: commit `aae04d2`, `docs/line-ending-management.md`)
+- Enforce repository line endings via `.gitattributes` and document the policy. (P3, done: `aae04d2` attributes, `ad143d9` analysis document `docs/line-ending-management.md`)
 - Build a local derived index and reverse-reference view. (P1)
 - Demonstrate impact analysis using authored relationships. (P1)
 
@@ -18,13 +18,15 @@ Pillars referenced below are the four product pillars defined in `README.md`: re
 - Generate evidence-backed topic, alias, and relation proposals. (P1)
 - Produce reviewable Front Matter patches. (P1)
 - Record content hashes and analyzer versions for freshness. (P1)
-- Add a CLI suitable for local hooks and CI.
+- Add a CLI suitable for local hooks and CI. (P2)
 - Realtime editor validation through `remark-language-server` plus the shared validator core: Front Matter, Schema, single-document semantics, and line-ending checks (`MDL601`/`MDL602`). (P2, P3; per `docs/remark-language-server-solution.md` M1–M2)
 - Fix mode for line-ending drift, and `mdlineage init` emitting the `.gitattributes` policy. (P3)
 
 ## Phase 2: Agent integration
 
 - Provide MCP tools for search, metadata suggestions, impact analysis, and validation. (P1, P2)
+- Provide the dedicated `mdlineage server` LSP (completion, definition, references, rename, full four-level severities, structured Code Actions), replacing the remark host per the validation design's M3. (P2)
+- Provide `apply_metadata_patch` — the explicit proposal-acceptance step closing the LLM loop. (P1)
 - Provide a Claude Code Skill describing when and how to use those tools.
 - Add opt-in hooks for refreshing changed Markdown and validating the repository.
 - Keep normal agent workflow usable with grep and repository-native files.

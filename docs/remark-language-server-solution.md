@@ -14,8 +14,8 @@ MDLineage 将采用 `remark-language-server` 作为第一阶段的实时诊断�
               │                   │                   │
       remark adapter       mdlineage CLI       mdlineage LSP
       第一阶段实时诊断      hooks / CI / AI      最终编辑器服务
-                                                      │
-                                               mdlineage MCP
+
+      mdlineage MCP（与 LSP 并列，同样复用 validator）
 ```
 
 对外分为两个阶段：
@@ -98,7 +98,7 @@ JSON Schema 负责单文件结构：
 - `id`、`kind`、`status` 等必填字段及类型。
 - `status`、`authority`、relation type 枚举。
 - `topics`、`aliases` 元素为非空字符串。
-- 每个 relation 至少有 `type`、`target`，强关系要求 `reason`。
+- 每个 relation 至少有 `type`、`target`（`reasonRequired: true` 的关系同时要求非空 `reason`——该结构性检查归 Schema 层；仓库级关系语义缺 reason 的完整判定归 `MDL304`，见 §8.1）。
 - ID pattern、字符串长度、数组去重。
 
 兼容策略：
@@ -174,6 +174,8 @@ LSP ────────────┤
 MCP ────────────┘
 ```
 
+各包的发布名统一为 `@mdlineage/*`（`@mdlineage/validator`、`@mdlineage/remark-lint-mdlineage`、`@mdlineage/cli`、`@mdlineage/language-server`、`@mdlineage/mcp-server`）。每个 TypeScript 包构建到自身 `dist/`（`src/index.ts` → `dist/index.js`），包间引用一律指向 `dist` 产物。`remark-lint-mdlineage` 以 `@mdlineage/validator` 为唯一核心依赖。
+
 `validator` 不依赖 LSP、编辑器或 MCP API，确保同一输入始终得到相同诊断。
 
 ## 6. 第一阶段具体实现
@@ -199,7 +201,7 @@ MCP ────────────┘
 import remarkFrontmatter from 'remark-frontmatter'
 import remarkGfm from 'remark-gfm'
 import remarkPresetLintRecommended from 'remark-preset-lint-recommended'
-import remarkLintMdlineage from './packages/remark-lint-mdlineage/index.js'
+import remarkLintMdlineage from '@mdlineage/remark-lint-mdlineage' // resolved from node_modules; builds packages/remark-lint-mdlineage/src → dist
 
 export default {
   plugins: [
@@ -233,7 +235,12 @@ didOpen / didChange
 node_modules/.bin/remark-language-server --stdio
 ```
 
-VS Code 使用 `vscode-remark` 并启用 `remark.requireConfig: true`。Neovim、Emacs 等客户端直接注册 stdio LSP，以 `.remarkrc.*`、`mdlineage.config.yaml` 或 `.git` 作为 root marker。
+VS Code 与 Neovim/Emacs 两条通道的服务器来源不同，需要在文档中如实区分：
+
+- **VS Code**：`vscode-remark` 扩展将 `remark-language-server` esbuild 打包进扩展自身（其 `package.json` 的 `dependencies` 为空，构建脚本为 `esbuild ... remark-language-server --bundle`，且不提供指向外部 server 的设置项）。因此 VS Code 下服务器版本随扩展版本走，仓库只能锁定「配置与插件」——`.remarkrc.mjs` 从 `node_modules` 加载仓库内版本的 `@mdlineage/*` 插件。配套在仓库中提交 `.vscode/settings.json`，启用 `remark.requireConfig: true`（默认 `false`）。注意该选项的语义是「没有配置文件时不做任何处理」：开启后，无 `.remarkrc.*` 的仓库将完全没有诊断；它的作用是防止误用个人全局插件，属于一致性保障而非功能开关。
+- **Neovim、Emacs 等客户端**：直接注册 stdio LSP，指向 `node_modules/.bin/remark-language-server --stdio`，服务器版本由仓库锁文件控制；以 `.remarkrc.*`、`mdlineage.config.yaml` 或 `.git` 作为 root marker。
+
+因此「仓库内锁定版本」的承诺仅对 stdio 通道完整成立；VS Code 通道锁定的是插件与规则，服务器本身随扩展更新。最终形态（M3 的 `mdlineage server`）两条通道都指向仓库内二进制，届时此差异消失。
 
 ### 6.4 CLI 与 CI
 
@@ -249,7 +256,7 @@ VS Code 使用 `vscode-remark` 并启用 `remark.requireConfig: true`。Neovim�
 
 - `remark`：普通 Markdown 和第一阶段单文档规则。
 - `mdlineage check`：权威仓库级校验。
-- pre-commit 可运行 changed 模式。
+- pre-commit 可运行 changed 模式；`--changed` 的检测基准必须基于 `git status --porcelain` 或工作区字节扫描，不能基于 `git diff` 或暂存 blob——在 `.gitattributes` 行尾策略生效时，行尾类修改不出现在 diff 中，基于 diff 的实现会静默漏检（见 `docs/line-ending-management.md` §4.3）。
 - push/CI 必须运行全量模式。
 
 ### 6.5 第一阶段跨文件检查
@@ -275,7 +282,7 @@ remark 插件可以首次使用时建立只读仓库快照，但实时结果属�
 
 ```yaml
 # mdlineage.config.yaml
-schema: 1
+configVersion: 1
 
 files:
   include: ['**/*.md']
@@ -322,6 +329,8 @@ diagnostics:
   MDL301: error
   MDL304: warning
 ```
+
+关系方向的权威定义在词表中（`docs/frontmatter-spec.md`「Initial relationship vocabulary」），配置只承载 impact、reasonRequired、selfReference、cycles 等校验开关，不提供 per-relation 方向参数——方向一致性由 schema 层按词表校验。
 
 配置文件自身由 `mdlineage-config.schema.json` 校验，可在 YAML 编辑器中获得补全和诊断。
 
@@ -409,9 +418,9 @@ preset 可包含基础 Schema、关系词表、默认 severity、路径 override
 | `MDL2xx` | 单文档语义 |
 | `MDL3xx` | 仓库身份和关系 |
 | `MDL4xx` | Markdown link/anchor |
-| `MDL5xx` | 仓库策略 |
-| `MDL6xx` | 行尾与编码卫生 |
-| `MDL9xx` | 配置或内部状态 |
+| `MDL5xx` | 仓库策略（含目录布局；码待定，见 `docs/dir-conventions.md` 开放问题） |
+| `MDL6xx` | 行尾卫生（编码检查暂未纳入，BOM/编码码为后续扩展） |
+| `MDL9xx` | 配置或内部状态（码待定，如配置无法解析、引用不存在的 schemaFile） |
 
 初始诊断：
 
@@ -426,7 +435,7 @@ preset 可包含基础 Schema、关系词表、默认 severity、路径 override
 - `MDL202`：当前文档重复关系。
 - `MDL301`：文档 ID 重复。
 - `MDL302`：relation target 不存在。
-- `MDL303`：relation target 有歧义。
+- `MDL303`：relation target 有歧义（仅在配置启用路径或别名回退解析时可能触发；纯 ID 解析下由 `MDL301` 保证唯一性，此码为扩展保留）。
 - `MDL304`：关系缺少 reason。
 - `MDL305`：关系形成禁止的环。
 - `MDL401`：Markdown 文件链接不存在。
@@ -463,6 +472,8 @@ JSON Pointer → YAML CST node → source offsets → LSP UTF-16 range
 - 删除当前文档内完全重复的 relation。
 - 为缺失 Front Matter 生成空模板，但不生成业务结论。
 
+能力边界：remark LSP 阶段的编辑器内 QuickFix 由 `unified-language-server` 生成，它只读取诊断携带的 `expected` 替换值数组，产出单个 `TextEdit.replace(diagnostic.range, replacement)`（Insert/Replace/Remove 三种）。因此上面需要多行 YAML 结构编辑的修复项（插入数组元素、删除重复 relation）在 M1 阶段只能以两种方式落地：CLI 侧 `mdlineage fix`（validator 直接产出完整 TextEdit 集合），或 M3 专用 LSP 的自定义 Code Action。另外 remark/unified 的 lint severity 只有 0/1/2 三档，§8.2 的 Information 与 Hint 两级在 remark 通道下会塌缩为 Warning，四级严重度从 M3 专用 LSP 起完整生效。
+
 ### 9.2 只能建议
 
 - 生成或修改稳定 `id`。
@@ -481,10 +492,14 @@ Front Matter 修复必须采用 CST/TextEdit 局部编辑，不能 parse 后整�
 mdlineage server --stdio
 mdlineage check [paths...]
 mdlineage check --changed
+mdlineage fix [paths...]
+mdlineage init
 mdlineage config validate
 mdlineage index rebuild
 mdlineage mcp
 ```
+
+`fix` 输出安全修复（含行尾规范化，见 `docs/line-ending-management.md` §4.2）；`init` 引导仓库接入：生成 `mdlineage.config.yaml`、`.gitattributes` 行尾策略（`* text=auto eol=lf` 或配置的策略）与空 schema 目录，已有属性文件时只追加缺失路径并先展示 dry-run diff。
 
 编辑器只配置一个 LSP：
 
@@ -600,8 +615,13 @@ MCP 复用 validator 和 Workspace Index，提供：
 - `list_document_ids(query?, kind?, status?)`
 - `resolve_relation_target(id)`
 - `suggest_metadata(path)`
+- `search_documents(query, filters?)`
+- `analyze_impact(document_id | diff)`
+- `apply_metadata_patch(proposal_id)`
 
-前五项为确定性操作。`suggest_metadata` 可使用检索或 LLM，但返回结果必须标记为 proposal，不能混入 diagnostics，也不能直接写权威 Front Matter。
+前七项（至 `analyze_impact`）为确定性操作。`suggest_metadata` 可使用检索或 LLM，但返回结果必须标记为 proposal，不能混入 diagnostics，也不能直接写权威 Front Matter。
+
+工具面的总表（含 `get_document` 等只读操作）以本节为准；`docs/architecture.md` 的 Agent interface 是概念层清单，落地签名以这里为准。proposal 的存储与生命周期：`suggest_metadata` 将 proposal（含 evidence、confidence、分析版本、内容哈希）写入本地待审队列，`apply_metadata_patch(proposal_id)` 经用户确认后将补丁作为 TextEdit 应用并生成可审阅 diff——LLM 永远没有直接写 Front Matter 的通道，闭环由这个显式接受动作完成。
 
 ## 13. 性能和并发目标
 
@@ -649,6 +669,8 @@ MCP 复用 validator 和 Workspace Index，提供：
 - CLI JSON
 - LSP diagnostics
 - MCP validation
+
+一致性承诺覆盖 MDLineage 自有规则（MDLxxx 码）。普通 Markdown 规则保留 remark 原有规则 ID（§4.1），它们经 remark 通道原样透传，CLI/LSP 只保证透传结果一致，不将其改写为 MDL 码。
 
 ### 14.5 大模型常见错误 fixtures
 
@@ -721,11 +743,12 @@ MCP 复用 validator 和 Workspace Index，提供：
 
 交付：
 
-- MCP validation/search tools
+- MCP validation/search/impact tools
+- `apply_metadata_patch`（proposal 待审队列与显式接受闭环）
 - preset、自定义规则 API
 - 插件 allowlist/隔离
 
-验收：大模型能在提交前获得结构化诊断；组织规则无需 fork 核心项目即可复用。
+验收：大模型能在提交前获得结构化诊断；proposal 经显式接受写入 Front Matter 并生成可审阅 diff；组织规则无需 fork 核心项目即可复用。
 
 ## 17. 推荐首批范围
 

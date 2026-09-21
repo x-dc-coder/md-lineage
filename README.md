@@ -41,9 +41,10 @@ MDLineage addresses four classes of problems that Markdown repositories hit in r
 - [Realtime validation via remark-language-server](docs/remark-language-server-solution.md)
 - [Line-ending management](docs/line-ending-management.md)
 - [Directory conventions (open design)](docs/dir-conventions.md)
+- [Progress tracker](docs/progress.md)
 - [Open-source project landscape](docs/open-source-landscape.md)
 - [Initial roadmap](docs/roadmap.md)
 
 ## Status
 
-This repository starts as a product and architecture proposal. The metadata schema and tool interface are drafts, not a stable compatibility promise. No third-party implementation has been selected as a required dependency.
+This repository starts as a product and architecture proposal. The metadata schema and tool interface are drafts, not a stable compatibility promise. The first phase adopts the remark ecosystem (remark-language-server, remark-lint, unified, yaml, ajv) as pinned repository dependencies hosting realtime validation; the long-term shape replaces the editor host with the dedicated MDLineage language server while keeping the same validator core. No graph database, embedding provider, or LLM provider has been selected as a required dependency.

@@ -7,8 +7,8 @@ MDLineage separates repository-authored facts from generated indexes. Front Matt
 ~~~mermaid
 flowchart TD
   A[Markdown files] --> B[Parser: body, headings, Front Matter, links]
+  A --> C2[Hygiene checks: line endings, layout policy]
   B --> C[Deterministic index: IDs, link edges, validation]
-  B --> C2[Hygiene checks: line endings, layout policy]
   B --> D[Candidate discovery: lexical search, embeddings, entities]
   D --> E[LLM analysis: relation and theme proposals with evidence]
   E --> F[Reviewable metadata patch]
@@ -84,12 +84,12 @@ Theme communities and repository-wide summaries can be refreshed in batches rath
 
 The first agent integration should expose focused operations instead of requiring an agent to construct graph queries:
 
-- `search_documents(query, filters)`
-- `get_document(document_id)`
-- `suggest_metadata(document_id, changed_sections)`
-- `analyze_impact(document_id or diff)`
-- `validate_repository(paths)`
-- `accept_metadata_patch(proposal_id)`
+- `search_documents(query, filters)` — MCP: `search_documents` / `list_document_ids`
+- `get_document(document_id)` — MCP: `get_document` / `resolve_relation_target`
+- `suggest_metadata(document_id, changed_sections)` — MCP: `suggest_metadata`
+- `analyze_impact(document_id or diff)` — MCP: `analyze_impact`
+- `validate_document(path, content?)` / `validate_repository(paths)` — MCP: same names
+- `apply_metadata_patch(proposal_id)` — explicit accept step; MCP exposes it under this name (see `docs/remark-language-server-solution.md` §12 for the authoritative tool list, signatures, and proposal lifecycle)
 
 Read operations should return concise results with document paths and evidence. Writing metadata should be an explicit operation that produces a reviewable diff.
 
