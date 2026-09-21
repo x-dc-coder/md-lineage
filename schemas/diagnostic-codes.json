@@ -1,0 +1,162 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdlineage.dev/schemas/diagnostic-codes.json",
+  "title": "MDLineage diagnostic code registry",
+  "description": "Machine-readable registry of MDLxxx diagnostic codes. Kept in lockstep with docs/remark-language-server-solution.md §8.1: no code may be invented here. Layers follow the five-layer rule stack of that document (§4). Severity defaults follow §8.2: parse failure, schema failure, duplicate ID, invalid target, and forbidden relations are errors; missing recommended reason, deprecated-document references, and suspicious relations are warnings; migration and supplemental-metadata suggestions are information; low-impact formatting is hint. Codes are stable identifiers — messages may improve, codes and severities do not change without a schema version bump.",
+  "registryVersion": 1,
+  "sourceOfTruth": "docs/remark-language-server-solution.md §8.1 (initial codes) and §8.2 (severity defaults)",
+  "codes": [
+    {
+      "code": "MDL001",
+      "layer": "frontmatter-syntax",
+      "severity": "error",
+      "message": "Front matter block is not closed",
+      "description": "The opening `---` has no matching closing `---`. Reported by the boundary scanner that runs before AST parsing, because remark-frontmatter can degrade an unclosed block to ordinary text."
+    },
+    {
+      "code": "MDL002",
+      "layer": "frontmatter-syntax",
+      "severity": "error",
+      "message": "Front matter YAML could not be parsed",
+      "description": "YAML syntax error: bad indentation, duplicate keys, tab characters, multi-document markers, or an unsafe type. Rejected by yaml.safe_load or equivalent."
+    },
+    {
+      "code": "MDL003",
+      "layer": "frontmatter-syntax",
+      "severity": "error",
+      "message": "Missing mdlineage metadata",
+      "description": "The document has no mdlineage key (or no front matter at all) while metadata.required is enabled. Suppressed entirely when metadata.required is false."
+    },
+    {
+      "code": "MDL101",
+      "layer": "schema",
+      "severity": "error",
+      "message": "Unsupported metadata schema version",
+      "description": "The `schema` field is not a supported version. Schema v1 accepts only 1."
+    },
+    {
+      "code": "MDL102",
+      "layer": "schema",
+      "severity": "error",
+      "message": "Missing required mdlineage field",
+      "description": "A required field (schema, id, kind, status, or a non-empty reason on a strong relation) is absent or empty."
+    },
+    {
+      "code": "MDL103",
+      "layer": "schema",
+      "severity": "error",
+      "message": "Invalid type, pattern, or value",
+      "description": "Field has the wrong type, fails its pattern (id, target, evidence anchor), or is outside the configured vocabulary. Vocabulary membership is read from mdlineage.config.yaml, not hard-coded in the schema."
+    },
+    {
+      "code": "MDL104",
+      "layer": "schema",
+      "severity": "error",
+      "message": "Unknown mdlineage field",
+      "description": "A key inside the mdlineage object is not part of schema v1. Detected via additionalProperties: false; catches misspelled fields suggested by models."
+    },
+    {
+      "code": "MDL201",
+      "layer": "document-semantic",
+      "severity": "warning",
+      "message": "Evidence anchor does not exist",
+      "description": "The evidence anchor does not resolve to a heading of the CURRENT document. Per docs/frontmatter-spec.md, an anchor resolving against another document is MDL402 instead."
+    },
+    {
+      "code": "MDL202",
+      "layer": "document-semantic",
+      "severity": "warning",
+      "message": "Duplicate relation",
+      "description": "The same (type, target) pair is declared more than once in one document. Duplicate declarations are a safe auto-fix candidate (deletion of the redundant entry)."
+    },
+    {
+      "code": "MDL301",
+      "layer": "workspace-semantic",
+      "severity": "error",
+      "message": "Duplicate document id",
+      "description": "The id is already claimed by another document in the repository. Cross-file, so single-document validation reports it only as a best-effort, workspace-snapshot-based diagnostic."
+    },
+    {
+      "code": "MDL302",
+      "layer": "workspace-semantic",
+      "severity": "error",
+      "message": "Relation target does not exist",
+      "description": "A relation target resolves to zero known document ids."
+    },
+    {
+      "code": "MDL303",
+      "layer": "workspace-semantic",
+      "severity": "error",
+      "message": "Ambiguous relation target",
+      "description": "Reserved: can only fire when alias or path fallback resolution is enabled in configuration. Under pure-id resolution, MDL301 guarantees uniqueness and this code never fires."
+    },
+    {
+      "code": "MDL304",
+      "layer": "workspace-semantic",
+      "severity": "warning",
+      "message": "Relation is missing a reason",
+      "description": "A relation configured with reasonRequired: true has an empty or absent reason. The structural counterpart (strong relation with no reason field at all) is caught by the JSON Schema and reported by MDL102."
+    },
+    {
+      "code": "MDL305",
+      "layer": "workspace-semantic",
+      "severity": "error",
+      "message": "Relation forms a forbidden cycle",
+      "description": "Relations of a type configured with cycles: forbidden close a loop in the derived graph."
+    },
+    {
+      "code": "MDL401",
+      "layer": "link",
+      "severity": "warning",
+      "message": "Markdown link target does not exist",
+      "description": "An ordinary Markdown link points to a path absent from the repository. Links are parsed as links_to edges in the derived layer and are not validated against relations."
+    },
+    {
+      "code": "MDL402",
+      "layer": "link",
+      "severity": "warning",
+      "message": "Markdown heading anchor does not exist",
+      "description": "An evidence anchor or link fragment resolves against another document and does not match a heading there. Cross-file anchor resolution is checked at the workspace layer."
+    },
+    {
+      "code": "MDL601",
+      "layer": "eol-scan",
+      "severity": "warning",
+      "message": "Mixed line endings within one file",
+      "description": "More than one line-ending style (LF, CRLF, CR) appears in a single file. Detected by a fast raw-buffer scan before AST parsing, so it stays exact when the Markdown below it fails to parse (docs/line-ending-management.md §4.1)."
+    },
+    {
+      "code": "MDL602",
+      "layer": "eol-scan",
+      "severity": "warning",
+      "message": "Line ending does not match repository policy",
+      "description": "The file's line endings differ from the configured policy (default LF). Fix is a safe whole-buffer normalization that preserves AST and front matter semantics."
+    }
+  ],
+  "reservedRanges": [
+    {
+      "range": "MDL5xx",
+      "layer": "policy-layout",
+      "severity": null,
+      "description": "RESERVED for repository policy, including directory layout (P4). Codes are not yet assigned: the layout DSL is blocked on the five open questions in docs/dir-conventions.md, which also decides whether layout codes live here or in a dedicated MDL7xx block."
+    },
+    {
+      "range": "MDL7xx",
+      "layer": "reserved",
+      "severity": null,
+      "description": "Fallback block for layout codes should MDL5xx crowd out other policy rules (docs/dir-conventions.md open question 6). No codes assigned."
+    },
+    {
+      "range": "MDL9xx",
+      "layer": "config",
+      "severity": "error",
+      "description": "RESERVED for configuration or internal state: unparseable mdlineage.config.yaml, a schemaFile that does not exist or fails to load, or validator-internal errors. Codes pending; severity defaults to error because integrity failures cannot be downgraded to hint (§8.2)."
+    },
+    {
+      "range": "MDL6xx",
+      "layer": "eol-scan",
+      "severity": null,
+      "description": "Extended for line-ending hygiene; encoding checks (BOM, non-UTF-8) are a named later addition to this block (docs/progress.md open issue 4) with codes still pending."
+    }
+  ]
+}

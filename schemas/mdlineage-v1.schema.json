@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdlineage.dev/schemas/mdlineage-v1.schema.json",
+  "title": "MDLineage front matter metadata v1",
+  "description": "Validates the value of the `mdlineage` key in a Markdown document's YAML front matter. The schema root IS that object, so a document's front matter is validated by applying this schema to `frontmatter['mdlineage']`. Repository-vocabulary enums (kinds/statuses/authorities) are intentionally NOT hard-coded here: constrain them by extending this schema via `mdlineage.config.yaml`'s `schemaFile` (remark-language-server-solution.md §7.2). Type-only constraints in this file produce MDL103; missing required fields produce MDL102; an unsupported `schema` version produces MDL101; unknown keys inside this object produce MDL104.\n\nAll `pattern` keywords use ECMAScript regular-expression semantics. The reference validator is ajv (remark-language-server-solution.md §6.1), which implements exactly those semantics; implementations MUST NOT substitute a regex flavour with different character-class or Unicode handling, and any pattern edge case (for example `\\S` matching non-ASCII) is defined by ajv's behaviour, not by a PCRE/Python port.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema", "id", "kind", "status"],
+  "properties": {
+    "schema": {
+      "type": "number",
+      "const": 1,
+      "description": "MDL101 — metadata schema version. Only `1` is supported in this schema."
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+      "maxLength": 128,
+      "description": "MDL102 (missing) / MDL103 (type or pattern) — stable repository-wide document identifier. The pattern above is the v1 contract default and the single source of truth for this schema: mdlineage.config.yaml has no id-pattern key precisely so that no second writable source can contradict it. A repository needing a different rule overrides this through a copy of mdlineage-v1 referenced by `schemaFile` (remark-language-server-solution.md §7.2). Uniqueness across the repository is MDL301 (workspace layer, not this schema)."
+    },
+    "kind": {
+      "type": "string",
+      "minLength": 1,
+      "description": "MDL102 (missing) / MDL103 (type or vocabulary) — repository-defined document category. Allowed values come from `vocabulary.kinds` in mdlineage.config.yaml; this schema only constrains the type so the vocabulary stays repository-local."
+    },
+    "status": {
+      "type": "string",
+      "minLength": 1,
+      "description": "MDL102 (missing) / MDL103 (type or vocabulary) — lifecycle state. Allowed values come from `vocabulary.statuses` in mdlineage.config.yaml."
+    },
+    "authority": {
+      "type": "string",
+      "minLength": 1,
+      "description": "MDL103 (type or vocabulary) — optional source-of-truth designation. Allowed values come from `vocabulary.authorities` in mdlineage.config.yaml."
+    },
+    "topics": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "MDL103 — concise human-readable concepts for filtering and discovery. Every element must be a non-empty string. Duplicates are not meaningful: validators should deduplicate on read and report MDL103-style duplicates through the deduplicating consumer; JSON Schema 2020-12 has no native uniqueness constraint, so implementers MUST additionally check `len(set(topics)) == len(topics)` (see remark-language-server-solution.md §4.3)."
+    },
+    "aliases": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "MDL103 — alternate names, abbreviations, or search terms, each a non-empty string. Unicode values (for example 中文别名) are valid. As with `topics`, implementers MUST check uniqueness outside JSON Schema: `len(set(aliases)) == len(aliases)`."
+    },
+    "relations": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/relation"
+      },
+      "description": "MDL103 — confirmed typed relationships to other stable document IDs. Edge direction is fixed per type (frontmatter-spec.md 'Initial relationship vocabulary'); reverse references are derived, never authored. Duplicate declarations of the same (type, target) pair within one document are MDL202 (single-document semantic layer)."
+    }
+  },
+  "$defs": {
+    "relation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "target"],
+      "properties": {
+        "type": {
+          "enum": [
+            "depends_on",
+            "implements",
+            "refines",
+            "supersedes",
+            "contradicts",
+            "example_of",
+            "related_to"
+          ],
+          "description": "MDL103 — relationship type from the fixed v1 vocabulary. No other type is valid; `refined_by` and other inverse forms do not exist (direction is fixed per type). Strong types (depends_on, implements, refines, supersedes, contradicts) require a non-empty `reason` — see the if/then below and `reasonRequired` in mdlineage.config.yaml."
+        },
+        "target": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+          "maxLength": 128,
+          "description": "MDL103 — the relation target, a stable document ID (never a file path). Resolution to exactly one known document is MDL302 (workspace layer). Pattern source of truth: same v1 default as `id`, overridable only via a schemaFile copy of this schema."
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "MDL304 — short explanation for the relationship. Required and non-empty for strong types per the if/then below; emptiness is also reported as MDL304 by the workspace layer."
+        },
+        "evidence": {
+          "type": "string",
+          "pattern": "^#\\S+$",
+          "maxLength": 256,
+          "description": "MDL402 — optional heading anchor in the TARGET document, written as \"#anchor\" (a leading `#` followed by one or more non-whitespace characters). Heading anchors follow GFM slug semantics and Unicode is allowed, so a Chinese anchor such as \"#缓存有效期\" is valid; only this locator form is supported in schema v1. Existence of the anchor is checked at the semantic layer: in-document anchors are MDL201, cross-file anchors are MDL402. A value with no `#`, an empty anchor, or interior whitespace is an MDL103 pattern failure at this layer."
+        }
+      },
+      "if": {
+        "properties": {
+          "type": {
+            "enum": [
+              "depends_on",
+              "implements",
+              "refines",
+              "supersedes",
+              "contradicts"
+            ]
+          }
+        },
+        "required": ["type"]
+      },
+      "then": {
+        "required": ["type", "target", "reason"]
+      }
+    }
+  }
+}

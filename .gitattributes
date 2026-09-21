@@ -1,1 +1,5 @@
 * text=auto eol=lf
+
+# EOL fixtures must keep their literal CRLF/mixed bytes through checkout
+test/fixtures/invalid/e15-mixed-eol.md -text
+test/fixtures/invalid/e16-crlf-eol.md -text

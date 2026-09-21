@@ -1,0 +1,257 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdlineage.dev/schemas/fixtures-manifest.json",
+  "description": "Acceptance contract for the MDLineage validator. Each entry pins one fixture to the deterministic diagnostic codes its front matter must produce. Codes come from schemas/diagnostic-codes.json; layers follow docs/remark-language-server-solution.md §4. Cross-file rules (MDL301 duplicate id, MDL302 unresolved target, MDL303 ambiguity, MDL401/MDL402 cross-file links/anchors) are excluded from `expectedCodes` because they are not decidable from a single document; fixtures that exist to feed them carry `workspace: true` and are validated as a set instead. Rules emitted by the raw-buffer line-ending scan (MDL601/MDL602) and by remark's own Markdown lint rules are likewise outside the schema layer, so such fixtures carry `layers: [eol-scan]` (or similar) and an empty `expectedCodes`.",
+  "fixtureRoot": "test/fixtures",
+  "entries": [
+    {
+      "path": "valid/v01-full.md",
+      "valid": true,
+      "expectedCodes": [],
+      "description": "Fully valid document: all fields, unicode alias 缓存有效期, strong relation with reason and evidence anchor."
+    },
+    {
+      "path": "valid/v02-minimal.md",
+      "valid": true,
+      "expectedCodes": [],
+      "description": "Only the four required fields; optional fields are absent."
+    },
+    {
+      "path": "valid/v03-unknown-toplevel.md",
+      "valid": true,
+      "expectedCodes": [],
+      "description": "Unknown top-level front matter fields are preserved and never diagnosed (preserveUnknownTopLevelFields)."
+    },
+    {
+      "path": "valid/v04-weak-relation-no-reason.md",
+      "valid": true,
+      "expectedCodes": [],
+      "description": "example_of is not a strong type, so reason is optional."
+    },
+    {
+      "path": "valid/v05-refines-with-evidence.md",
+      "valid": true,
+      "expectedCodes": [],
+      "description": "Strong relation with reason and evidence anchor whose target heading resolves cross-file (MDL402 only decidable at workspace layer)."
+    },
+    {
+      "path": "invalid/e01-fm-unclosed.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL001"
+      ],
+      "layers": [
+        "fm-boundary"
+      ],
+      "description": "Opening --- with no closing ---; the boundary scanner reports MDL001 before YAML parsing, so the schema layer sees no metadata and emits no schema codes."
+    },
+    {
+      "path": "invalid/e02-yaml-indent.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL002"
+      ],
+      "layers": [
+        "frontmatter-syntax"
+      ],
+      "description": "Three-space indentation breaks the YAML mapping; unparseable, so no schema code applies."
+    },
+    {
+      "path": "invalid/e03-no-mdlineage.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL003"
+      ],
+      "layers": [
+        "frontmatter-syntax"
+      ],
+      "description": "No front matter and no mdlineage key while metadata.required is true."
+    },
+    {
+      "path": "invalid/e04-unknown-mdlineage-fields.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL104"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "tpoics and relationz are unknown fields inside the mdlineage namespace (additionalProperties: false)."
+    },
+    {
+      "path": "invalid/e05-id-pattern.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL103"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "id Docs.Bad_ID fails ^[a-z0-9]+(?:[.-][a-z0-9]+)*$."
+    },
+    {
+      "path": "invalid/e06-missing-id.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL102"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "Required id is absent."
+    },
+    {
+      "path": "invalid/e07-missing-kind-status.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL102"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "kind and status both absent; one MDL102 per missing field."
+    },
+    {
+      "path": "invalid/e08-illegal-relation-type.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL103"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "refined_by is not in the v1 relation vocabulary (direction is fixed per type; inverse forms are never authored)."
+    },
+    {
+      "path": "invalid/e09-strong-relation-no-reason.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL102"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "depends_on is a strong type and reason is absent; the if/then requirement fails as MDL102, and the workspace layer would additionally report MDL304."
+    },
+    {
+      "path": "invalid/e10-duplicate-relation.md",
+      "valid": false,
+      "expectedCodes": [],
+      "layers": [
+        "document-semantic"
+      ],
+      "description": "Same (type, target) pair declared twice. Schema-valid, so the schema layer emits nothing; MDL202 comes from the single-document semantic layer."
+    },
+    {
+      "path": "invalid/e11-evidence-anchor.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL103"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "evidence lacks the required leading # (`cache-key` instead of `#cache-key`) and fails the ^#\\S+$ anchor pattern. This case is unaffected by the Unicode loosening of that pattern — the failure is the missing prefix, not the character class."
+    },
+    {
+      "path": "invalid/e12-target-format.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL103"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "Target is a file path instead of a stable id; the workspace layer would also report MDL302."
+    },
+    {
+      "path": "invalid/e13-schema-version.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL101"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "schema: 2 is unsupported; the const 1 requirement fails."
+    },
+    {
+      "path": "invalid/e14-empty-string-array.md",
+      "valid": false,
+      "expectedCodes": [
+        "MDL103"
+      ],
+      "layers": [
+        "schema"
+      ],
+      "description": "topics contains an empty string, violating the non-empty item constraint."
+    },
+    {
+      "path": "invalid/e17-evidence-anchor-missing.md",
+      "valid": false,
+      "expectedCodes": [],
+      "layers": [
+        "document-semantic"
+      ],
+      "description": "evidence #no-such-heading is well formed (schema-valid) but resolves to no heading in the current document → MDL201 at the single-document semantic layer."
+    },
+    {
+      "path": "invalid/e15-mixed-eol.md",
+      "valid": false,
+      "expectedCodes": [],
+      "layers": [
+        "eol-scan"
+      ],
+      "description": "Mixed line endings (LF then CRLF) within one file → MDL601, produced by the raw-buffer scan, not the schema layer."
+    },
+    {
+      "path": "invalid/e16-crlf-eol.md",
+      "valid": false,
+      "expectedCodes": [],
+      "layers": [
+        "eol-scan"
+      ],
+      "description": "CRLF throughout → MDL602 (policy is LF); raw-buffer scan layer only."
+    },
+    {
+      "path": "workspace/dup-id-a.md",
+      "valid": true,
+      "expectedCodes": [],
+      "workspace": true,
+      "layers": [
+        "workspace-semantic"
+      ],
+      "description": "Schema-valid on its own. As a set with dup-id-b.md it produces MDL301 (duplicate id) plus MDL302 (unresolvable target)."
+    },
+    {
+      "path": "workspace/dup-id-b.md",
+      "valid": true,
+      "expectedCodes": [],
+      "workspace": true,
+      "layers": [
+        "workspace-semantic"
+      ],
+      "description": "Second half of the MDL301 pair and the MDL302 source."
+    },
+    {
+      "path": "workspace/cycle-a.md",
+      "valid": true,
+      "expectedCodes": [],
+      "workspace": true,
+      "layers": [
+        "workspace-semantic"
+      ],
+      "description": "With cycle-b.md forms a supersedes cycle → MDL305 (cycles: forbidden)."
+    },
+    {
+      "path": "workspace/cycle-b.md",
+      "valid": true,
+      "expectedCodes": [],
+      "workspace": true,
+      "layers": [
+        "document-semantic"
+      ],
+      "description": "Closes the forbidden cycle; its own relations are schema-valid."
+    }
+  ]
+}

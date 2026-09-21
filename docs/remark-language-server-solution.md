@@ -294,9 +294,6 @@ metadata:
   preserveUnknownTopLevelFields: true
   rejectUnknownMdlineageFields: true
 
-identity:
-  pattern: '^[a-z0-9]+(?:[.-][a-z0-9]+)*$'
-
 vocabulary:
   kinds: [policy, guide, architecture, reference]
   statuses: [draft, active, deprecated]

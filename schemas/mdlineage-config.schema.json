@@ -1,0 +1,246 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://mdlineage.dev/schemas/mdlineage-config.schema.json",
+  "title": "mdlineage.config.yaml v1",
+  "description": "Validates the full mdlineage.config.yaml file (remark-language-server-solution.md §7.1). This is the authoritative, non-executable configuration that survives the later migration off the remark host. MDL9xx codes cover config parse/schema failures; diagnostic-code severity overrides use MDLxxx codes only.\n\nID and relation-target patterns are NOT configurable here: the single source of truth for schema v1 is schemas/mdlineage-v1.schema.json. There is deliberately no `identity.pattern` key, because a second writable pattern source could drift out of sync with the schema while both still look authoritative. A repository that needs a different id/target rule overrides the pattern through a copy of mdlineage-v1 referenced by `schemaFile` (§7.2), which stays a single truth source by construction.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["configVersion"],
+  "properties": {
+    "configVersion": {
+      "type": "number",
+      "const": 1,
+      "description": "MDL9xx — configuration schema version. Only `1` is supported."
+    },
+    "files": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Globs of files to validate. Default `['**/*.md']`."
+        },
+        "exclude": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Globs to skip. Defaults to `['node_modules/**', 'dist/**', 'vendor/**']`."
+        }
+      },
+      "description": "File discovery scope for CLI and workspace indexing."
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "default": "mdlineage",
+          "description": "Front matter key holding MDLineage metadata."
+        },
+        "required": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, a document without MDLineage metadata reports MDL003."
+        },
+        "preserveUnknownTopLevelFields": {
+          "type": "boolean",
+          "default": true,
+          "description": "Keep unknown front matter top-level fields written by other tools (frontmatter-spec.md rule 8)."
+        },
+        "rejectUnknownMdlineageFields": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true, unknown keys inside the mdlineage object report MDL104 (see mdlineage-v1.schema.json's additionalProperties: false)."
+        }
+      },
+      "description": "Front matter extraction behaviour."
+    },
+    "vocabulary": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "kinds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Allowed `kind` values; unconstrained in mdlineage-v1.schema.json by design."
+        },
+        "statuses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Allowed `status` values."
+        },
+        "authorities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Allowed `authority` values."
+        }
+      },
+      "description": "Repository-local enumerables. These are the ONLY source of kind/status/authority validity — the JSON Schema deliberately only checks types."
+    },
+    "relations": {
+      "type": "object",
+      "propertyNames": {
+        "enum": [
+          "depends_on",
+          "implements",
+          "refines",
+          "supersedes",
+          "contradicts",
+          "example_of",
+          "related_to"
+        ],
+        "description": "Keys must be known relation types from the fixed v1 vocabulary (docs/frontmatter-spec.md). A misspelled key such as `dependsonn` is reported with MDL103 semantics: it is not a vocabulary member, exactly like an unknown relation type in front matter. Direction is never a key here — see the parent description."
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "impact": {
+            "type": "boolean",
+            "description": "Whether this type drives change-impact analysis."
+          },
+          "reasonRequired": {
+            "type": "boolean",
+            "description": "Require a non-empty `reason`; structural enforcement lives in mdlineage-v1.schema.json, the workspace-level semantic code is MDL304."
+          },
+          "selfReference": {
+            "enum": ["allowed", "forbidden"],
+            "description": "Whether a relation may target the same document's own id."
+          },
+          "cycles": {
+            "enum": ["allowed", "forbidden"],
+            "description": "Whether relations of this type may form a cycle; MDL305 reports a forbidden cycle."
+          },
+          "severity": {
+            "enum": ["error", "warning", "information", "hint"],
+            "description": "Per-type severity override (remark channels collapse information/hint to warning; see remark-language-server-solution.md §9.1)."
+          }
+        }
+      },
+      "description": "Per-type validation switches keyed by relation type. Relation DIRECTION is not and will not be configurable here: it is fixed per type by the vocabulary in docs/frontmatter-spec.md (decision log, progress.md)."
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": {
+        "enum": ["error", "warning", "information", "hint"]
+      },
+      "propertyNames": {
+        "enum": [
+          "MDL001", "MDL002", "MDL003",
+          "MDL101", "MDL102", "MDL103", "MDL104",
+          "MDL201", "MDL202",
+          "MDL301", "MDL302", "MDL303", "MDL304", "MDL305",
+          "MDL401", "MDL402",
+          "MDL601", "MDL602"
+        ],
+        "description": "Only codes registered in schemas/diagnostic-codes.json may carry a severity override. An unknown code such as MDL999 is rejected with MDL9xx semantics (the configuration references a diagnostic that does not exist). Reserved ranges (MDL5xx layout, MDL7xx fallback, MDL9xx config) have no assigned codes yet and are therefore not overridable yet."
+      },
+      "description": "Severity overrides keyed by diagnostic code, for example `{MDL301: error, MDL304: warning}`."
+    },
+    "schemaFile": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to a schema extending mdlineage-v1 for repository-specific fields (remark-language-server-solution.md §7.2). Referencing a non-existent or unparseable file is an MDL9xx config error; remote schemas are never fetched."
+    },
+    "extends": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Organization presets to inherit (remark-language-server-solution.md §7.5)."
+    },
+    "layout": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["match"],
+        "properties": {
+          "match": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Glob selecting the files this rule applies to."
+          },
+          "require": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  }
+                ],
+                "description": "Required kind(s)."
+              },
+              "authority": {
+                "oneOf": [
+                  {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string",
+                      "minLength": 1
+                    },
+                    "minItems": 1
+                  }
+                ],
+                "description": "Required authority value(s)."
+              },
+              "frontmatter": {
+                "enum": ["required", "optional"],
+                "description": "Whether front matter is required for files matching this rule."
+              }
+            }
+          },
+          "forbidStatus": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "minItems": 1,
+            "description": "Status values that must not appear under this path."
+          }
+        }
+      },
+      "description": "RESERVED for P4 (directory conventions). Skeleton only — match/require/forbidStatus. Layout checks are NOT implemented in M0 and produce no diagnostics yet; the final shape is blocked on the five open questions in docs/dir-conventions.md, and the diagnostic codes will land in the reserved MDL5xx block."
+    },
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "RESERVED for P4/M4. Declarative repository policy rules (remark-language-server-solution.md §7.3) are intentionally left empty here: the DSL (when/relation/require/forbid) is still design-in-progress and its keys must not be validated prematurely."
+    }
+  }
+}
