@@ -8,9 +8,8 @@
       "path": "valid/v01-full.md",
       "valid": true,
       "expectedCodes": [],
-      "description": "Fully valid document: all fields, unicode alias 缓存有效期, strong relation with reason and evidence anchor."
-    },
-    {
+      "description": "Fully valid document: all fields, unicode alias 缓存有效期, strong relation with reason and evidence anchor. Its depends_on target resolves once valid/v06-authentication-model.md joins the index."
+    },    {
       "path": "valid/v02-minimal.md",
       "valid": true,
       "expectedCodes": [],
@@ -32,7 +31,13 @@
       "path": "valid/v05-refines-with-evidence.md",
       "valid": true,
       "expectedCodes": [],
-      "description": "Strong relation with reason and evidence anchor whose target heading resolves cross-file (MDL402 only decidable at workspace layer)."
+      "description": "Strong relation with reason and evidence anchor that resolves in both the source document and the target it names (MDL402 only decidable at workspace layer)."
+    },
+    {
+      "path": "valid/v06-authentication-model.md",
+      "valid": true,
+      "expectedCodes": [],
+      "description": "Relation-free reference document; gives valid/v01-full.md's depends_on target an id to resolve against in the full-repository index, and carries the heading its evidence anchor names."
     },
     {
       "path": "invalid/e01-fm-unclosed.md",

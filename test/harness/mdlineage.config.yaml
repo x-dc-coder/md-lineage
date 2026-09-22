@@ -1,0 +1,17 @@
+# mdlineage.config.yaml used by the package test harnesses.
+#
+# The repository root ships its own mdlineage.config.yaml (progressive
+# adoption: metadata is not required yet), and the validator's implicit lookup
+# walks up from the CWD, so a harness that runs from the repo root would
+# otherwise validate against that file instead of the defaults the manifest
+# contract pins. Pointing both the reference validator and the channel at this
+# one explicit file keeps the comparison about the channel, not about which
+# config each side happened to find.
+#
+# The defaults, written out: any change here must be mirrored in
+# packages/validator/src/config.ts `defaultConfig()`.
+
+configVersion: 1
+
+metadata:
+  required: true

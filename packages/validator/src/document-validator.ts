@@ -87,8 +87,15 @@ export function validateDocumentSemantics(
   return out;
 }
 
-/** GFM anchors of every heading in the document, duplicates suffixed. */
-function collectAnchors(tree: Root): Set<string> {
+/**
+ * GFM anchors of every heading in the document, duplicates suffixed.
+ *
+ * Shared with the workspace layer, which needs the same anchor set of a target
+ * document to decide MDL402 (evidence resolving cross-file). Keeping one
+ * implementation means an `evidence` value that resolves in-document can never
+ * disagree with the same value resolved against another document.
+ */
+export function collectAnchors(tree: Root): Set<string> {
   const slugger = new Slugger();
   visit(tree, (node) => {
     if (node.type === 'heading') {
@@ -98,14 +105,19 @@ function collectAnchors(tree: Root): Set<string> {
   return slugger.anchors();
 }
 
-/** Visit every node in an mdast tree. */
-function visit(node: unknown, fn: (node: { type: string }) => void): void {
+/** Visit every node in an mdast tree; shared with the workspace link scan. */
+export function visitTree(node: unknown, fn: (node: { type: string }) => void): void {
   if (!node || typeof node !== 'object') return;
   fn(node as { type: string });
   const children = (node as { children?: unknown[] }).children;
   if (Array.isArray(children)) {
-    for (const child of children) visit(child, fn);
+    for (const child of children) visitTree(child, fn);
   }
+}
+
+/** Visit every node in an mdast tree. */
+function visit(node: unknown, fn: (node: { type: string }) => void): void {
+  visitTree(node, fn);
 }
 
 /** Concatenated text of a heading, matching how GFM renders it to an anchor. */
@@ -226,4 +238,36 @@ function rangeStart(node: unknown): number | undefined {
   if (!node || typeof node !== 'object') return undefined;
   const range = (node as { range?: readonly [number, number, number] }).range;
   return range ? range[0] : undefined;
+}
+
+/**
+ * Offset of a scalar field of the mdlineage object (`id`, `kind`, …) inside
+ * the front matter slice, or null when the field or its source is absent.
+ *
+ * The workspace layer uses this for MDL301, which must point at the duplicate
+ * id rather than at line 1. The value is relative to `raw`, exactly like the
+ * `RelationOffsets` accessors, so the caller adds `rawStart`.
+ */
+export function mdlineageFieldOffset(doc: unknown, field: string): number | null {
+  const value = mdlineageValueOf(doc);
+  if (!value) return null;
+  const items = value.items;
+  if (!Array.isArray(items)) return null;
+  const pair = items.find((p) => keyValue(p) === field);
+  if (!pair) return null;
+  return rangeStart((pair as { value?: unknown }).value) ?? rangeStart(pair) ?? null;
+}
+
+/** The CST mapping under the `mdlineage` key, when the document has one. */
+function mdlineageValueOf(doc: unknown): { items: unknown[] } | null {
+  if (!doc || typeof doc !== 'object') return null;
+  const root = (doc as { contents?: unknown }).contents;
+  if (!root || typeof root !== 'object') return null;
+  const items = (root as { items?: unknown[] }).items;
+  if (!Array.isArray(items)) return null;
+  const pair = items.find((p) => keyValue(p) === 'mdlineage');
+  const value = (pair as { value?: unknown } | undefined)?.value;
+  if (!value || typeof value !== 'object') return null;
+  const inner = (value as { items?: unknown[] }).items;
+  return Array.isArray(inner) ? { items: inner } : null;
 }

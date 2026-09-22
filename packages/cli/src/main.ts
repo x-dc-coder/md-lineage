@@ -1,46 +1,71 @@
 #!/usr/bin/env node
 /**
- * `mdlineage` command line entry (docs/remark-language-server-solution.md §6.4).
+ * `mdlineage` command line entry (docs/remark-language-server-solution.md §6.4,
+ * §16 M2).
  *
  * Deliberately dependency-light: argument parsing is `node:util` parseArgs,
  * path expansion is glob, and every rule decision comes from
- * @mdlineage/validator, so the CLI and the remark channel cannot drift apart.
+ * @mdlineage/validator, so the CLI, the remark channel and (later) the LSP
+ * cannot drift apart.
+ *
+ * Commands:
+ *   check     the authoritative repository validation (workspace + single doc)
+ *   baseline  accepted-debt management for legacy repositories
  *
  * Exit codes: 0 when no error-severity diagnostic is found (warnings are
- * reported but pass), 1 when any error is found — including a file that could
- * not be read or a `--config` path that does not exist — and 2 on a usage
- * error. Making warnings fail is left to CI scripting, per the `--frail`
- * decision in §6.4.
+ * reported but pass; `--frail` makes any diagnostic fail), 1 when any error is
+ * found — including a file that could not be read or a `--config` path that
+ * does not exist — and 2 on a usage error.
  */
 
 import { parseArgs } from 'node:util';
 import { cwd as processCwd } from 'node:process';
 import { relative } from 'node:path';
-import { checkFiles, renderText, renderJson, exitCodeFor, type CheckResult } from './check.js';
+import {
+  checkFiles,
+  renderText,
+  renderJson,
+  exitCodeFor,
+  type CheckResult,
+  type CheckOptions,
+} from './check.js';
+import { renderSarif } from './sarif.js';
 import { expandMarkdownPaths, type ExpandedPath } from './paths.js';
 import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from './git.js';
+import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verifyBaseline, baselineRoot, BASELINE_FILE } from './baseline.js';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
 
 Usage:
-  mdlineage check [paths...]        Validate Markdown files (default: the CWD)
+  mdlineage check [paths...]        Validate Markdown (default: the CWD)
   mdlineage check --changed         Validate files git status reports as changed
+  mdlineage baseline update         Record current violations as accepted debt
+  mdlineage baseline show           List the committed baseline
+  mdlineage baseline verify         CI gate: diagnostics must match the baseline
 
 Options:
-  --format <text|json>   Output shape (default: text)
-  --config <path>        Path to mdlineage.config.yaml (default: searched for)
-  --changed              Restrict the run to changed worktree files
-  --no-untracked         With --changed: skip files git does not track yet
-  --exclude <pattern>    Extra ignore pattern (repeatable)
-  --help, -h             Show this text
-  --version, -v          Print the version
+  --format <text|json|sarif>  Output shape (default: text)
+  --config <path>             Path to mdlineage.config.yaml (default: searched for)
+  --changed                   Restrict the run to changed worktree files
+  --no-untracked              With --changed: skip files git does not track yet
+  --exclude <pattern>         Extra ignore pattern (repeatable)
+  --no-incremental            Validate each file independently (no workspace pass)
+  --no-baseline               Ignore the committed baseline (report accepted debt)
+  --force                     baseline update: write despite an unreadable baseline
+  --report-only               baseline update: print the change set, write nothing
+  --frail                     Any diagnostic fails the run, warnings included
+  --help, -h                  Show this text
+  --version, -v               Print the version
 
 Exit codes:
   0  no error-severity diagnostics
   1  at least one error: a diagnostic, an unreadable file, or a bad --config
+     (--frail: any diagnostic at all)
   2  usage error`;
 
 const VERSION = 'mdlineage 0.0.0';
+
+type Format = 'text' | 'json' | 'sarif';
 
 interface ParsedArgs {
   positionals: string[];
@@ -51,10 +76,18 @@ interface ParsedArgs {
     untracked?: boolean;
     'no-untracked'?: boolean;
     exclude?: string[];
+    incremental?: boolean;
+    'no-incremental'?: boolean;
+    'no-baseline'?: boolean;
+    frail?: boolean;
+    force?: boolean;
+    'report-only'?: boolean;
     help?: boolean;
     version?: boolean;
   };
 }
+
+const FORMATS: readonly Format[] = ['text', 'json', 'sarif'];
 
 /** parseArgs with the options this CLI understands. */
 function readArgs(argv: string[]): ParsedArgs {
@@ -70,6 +103,13 @@ function readArgs(argv: string[]): ParsedArgs {
       untracked: { type: 'boolean' },
       'no-untracked': { type: 'boolean' },
       exclude: { type: 'string', multiple: true },
+      // `--no-incremental` arrives as `--incremental=false` the same way.
+      incremental: { type: 'boolean' },
+      'no-incremental': { type: 'boolean' },
+      frail: { type: 'boolean' },
+      force: { type: 'boolean' },
+      'no-baseline': { type: 'boolean' },
+      'report-only': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -94,14 +134,29 @@ export async function main(argv: string[]): Promise<number> {
     process.stderr.write(`mdlineage: no command given\n\n${HELP}\n`);
     return 2;
   }
+
+  if (command === 'baseline') {
+    return runBaseline(parsed.positionals.slice(1), parsed.values);
+  }
   if (command !== 'check') {
     process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
     return 2;
   }
 
-  const format = parsed.values.format ?? 'text';
-  if (format !== 'text' && format !== 'json') {
-    process.stderr.write(`mdlineage: --format must be 'text' or 'json', got '${format}'\n`);
+  const format = parseFormat(parsed.values.format);
+  if (format === null) {
+    process.stderr.write(
+      `mdlineage: --format must be one of ${FORMATS.join(', ')}, got '${parsed.values.format}'\n`,
+    );
+    return 2;
+  }
+
+  // An argument the options list does not recognise lands in `positionals` as
+  // a path; a leading dash names an option the CLI does not have, which is a
+  // usage error rather than a file to look for.
+  const stray = parsed.positionals.slice(1).filter((arg) => arg.startsWith('-'));
+  if (stray.length > 0) {
+    process.stderr.write(`mdlineage: unknown option: ${stray.join(', ')}\n\n${HELP}\n`);
     return 2;
   }
 
@@ -109,22 +164,38 @@ export async function main(argv: string[]): Promise<number> {
   const paths = parsed.positionals.slice(1);
   const exclude = parsed.values.exclude ?? [];
   const config = parsed.values.config;
+  const frail = parsed.values.frail === true;
+  // `--incremental` is on by default; `--no-incremental` (or
+  // `--incremental=false`) turns the workspace pass off.
+  const incremental = parsed.values['no-incremental'] !== true && parsed.values.incremental !== false;
+  // A committed baseline is part of the repository's contract; `--no-baseline`
+  // is the audit view that reports the debt it accepts.
+  const noBaseline = parsed.values['no-baseline'] === true;
 
   if (parsed.values.changed) {
     // `--untracked` defaults on; `--no-untracked` (or `--untracked=false`)
     // turns it off.
     const untracked = parsed.values['no-untracked'] !== true && parsed.values.untracked !== false;
-    return runChanged({ format, cwd, paths, exclude, config, untracked });
+    return runChanged({ format, cwd, paths, exclude, config, untracked, incremental, frail, noBaseline });
   }
-  return runPaths({ format, cwd, paths, exclude, config });
+  return runPaths({ format, cwd, paths, exclude, config, incremental, frail, noBaseline });
+}
+
+/** Validate a --format argument, returning null when it is not one this CLI has. */
+function parseFormat(value: string | undefined): Format | null {
+  if (value === undefined) return 'text';
+  return (FORMATS as readonly string[]).includes(value) ? (value as Format) : null;
 }
 
 interface RunOptions {
-  format: 'text' | 'json';
+  format: Format;
   cwd: string;
   paths: string[];
   exclude: string[];
   config?: string;
+  incremental: boolean;
+  frail: boolean;
+  noBaseline: boolean;
 }
 
 interface ChangedRunOptions extends RunOptions {
@@ -133,7 +204,7 @@ interface ChangedRunOptions extends RunOptions {
 
 /** `mdlineage check [paths...]`: expand, read, validate, report. */
 function runPaths(options: RunOptions): number {
-  const { files, missed } = expandMarkdownPaths(
+  const { files, missed, excluded } = expandMarkdownPaths(
     options.paths.length === 0 ? ['.'] : options.paths,
     options.cwd,
     { exclude: options.exclude },
@@ -143,9 +214,30 @@ function runPaths(options: RunOptions): number {
     for (const path of missed) process.stderr.write(`mdlineage: no such file or pattern: ${path}\n`);
     return 2;
   }
+  for (const path of excluded) {
+    process.stderr.write(
+      `mdlineage: ${path} matches the default exclude list (node_modules, dist); no files were checked\n`,
+    );
+  }
 
-  const result = checkFiles(files, { format: options.format, configFile: options.config, cwd: options.cwd });
-  return emit(result, options.format);
+  const result = checkFiles(files, toCheckOptions(options));
+  return emit(result, options);
+}
+
+function toCheckOptions(options: RunOptions): CheckOptions {
+  return {
+    format: options.format,
+    configFile: options.config,
+    // The baseline is anchored to the repository root, not the CWD, so a CI job
+    // whose working directory is a subdirectory hits the same exemptions a root
+    // run does (and a scoped run's report paths stay the caller's own spelling).
+    baselineRoot: baselineRoot(options.cwd),
+    noBaseline: options.noBaseline,
+    incremental: options.incremental,
+    frail: options.frail,
+    cwd: options.cwd,
+    exclude: options.exclude,
+  };
 }
 
 /** `mdlineage check --changed`: the worktree-byte channel. */
@@ -166,7 +258,7 @@ function runChanged(options: ChangedRunOptions): number {
 
   if (paths.length === 0) {
     // Nothing changed, or only deletions (a deleted file has no worktree bytes;
-    // its readers are the workspace layer's concern, M2).
+    // its readers are the workspace layer's concern in a full run).
     process.stdout.write(
       `mdlineage: no changed Markdown files${skipped ? ` (${skipped} deletion${skipped === 1 ? '' : 's'} skipped)` : ''}\n`,
     );
@@ -180,27 +272,94 @@ function runChanged(options: ChangedRunOptions): number {
     }
   }
 
-  const result = checkFiles(files, { format: options.format, configFile: options.config, cwd: options.cwd });
-  return emit(result, options.format);
+  const result = checkFiles(files, toCheckOptions(options));
+  return emit(result, options);
 }
 
 /**
  * Write the report in the requested shape and map it to an exit code.
  *
- * Config diagnostics go to stderr in both formats: they are about the run, not
- * about the documents, and a JSON consumer reading stdout should not have to
- * separate the two streams of the report.
+ * Config diagnostics go to stderr in every format: they are about the run, not
+ * about the documents, and a JSON/SARIF consumer reading stdout should not have
+ * to separate the two streams of the report.
  */
-function emit(result: CheckResult, format: 'text' | 'json'): number {
+function emit(result: CheckResult, options: RunOptions): number {
   for (const diag of result.configDiagnostics) {
     process.stderr.write(`mdlineage: ${diag.code} ${diag.severity} ${diag.message}\n`);
   }
   for (const file of result.unreadable) {
-    if (format === 'json') process.stderr.write(`mdlineage: could not read ${file.path}: ${file.message}\n`);
+    if (options.format !== 'text') {
+      process.stderr.write(`mdlineage: could not read ${file.path}: ${file.message}\n`);
+    }
   }
-  const output = format === 'json' ? renderJson(result) : renderText(result);
+  const output =
+    options.format === 'json'
+      ? renderJson(result)
+      : options.format === 'sarif'
+        ? renderSarif(result)
+        : renderText(result);
   if (output.length > 0) process.stdout.write(`${output}\n`);
-  return exitCodeFor(result);
+  return exitCodeFor(result, { frail: options.frail });
+}
+/**
+ * `mdlineage baseline <action>`: accepted-debt management.
+ *
+ * Every action works off the full workspace, never `--changed`: the baseline is
+ * the repository's contract, and a contract written from a subset would
+ * silently exempt everything the subset did not visit.
+ */
+function runBaseline(args: string[], values: ParsedArgs['values']): number {
+  const action = args[0];
+  // The baseline is a repository-level contract, so every action anchors at the
+  // repository root instead of the CWD: `verify` from a subdirectory must check
+  // the same graph the root sees, and `update` must write keys a root run would
+  // match. Outside a git repository the CWD stands in.
+  const root = baselineRoot(processCwd());
+  const options = {
+    configFile: values.config,
+    exclude: values.exclude ?? [],
+    reportOnly: values['report-only'] === true,
+    force: values.force === true,
+  };
+
+  if (action === 'update') {
+    const change = updateBaseline(root, options);
+    if (change.error) {
+      // A baseline the run could not read is reported, and the file is left
+      // alone: overwriting it would discard accepted exemptions with no way back.
+      process.stderr.write(`mdlineage: ${change.error}\n`);
+      if (!options.force) return 1;
+    }
+    const lines = describeChangeSet(change);
+    if (lines.length === 0) {
+      process.stdout.write(`mdlineage: ${BASELINE_FILE} is already up to date\n`);
+      return 0;
+    }
+    if (options.reportOnly) {
+      process.stdout.write(`${lines.join('\n')}\n`);
+      process.stdout.write(`mdlineage: would update ${change.path} (${lines.length} change${lines.length === 1 ? '' : 's'}; --report-only)\n`);
+      return 0;
+    }
+    writeChangeSet(change, false);
+    process.stdout.write(`${lines.join('\n')}\n`);
+    process.stdout.write(`mdlineage: updated ${change.path}\n`);
+    return 0;
+  }
+
+  if (action === 'show') {
+    const { lines, error } = showBaseline(root);
+    for (const line of lines) process.stdout.write(`${line}\n`);
+    return error ? 1 : 0;
+  }
+
+  if (action === 'verify') {
+    const { exit, lines } = verifyBaseline(root, options);
+    for (const line of lines) process.stdout.write(`${line}\n`);
+    return exit;
+  }
+
+  process.stderr.write(`mdlineage: unknown baseline action '${action ?? ''}'\n\n${HELP}\n`);
+  return 2;
 }
 
 main(process.argv.slice(2)).then((code) => {

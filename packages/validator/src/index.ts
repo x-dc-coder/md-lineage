@@ -38,9 +38,31 @@ export { scanLineEndings, validateLineEndings } from './line-endings.js';
 export { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
 export { parseMarkdown, parseMarkdownSync } from './parse-markdown.js';
 export { getSchemaValidator, validateAgainstSchema, resolveErrorRange } from './schema-validator.js';
-export { validateDocumentSemantics, relationOffsetsOf } from './document-validator.js';
+export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset } from './document-validator.js';
 export { Slugger, slugifyHeading } from './slugger.js';
 export type { ValidateInput, ValidateResult } from './index-types.js';
+export type { WorkspaceIndex, DocEntry, DocPath, RelationEntry, LinkEntry, UpdateResult } from './workspace-index.js';
+export {
+  createWorkspaceIndex,
+  updateFile,
+  removeFile,
+  updateFiles,
+  resolveLinkPath,
+  evidenceResolves,
+} from './workspace-index.js';
+export type { WorkspaceDiagnostic, ValidateWorkspaceOptions } from './workspace-validator.js';
+export { validateWorkspace } from './workspace-validator.js';
+export type { Baseline, BaselineParseResult, BaselineSuppressed } from './baseline.js';
+export {
+  BASELINE_FILE_NAME,
+  BASELINE_VERSION,
+  parseBaseline,
+  baselineMatches,
+  suppressWithBaseline,
+  diffAgainstBaseline,
+  writeBaseline,
+  pruneBaseline,
+} from './baseline.js';
 
 /** The signature every adapter calls. Kept re-exported for the M2 CLI/LSP. */
 export type { BoundaryScan, ParsedFrontmatter } from './parse-frontmatter.js';

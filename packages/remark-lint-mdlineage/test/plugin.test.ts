@@ -26,6 +26,7 @@ import { VFile } from 'vfile';
 
 import remarkLintMdlineage from '../src/index.js';
 import { validateDocumentSync } from '@mdlineage/validator';
+import { loadConfig, type Config } from '@mdlineage/validator';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const fixtureRoot = resolve(repoRoot, 'test', 'fixtures');
@@ -86,7 +87,7 @@ function lintDocument(content: string, path?: string): VFile {
     .use(remarkGfm)
     .use(remarkFrontmatter, ['yaml'])
     .use(remarkLint)
-    .use(remarkLintMdlineage)
+    .use(remarkLintMdlineage, { configFile: HARNESS_CONFIG })
     // `unified-lint-rule` overwrites `fatal` with the rule's remark severity
     // after the rule runs; this puts the validator's severity back.
     .use(remarkLintMdlineage.restoreSeverity)
@@ -94,18 +95,42 @@ function lintDocument(content: string, path?: string): VFile {
   return processor.processSync(path ? { path, value: content } : { value: content });
 }
 
+/**
+ * The config this harness runs with, and the option that makes the channel use
+ * the same one.
+ *
+ * The repository ships a mdlineage.config.yaml (progressive adoption:
+ * `metadata.required: false`), and the plugin's implicit lookup walks the CWD,
+ * so a harness that runs from the repo root would otherwise validate against a
+ * config the manifest contract does not describe. Pointing both entries at one
+ * explicit file keeps the comparison about the channel, not about which config
+ * each side happened to find.
+ */
+const HARNESS_CONFIG = resolve(repoRoot, 'test', 'harness', 'mdlineage.config.yaml');
+
+function harnessConfig(): Config {
+  const result = loadConfig(HARNESS_CONFIG);
+  assert.equal(result.diagnostics.length, 0, 'the harness config must load cleanly');
+  return result.config;
+}
+
 /** MDL codes carried on the messages, in document order. */
 function mdlCodes(file: VFile): string[] {
   return file.messages.map((m) => (m as { code?: string }).code).filter((c): c is string => typeof c === 'string');
 }
 
-describe('remark channel — manifest contract (26 fixtures)', () => {
+describe('remark channel — manifest contract (27 fixtures)', () => {
   for (const entry of manifest.entries) {
     it(`${entry.path} — ${entry.description}`, () => {
       const content = readFileSync(resolve(fixtureRoot, entry.path), 'utf8');
 
-      // The reference: the validator, on the same bytes.
-      const direct = validateDocumentSync({ path: entry.path, content });
+      // The reference: the validator, on the same bytes and the same config the
+      // channel resolves. The harness's config is passed explicitly because the
+      // plugin's implicit lookup walks the CWD, which finds this repository's
+      // own mdlineage.config.yaml (metadata.required: false) instead of the
+      // defaults the manifest contract pins.
+      const config = harnessConfig();
+      const direct = validateDocumentSync({ path: entry.path, content, config });
       const directCodes = direct.diagnostics.map((d) => d.code).filter((c) => SINGLE_DOCUMENT_CODES.has(c));
 
       // The channel: the remark plugin, on the same bytes.

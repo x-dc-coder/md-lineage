@@ -371,10 +371,60 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string): Conf
       statuses: Array.isArray(vocabulary.statuses) ? (vocabulary.statuses as string[]) : base.vocabulary.statuses,
       authorities: Array.isArray(vocabulary.authorities) ? (vocabulary.authorities as string[]) : base.vocabulary.authorities,
     },
-    relations: relations as Record<string, RelationSwitch>,
-    diagnostics: diagnostics as Config['diagnostics'],
+    relations: mergeRelationSwitches(relations, base.relations),
+    diagnostics: mergeDiagnostics(diagnostics, base.diagnostics),
     raw,
   };
+}
+
+/**
+ * Overlay a config file's `relations` block on the built-in defaults.
+ *
+ * A type the file says nothing about keeps its default switches: the vocabulary
+ * in docs/frontmatter-spec.md defines all seven types, and the schema only
+ * permits those keys, so a partial `relations` block means "the rest stay as
+ * shipped", not "the rest are unconfigured". Dropping them would silently
+ * disable MDL304/MDL305 for every type the file omitted — a config that turns
+ * off cycle detection by saying nothing about it.
+ *
+ * A type the file DOES name is taken in full: the file's entry is authoritative
+ * for that type, so `overrides` replaces rather than merges.
+ */
+function mergeRelationSwitches(
+  raw: Record<string, unknown>,
+  defaults: Readonly<Record<string, RelationSwitch>>,
+): Record<string, RelationSwitch> {
+  const out: Record<string, RelationSwitch> = { ...defaults };
+  for (const [type, overrides] of Object.entries(raw)) {
+    if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) continue;
+    out[type] = { ...(overrides as Record<string, unknown>) } as unknown as RelationSwitch;
+  }
+  return out;
+}
+
+/**
+ * Overlay a config file's `diagnostics` block on the built-in defaults.
+ *
+ * The schema permits only registered codes as keys and only the four severities
+ * as values, so an entry that reaches `normalize` is already schema-valid; it
+ * overrides that code's severity and every other code keeps its default.
+ */
+function mergeDiagnostics(
+  raw: Record<string, unknown>,
+  defaults: Readonly<Record<string, 'error' | 'warning' | 'information' | 'hint'>>,
+): Config['diagnostics'] {
+  const out: Record<string, 'error' | 'warning' | 'information' | 'hint'> = { ...defaults };
+  for (const [code, severity] of Object.entries(raw)) {
+    if (
+      severity === 'error' ||
+      severity === 'warning' ||
+      severity === 'information' ||
+      severity === 'hint'
+    ) {
+      out[code] = severity;
+    }
+  }
+  return out;
 }
 
 /** Pure helper: apply a config's severity overrides to a diagnostic code. */

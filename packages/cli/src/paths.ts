@@ -30,15 +30,22 @@ export interface ExpandedPath {
  * Turn command-line arguments into a de-duplicated, sorted list of Markdown
  * files. A path that does not exist and matches no glob is reported back, so
  * the caller can fail loudly instead of silently validating nothing.
+ *
+ * `excluded` names the arguments the caller asked for explicitly that the
+ * default ignore rules swallowed whole (an argument naming only `node_modules`
+ * or `dist` files): `missed` cannot carry those, because the files DO exist —
+ * reporting them as missing would be wrong, and validating them would be
+ * surprising, so the caller explains on stderr instead.
  */
 export function expandMarkdownPaths(
   args: readonly string[],
   cwd: string,
   options: ExpandOptions = {},
-): { files: ExpandedPath[]; missed: string[] } {
+): { files: ExpandedPath[]; missed: string[]; excluded: string[] } {
   const ignore = [...DEFAULT_EXCLUDE, ...(options.exclude ?? [])];
   const found = new Map<string, ExpandedPath>();
   const missed: string[] = [];
+  const excluded: string[] = [];
 
   for (const arg of args) {
     const absolute = resolve(cwd, arg);
@@ -49,7 +56,12 @@ export function expandMarkdownPaths(
       // Not a filesystem object: treat it as a glob pattern.
       const matched = globSync([arg], { cwd, ignore, nodir: true, mark: true });
       if (matched.length === 0) {
-        missed.push(arg);
+        // A pattern that matched nothing because it named only ignored paths is
+        // worth explaining: the files exist, the ignore rules are why they are
+        // absent, and `missed` would say something untrue about them.
+        const unfiltered = globSync([arg], { cwd, nodir: true, mark: true });
+        if (unfiltered.length > 0) excluded.push(arg);
+        else missed.push(arg);
         continue;
       }
       for (const hit of matched) add(found, resolve(cwd, hit), arg, cwd);
@@ -61,15 +73,24 @@ export function expandMarkdownPaths(
       const pattern = `${absolute.split(sep).join('/')}/**/*.md`;
       const matched = globSync([pattern], { cwd, ignore, nodir: true, mark: true });
       for (const hit of matched) add(found, resolve(cwd, hit), arg, cwd);
-      // An empty directory is not an error; it simply has nothing to check.
+      // An empty directory is not an error; it simply has nothing to check. A
+      // directory whose Markdown is entirely ignored is the same situation with
+      // a different explanation, so it is reported rather than passing silently.
+      if (matched.length === 0) {
+        const unfiltered = globSync([pattern], { cwd, nodir: true, mark: true });
+        if (unfiltered.length > 0) excluded.push(arg);
+      }
       continue;
     }
 
+    // An explicitly named file bypasses the ignore list the way `--exclude`
+    // patterns do not: naming a path is an override. (A file INSIDE an ignored
+    // directory is still excluded, which the directory branch above reports.)
     add(found, absolute, arg, cwd);
   }
 
   const files = [...found.values()].sort((a, b) => a.path.localeCompare(b.path));
-  return { files, missed };
+  return { files, missed, excluded };
 }
 
 /** Insert one file, keeping the first `asGiven` for stable reporting. */

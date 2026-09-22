@@ -289,6 +289,25 @@ describe('config defaults', () => {
     assert.equal(defaultConfigIsValid(), true);
   });
 
+  it('this repository\'s mdlineage.config.yaml validates against the config schema', () => {
+    // Progressive adoption: the shipped config turns metadata off, so the
+    // docs tree's lack of front matter is not an error. It must still be a
+    // schema-valid config file, because an invalid one falls back to the
+    // defaults — which would silently re-enable MDL003 repository-wide.
+    const result = loadConfigFrom(resolve(repoRoot, 'mdlineage.config.yaml'));
+    assert.deepEqual(result.diagnostics, [], 'the repository config loads cleanly');
+    assert.equal(result.config.configVersion, 1);
+    assert.equal(result.config.metadata.required, false, 'metadata is not required yet');
+    assert.equal(result.config.source, resolve(repoRoot, 'mdlineage.config.yaml'));
+    // The config omits `relations` and `diagnostics`, so the defaults must
+    // survive: MDL305 (supersedes cycles) and the MDL301/MDL304 severities
+    // are what the workspace layer's fixture contract depends on.
+    assert.equal(result.config.relations['supersedes']?.cycles, 'forbidden');
+    assert.equal(result.config.relations['depends_on']?.reasonRequired, true);
+    assert.equal(result.config.diagnostics['MDL301'], 'error');
+    assert.equal(result.config.diagnostics['MDL304'], 'warning');
+  });
+
   it('the default config reports no diagnostics when no file exists', () => {
     const result = loadConfigFrom(resolve(repoRoot, 'test', 'fixtures'));
     assert.deepEqual(result.diagnostics, []);

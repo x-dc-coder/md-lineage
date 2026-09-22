@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "generatedAt": "2026-09-22T13:44:54.994Z",
+  "codes": {
+    "MDL001": [
+      "test/fixtures/invalid/e01-fm-unclosed.md"
+    ],
+    "MDL002": [
+      "test/fixtures/invalid/e02-yaml-indent.md"
+    ],
+    "MDL101": [
+      "test/fixtures/invalid/e13-schema-version.md"
+    ],
+    "MDL102": [
+      "test/fixtures/invalid/e06-missing-id.md",
+      "test/fixtures/invalid/e07-missing-kind-status.md",
+      "test/fixtures/invalid/e09-strong-relation-no-reason.md"
+    ],
+    "MDL103": [
+      "test/fixtures/invalid/e05-id-pattern.md",
+      "test/fixtures/invalid/e08-illegal-relation-type.md",
+      "test/fixtures/invalid/e11-evidence-anchor.md",
+      "test/fixtures/invalid/e12-target-format.md",
+      "test/fixtures/invalid/e14-empty-string-array.md"
+    ],
+    "MDL104": [
+      "test/fixtures/invalid/e04-unknown-mdlineage-fields.md"
+    ],
+    "MDL201": [
+      "test/fixtures/invalid/e17-evidence-anchor-missing.md"
+    ],
+    "MDL202": [
+      "test/fixtures/invalid/e10-duplicate-relation.md"
+    ],
+    "MDL301": [
+      "test/fixtures/workspace/dup-id-b.md"
+    ],
+    "MDL302": [
+      "test/fixtures/invalid/e12-target-format.md",
+      "test/fixtures/workspace/dup-id-b.md"
+    ],
+    "MDL305": [
+      "test/fixtures/workspace/cycle-a.md"
+    ],
+    "MDL402": [
+      "test/fixtures/invalid/e17-evidence-anchor-missing.md"
+    ],
+    "MDL601": [
+      "test/fixtures/invalid/e15-mixed-eol.md"
+    ],
+    "MDL602": [
+      "test/fixtures/invalid/e16-crlf-eol.md"
+    ]
+  }
+}
