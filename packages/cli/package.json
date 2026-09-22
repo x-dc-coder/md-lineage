@@ -19,6 +19,7 @@
     "test": "node --import tsx --test \"test/*.test.ts\""
   },
   "dependencies": {
+    "@mdlineage/language-server": "*",
     "@mdlineage/validator": "*",
     "glob": "^10.5.0"
   },

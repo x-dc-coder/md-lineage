@@ -11,6 +11,7 @@
  * Commands:
  *   check     the authoritative repository validation (workspace + single doc)
  *   baseline  accepted-debt management for legacy repositories
+ *   server    the dedicated MDLineage Language Server (§10.1: `--stdio`)
  *
  * Exit codes: 0 when no error-severity diagnostic is found (warnings are
  * reported but pass; `--frail` makes any diagnostic fail), 1 when any error is
@@ -33,6 +34,7 @@ import { renderSarif } from './sarif.js';
 import { expandMarkdownPaths, type ExpandedPath } from './paths.js';
 import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from './git.js';
 import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verifyBaseline, baselineRoot, BASELINE_FILE } from './baseline.js';
+import { startStdio } from '@mdlineage/language-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
 
@@ -42,6 +44,7 @@ Usage:
   mdlineage baseline update         Record current violations as accepted debt
   mdlineage baseline show           List the committed baseline
   mdlineage baseline verify         CI gate: diagnostics must match the baseline
+  mdlineage server --stdio          Run the language server over stdio
 
 Options:
   --format <text|json|sarif>  Output shape (default: text)
@@ -82,6 +85,7 @@ interface ParsedArgs {
     frail?: boolean;
     force?: boolean;
     'report-only'?: boolean;
+    stdio?: boolean;
     help?: boolean;
     version?: boolean;
   };
@@ -109,6 +113,9 @@ function readArgs(argv: string[]): ParsedArgs {
       frail: { type: 'boolean' },
       force: { type: 'boolean' },
       'no-baseline': { type: 'boolean' },
+      // `mdlineage server --stdio`: routed to the LSP transport switch, so it
+      // must parse as a known boolean instead of an unknown option.
+      stdio: { type: 'boolean' },
       'report-only': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -137,6 +144,9 @@ export async function main(argv: string[]): Promise<number> {
 
   if (command === 'baseline') {
     return runBaseline(parsed.positionals.slice(1), parsed.values);
+  }
+  if (command === 'server') {
+    return runServer(parsed.positionals.slice(1), parsed.values);
   }
   if (command !== 'check') {
     process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
@@ -301,6 +311,29 @@ function emit(result: CheckResult, options: RunOptions): number {
   if (output.length > 0) process.stdout.write(`${output}\n`);
   return exitCodeFor(result, { frail: options.frail });
 }
+/** `mdlineage server`: the dedicated LSP (§10.1). Only stdio exists in M3-a. */
+function runServer(args: string[], values: ParsedArgs['values']): number {
+  if (values.help) {
+    process.stdout.write(`${HELP}\n`);
+    return 0;
+  }
+  if (!values.stdio) {
+    const transport = args[0];
+    process.stderr.write(
+      `mdlineage: unknown server transport '${transport ?? "(none)"}' (expected --stdio)\n\n${HELP}\n`,
+    );
+    return 2;
+  }
+  // The server owns stdin/stdout from here on; a JSON-RPC framing byte written
+  // before this point would corrupt the stream, so nothing is printed.
+  const connection = startStdio({ configFile: values.config });
+  connection.onShutdown(() => {
+    // The lifecycle answer is "clean shutdown acknowledged"; the process exits
+    // when stdio closes or `exit` arrives.
+  });
+  return 0;
+}
+
 /**
  * `mdlineage baseline <action>`: accepted-debt management.
  *

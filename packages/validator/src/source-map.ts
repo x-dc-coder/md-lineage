@@ -20,9 +20,15 @@ export function buildLineMap(text: string): LineMap {
     if (c === 0x0a) {
       lineStarts.push(i + 1);
     } else if (c === 0x0d) {
-      // CRLF is one line break; a lone CR is also one.
-      lineStarts.push(i + 1);
-      if (text.charCodeAt(i + 1) === 0x0a) i += 1;
+      // CRLF is one line break, so the next line starts past BOTH units; a
+      // lone CR starts the next line at i + 1. Getting this wrong shifted
+      // every column on CRLF documents by +1 (review M3-a, Major-1).
+      if (text.charCodeAt(i + 1) === 0x0a) {
+        lineStarts.push(i + 2);
+        i += 1;
+      } else {
+        lineStarts.push(i + 1);
+      }
     }
   }
   return { lineStarts, length: text.length };
