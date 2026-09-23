@@ -570,6 +570,76 @@ describe('MCP server — the suggest/apply accept loop', () => {
       await h.close();
     }
   });
+
+  it('proposes a reason for EVERY relation that lacks one, and the result parses', async () => {
+    // Two insertions at two different offsets, both located against the
+    // original text. Applying them in buffer order used to write the second
+    // into the middle of the first and produce front matter no YAML parser
+    // accepts — the same corruption `mdlineage fix` showed, through this
+    // channel, because the engine is shared.
+    const h = await harness();
+    try {
+      const content =
+        '---\nmdlineage:\n  schema: 1\n  id: docs.multi\n  kind: policy\n  status: active\n' +
+        '  relations:\n    - type: depends_on\n      target: docs.a\n' +
+        '    - type: depends_on\n      target: docs.b\n---\n\n# Multi\n';
+      const { payload } = await callTool(h, 'suggest_metadata', { content, path: 'multi.md' });
+      const proposal = (payload as { proposals: MetadataProposal[] }).proposals[0]!;
+      assert.equal(proposal.operations.length, 2, 'one operation per relation');
+
+      const applied = (await callTool(h, 'apply_metadata_patch', { proposal_id: proposal.id })).payload as {
+        applied: boolean;
+        edits: Array<{ line: number; newText: string }>;
+        patchedContent: string;
+      };
+      assert.equal(applied.applied, true);
+      assert.equal(applied.edits.length, 2, 'both insertions are reported');
+      assert.equal((applied.patchedContent.match(/reason: /g) ?? []).length, 2, 'both relations gained a reason');
+
+      const { validateDocumentSync, scanBoundary, parseFrontmatter, buildLineMap } = await import('@mdlineage/validator');
+      const boundary = scanBoundary(applied.patchedContent);
+      assert.ok(boundary, 'the patched document still has a front matter block');
+      assert.ok(
+        parseFrontmatter(boundary!.raw, boundary!.rawStart, buildLineMap(applied.patchedContent)).parsed,
+        'the patched front matter parses as YAML',
+      );
+      const codes = validateDocumentSync({ content: applied.patchedContent }).diagnostics.map((d) => d.code);
+      assert.deepEqual(
+        codes.filter((c) => c === 'MDL102' || c === 'MDL002'),
+        [],
+        'neither gap is left and nothing broke the parse',
+      );
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('does not insert a key the document already carries', async () => {
+    // MDL102's pointer is the relation entry, so a relation that HAS a reason
+    // and lacks a `target` used to gain a second `reason` — a YAML duplicate key.
+    const h = await harness();
+    try {
+      const content =
+        '---\nmdlineage:\n  schema: 1\n  id: docs.dup\n  kind: policy\n  status: active\n' +
+        '  relations:\n    - type: depends_on\n      reason: already here\n---\n\n# Dup\n';
+      const { payload } = await callTool(h, 'suggest_metadata', { content, path: 'dup.md' });
+      const proposal = (payload as { proposals: MetadataProposal[] }).proposals[0]!;
+      assert.equal(proposal.operations[0]!.jsonPointer, '/relations/0/reason');
+
+      const applied = (await callTool(h, 'apply_metadata_patch', { proposal_id: proposal.id })).payload as {
+        applied: boolean;
+        error?: string;
+      };
+      assert.equal(applied.applied, false, 'nothing was inserted');
+      assert.ok(applied.error, 'the caller is told why');
+
+      const { validateDocumentSync } = await import('@mdlineage/validator');
+      const codes = validateDocumentSync({ content }).diagnostics.map((d) => d.code);
+      assert.ok(!codes.includes('MDL002'), 'the document was never handed a duplicate key');
+    } finally {
+      await h.close();
+    }
+  });
 });
 
 describe('MCP server — apply_metadata_patch write opt-in', () => {
@@ -648,6 +718,52 @@ describe('MCP server — apply_metadata_patch write opt-in', () => {
         assert.ok(
           !validated.diagnostics.some((d) => d.code === 'MDL102'),
           `the written document no longer reports MDL102, got ${validated.diagnostics.map((d) => d.code).join(', ')}`,
+        );
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true keeps a multi-relation document parseable on disk', async () => {
+    // The write channel is the same engine as `mdlineage fix`, so a
+    // multi-insertion patch that corrupts the front matter corrupts the file
+    // the model just reviewed. The bytes on disk must still be YAML.
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-multi-'));
+    const target = resolve(root, 'multi.md');
+    writeFileSync(
+      target,
+      '---\nmdlineage:\n  schema: 1\n  id: docs.multi\n  kind: policy\n  status: active\n' +
+        '  relations:\n    - type: depends_on\n      target: docs.a\n' +
+        '    - type: depends_on\n      target: docs.b\n---\n\n# Multi\n',
+    );
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'multi.md');
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as { applied: boolean; written: boolean; patchedContent: string };
+
+        assert.equal(applied.written, true);
+        const onDisk = readFileSync(target, 'utf8');
+        assert.equal(onDisk, applied.patchedContent, 'the reviewed text is what landed');
+        assert.equal((onDisk.match(/reason: /g) ?? []).length, 2, 'both reasons are present');
+
+        const { validateDocumentSync, scanBoundary, parseFrontmatter, buildLineMap } = await import('@mdlineage/validator');
+        const boundary = scanBoundary(onDisk);
+        assert.ok(boundary, 'the written document still has a front matter block');
+        assert.ok(
+          parseFrontmatter(boundary!.raw, boundary!.rawStart, buildLineMap(onDisk)).parsed,
+          'the written front matter parses as YAML',
+        );
+        const codes = validateDocumentSync({ content: onDisk }).diagnostics.map((d) => d.code);
+        assert.deepEqual(
+          codes.filter((c) => c === 'MDL102' || c === 'MDL002'),
+          [],
+          'the written document carries neither gap nor a parse failure',
         );
       } finally {
         await h.close();

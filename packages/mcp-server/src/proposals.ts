@@ -281,8 +281,16 @@ export interface AppliedPatch {
  * lands at the end of the mapping (or sequence item) its JSON Pointer names, at
  * that container's own indentation, so the produced front matter is still valid
  * YAML and still indented the way the document is. Operations are applied
- * deepest-first, because an insertion at `/relations/0/reason` would otherwise
- * shift the offset a `/status` insertion was computed against.
+ * deepest-last-in-the-buffer first — every offset was located against the
+ * original text, so inserting from the highest one downwards leaves the lower
+ * ones valid. Applying them front-to-back instead would write the second
+ * insertion into the middle of the first: two relation reasons in one document
+ * used to produce `reason: "TODO: … relations` / `reason: "…hip …"` and a
+ * document no YAML parser accepts.
+ *
+ * An operation whose key the document already carries is dropped rather than
+ * inserted: a second `reason` in one mapping is a YAML duplicate key, and
+ * MDL102 would still report the gap the proposal claimed to close.
  *
  * Returns null when the id is unknown, when the document has no mdlineage map
  * to insert into, or when the proposal carries no operations — each is a
@@ -291,23 +299,32 @@ export interface AppliedPatch {
 export function applyProposalToContent(
   proposal: MetadataProposal,
   content: string,
-): { edits: FrontMatterTextEdit[]; patched: string } | null {
+): { edits: FrontMatterTextEdit[]; patched: string; applied: readonly string[] } | null {
   const located = locateInsertions(proposal, content);
   if (!located || located.length === 0) return null;
 
-  const ordered = [...located].sort((a, b) => descendsBelow(a.jsonPointer, b.jsonPointer));
+  const ordered = [...located].sort((a, b) => b.offset - a.offset);
   let text = content;
-  const edits: FrontMatterTextEdit[] = [];
+  const landed: { spot: InsertionSpot; edit: FrontMatterTextEdit }[] = [];
 
   for (const spot of ordered) {
     const before = text.slice(0, spot.offset);
     const after = text.slice(spot.offset);
-    const edit: FrontMatterTextEdit = { line: spot.line, character: spot.column, newText: spot.text, oldText: '' };
-    edits.unshift(edit);
+    landed.push({
+      spot,
+      edit: { line: spot.line, character: spot.column, newText: spot.text, oldText: '' },
+    });
     text = before + spot.text + after;
   }
 
-  return { edits, patched: text };
+  // Document order, so a caller applying the edits top-down still sees valid
+  // positions even though they were applied bottom-up.
+  landed.reverse();
+  return {
+    edits: landed.map((entry) => entry.edit),
+    patched: text,
+    applied: landed.map((entry) => entry.spot.jsonPointer),
+  };
 }
 
 /** One insertion, positioned in the document. */
@@ -325,20 +342,17 @@ interface InsertionSpot {
   readonly text: string;
 }
 
-/** True when `a` points deeper in the document than `b` (so `a` must move first). */
-function descendsBelow(a: string, b: string): number {
-  return b.split('/').length - a.split('/').length;
-}
-
 /**
  * Place every operation of a proposal in the document.
  *
  * Root-level pointers (`/status`) go at the end of the mdlineage map. A
  * relation-field pointer (`/relations/N/reason`) goes at the end of that
  * relation's own mapping, so the new key joins the relation instead of the
- * document. Returns null when the document has no mdlineage map, and omits an
- * operation whose pointer cannot be located — reported by the caller, never
- * silently mis-inserted.
+ * document. An operation whose target key the document already carries is
+ * omitted — inserting it would produce a YAML duplicate key, which is the
+ * opposite of a repair. Returns null when the document has no mdlineage map,
+ * and omits an operation whose pointer cannot be located — reported by the
+ * caller, never silently mis-inserted.
  */
 export function locateInsertions(
   proposal: MetadataProposal,
@@ -363,6 +377,8 @@ export function locateInsertions(
     if (parts.length === 0) continue;
 
     if (parts.length === 1) {
+      // A key the document already has must not be written twice.
+      if (mapPair.value.items.some((p) => keyValue(p) === parts[0]!)) continue;
       const end = mapPair.value.range?.[1];
       if (typeof end !== 'number') continue;
       const offset = boundary.rawStart + end;
@@ -393,6 +409,10 @@ export function locateInsertions(
     // document the validator accepts use, but both are walked.
     const itemMap = mapOfItem(item);
     if (!itemMap) continue;
+    // The relation already carries the key: MDL102's pointer is the entry, so a
+    // relation that has a `reason` and lacks a `target` must not gain a second
+    // `reason` (a YAML duplicate key that MDL102 would still report).
+    if (itemMap.items.some((p) => keyValue(p) === parts[parts.length - 1]!)) continue;
 
     // The item's CST range ends at the last byte of its last key, so the new
     // line goes after the whole item — indented like the item's own keys, which
