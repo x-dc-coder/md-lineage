@@ -45,6 +45,7 @@ import {
   createContext,
   resetProposalIds,
 } from '../src/server.js';
+import { verifyWriteTarget, writeDocumentAtomically } from '../src/server-impl.js';
 import type { MetadataProposal, ProposalQueue } from '../src/proposals.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
@@ -747,10 +748,10 @@ describe('MCP server — apply_metadata_patch write opt-in', () => {
     }
   });
 
-  it('write: true refuses a trailing symlink instead of replacing the link', async () => {
-    // The last component being a symlink: the rename would replace the link
-    // itself with a regular file, destroying it, and the text would land
-    // wherever the link points.
+  it('write: true refuses a trailing symlink that leaves the workspace root', async () => {
+    // The last component being a symlink: following it would land the text
+    // outside the root, and writing through the link's own path would let the
+    // rename replace the link with a regular file, destroying it.
     const parent = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-trail-'));
     const root = resolve(parent, 'ws');
     const outside = resolve(parent, 'outside');
@@ -769,9 +770,46 @@ describe('MCP server — apply_metadata_patch write opt-in', () => {
 
         assert.equal(applied.written, false, 'the trailing symlink was refused');
         assert.match(applied.error!, /symbolic link/, 'the refusal says the target is a link');
+        assert.match(applied.error!, /not inside/, 'and that it resolves outside the root');
         assert.equal(readFileSync(real, 'utf8'), GAPPY_DOCUMENT, 'the file the link points at is unchanged');
         assert.ok(lstatSync(resolve(root, 'doc.md')).isSymbolicLink(), 'the link is still a link, not a regular file');
         assert.deepEqual(readdirSync(root), ['doc.md'], 'no temporary file was left behind');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true follows a trailing symlink that stays inside the root', async () => {
+    // An alias to a document in the same workspace is a legitimate view of it,
+    // so the write is honoured — but it lands on the file the link names,
+    // because the rename would otherwise replace the link itself with a
+    // regular file and destroy the alias.
+    const parent = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-trailin-'));
+    const root = resolve(parent, 'ws');
+    mkdirSync(root);
+    mkdirSync(resolve(root, 'inner'));
+    const real = resolve(root, 'inner', 'real.md');
+    writeFileSync(real, GAPPY_DOCUMENT);
+    const link = resolve(root, 'doc.md');
+    symlinkSync(real, link);
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'doc.md');
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as { written: boolean; writtenPath: string; patchedContent: string; note: string };
+
+        assert.equal(applied.written, true, 'the in-root alias is written through');
+        assert.equal(applied.writtenPath, real, 'the text landed on the file the link names');
+        assert.equal(readFileSync(real, 'utf8'), applied.patchedContent, 'the real document carries the reviewed text');
+        assert.ok(readFileSync(real, 'utf8').includes('status: draft'), 'the real document was patched');
+        assert.ok(lstatSync(link).isSymbolicLink(), 'the link itself survives the write');
+        assert.match(applied.note, /symbolic link/, 'the answer says the link was followed');
+        assert.deepEqual(readdirSync(resolve(root, 'inner')), ['real.md'], 'no temporary file was left behind');
       } finally {
         await h.close();
       }
@@ -1033,6 +1071,134 @@ describe('MCP server — apply_metadata_patch write opt-in', () => {
     }
   });
 
+  it('write: true creates the document for a proposal over a buffer that was never on disk', async () => {
+    // The decision log's "unsaved buffers must be patchable" case: the buffer
+    // never reached the disk, so the write is a creation, not an overwrite.
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-buffer-'));
+    const target = resolve(root, 'doc.md');
+    try {
+      const h = await harness(root);
+      try {
+        assert.ok(!existsSync(target), 'the document starts out unsaved');
+        const proposalId = await propose(h, 'doc.md', GAPPY_DOCUMENT);
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as {
+          applied: boolean;
+          written: boolean;
+          writtenPath: string;
+          created: boolean;
+          patchedContent: string;
+          note: string;
+        };
+
+        assert.equal(applied.written, true, 'the buffer-only proposal is written');
+        assert.equal(applied.applied, true);
+        assert.equal(applied.created, true, 'the answer says the document was created');
+        assert.equal(applied.writtenPath, target);
+        assert.equal(readFileSync(target, 'utf8'), applied.patchedContent, 'the new file carries the reviewed text');
+        assert.ok(readFileSync(target, 'utf8').includes('status: draft'), 'the new file is patched');
+        assert.match(applied.note, /created it/, 'the note explains the creation');
+        assert.deepEqual(readdirSync(root), ['doc.md'], 'no temporary file was left behind');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true refuses a buffer-only proposal whose path is a symlink', async () => {
+    // The creation path is not a hole in the symlink guard: the target must
+    // not be a link, wherever it points.
+    const parent = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-buflink-'));
+    const root = resolve(parent, 'ws');
+    const outside = resolve(parent, 'outside');
+    mkdirSync(root);
+    mkdirSync(outside);
+    const real = resolve(outside, 'real.md');
+    writeFileSync(real, GAPPY_DOCUMENT);
+    symlinkSync(real, resolve(root, 'doc.md'));
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'doc.md', GAPPY_DOCUMENT);
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as { written: boolean; error: string };
+
+        assert.equal(applied.written, false, 'the symlinked target was refused');
+        assert.match(applied.error!, /symbolic link/, 'the refusal names the link');
+        assert.equal(readFileSync(real, 'utf8'), GAPPY_DOCUMENT, 'the file outside the root is unchanged');
+        assert.ok(lstatSync(resolve(root, 'doc.md')).isSymbolicLink(), 'the link is still a link');
+        assert.deepEqual(readdirSync(outside), ['real.md'], 'nothing was created outside the root');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true refuses to create a document in a directory that is not writable', async () => {
+    // A creation needs the parent directory, not a target file, to be
+    // writable, and the refusal must say so.
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-newdir-'));
+    const target = resolve(root, 'doc.md');
+    try {
+      chmodSync(root, 0o500);
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'doc.md', GAPPY_DOCUMENT);
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as { written: boolean; error: string };
+
+        assert.equal(applied.written, false, 'the unwritable directory refused the creation');
+        assert.match(applied.error!, /cannot create/, 'the refusal names the directory');
+        assert.match(applied.error!, /not writable/, 'and the reason');
+        assert.ok(!existsSync(target), 'nothing was created');
+        assert.deepEqual(readdirSync(root), [], 'no temporary file was left behind');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      chmodSync(root, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true refuses to recreate a deleted document even when the proposal carried a buffer snapshot', async () => {
+    // The direction that separates a never-saved buffer from a deletion: the
+    // document WAS on disk when the proposal was made, so the missing target
+    // is a deletion, and the write must not bring the text back.
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-bufdel-'));
+    const target = resolve(root, 'doc.md');
+    writeFileSync(target, GAPPY_DOCUMENT);
+    try {
+      const h = await harness(root);
+      try {
+        // The buffer snapshot is present, exactly as it is for an unsaved
+        // document: only the disk state at proposal time tells them apart.
+        const proposalId = await propose(h, 'doc.md', GAPPY_DOCUMENT);
+        rmSync(target);
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as { written: boolean; applied: boolean; error: string };
+
+        assert.equal(applied.written, false, 'the deleted document was not recreated');
+        assert.equal(applied.applied, false);
+        assert.match(applied.error!, /no longer exists on disk/, 'the refusal says the target is gone');
+        assert.ok(!existsSync(target), 'the file is still gone');
+        assert.deepEqual(readdirSync(root), [], 'nothing was created in its place');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('requeues on the branches that used to drop the proposal', async () => {
     const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-rq-'));
     writeFileSync(resolve(root, 'doc.md'), GAPPY_DOCUMENT);
@@ -1197,6 +1363,113 @@ describe('MCP server — apply_metadata_patch write opt-in', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  it('answers an unknown proposal id with the same refusal shape as the other branches', async () => {
+    // The one refusal with nothing to requeue: the answer carries the same
+    // keys, with `requeuedProposalId` null rather than absent.
+    const h = await harness();
+    try {
+      const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: 'proposal-999', write: true });
+      const applied = payload as {
+        proposalId: string;
+        applied: boolean;
+        written: boolean;
+        requeuedProposalId: string | null;
+        error: string;
+      };
+
+      assert.equal(applied.proposalId, 'proposal-999');
+      assert.equal(applied.applied, false);
+      assert.equal(applied.written, false, 'the unknown-id branch reports that nothing was written');
+      assert.equal(applied.requeuedProposalId, null, 'and that there was no proposal to put back');
+      assert.match(applied.error!, /No queued proposal/, 'the error names the cause');
+    } finally {
+      await h.close();
+    }
+  });
+});
+
+describe('MCP server — the pre-rename re-verification', () => {
+  // The guards in the tool run before the temporary file is written, and a
+  // racing process has that window. `verifyWriteTarget` is the re-check the
+  // write performs immediately before the rename, exercised here directly
+  // because an in-process race is not reproducible: the tool handler is
+  // synchronous, so no other code can move the target under it.
+  const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-verify-'));
+
+  after(() => {
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('refuses a target that became a symbolic link', () => {
+    const real = resolve(root, 'real.md');
+    writeFileSync(real, GAPPY_DOCUMENT);
+    const link = resolve(root, 'link.md');
+    symlinkSync(real, link);
+
+    const verdict = verifyWriteTarget(link, GAPPY_DOCUMENT);
+
+    assert.equal(verdict.ok, false, 'a target flipped to a symlink is refused');
+    assert.match((verdict as { error: string }).error, /symbolic link/, 'the refusal names the link');
+    assert.ok(lstatSync(link).isSymbolicLink(), 'the link is untouched by the check');
+  });
+
+  it('refuses a target that was edited after the guards ran', () => {
+    const target = resolve(root, 'edited.md');
+    writeFileSync(target, GAPPY_DOCUMENT);
+
+    const verdict = verifyWriteTarget(target, GAPPY_DOCUMENT);
+
+    assert.equal(verdict.ok, true, 'an unchanged target still verifies');
+    writeFileSync(target, GAPPY_DOCUMENT.replace('# Loop', '# Loop, edited'));
+    const after = verifyWriteTarget(target, GAPPY_DOCUMENT);
+    assert.equal(after.ok, false, 'the edit is caught before the rename');
+    assert.match((after as { error: string }).error, /changed on disk/, 'the refusal names the drift');
+  });
+
+  it('refuses a target that appeared where there was none', () => {
+    const target = resolve(root, 'appeared.md');
+    const absent = verifyWriteTarget(target, null);
+    assert.equal(absent.ok, true, 'an absent target verifies when it was absent before');
+
+    writeFileSync(target, GAPPY_DOCUMENT);
+    const appeared = verifyWriteTarget(target, null);
+    assert.equal(appeared.ok, false, 'a file created in the window is caught');
+    assert.match((appeared as { error: string }).error, /changed on disk/, 'the refusal names the drift');
+  });
+
+  it('refuses a target that was removed after the guards ran', () => {
+    const target = resolve(root, 'removed.md');
+    writeFileSync(target, GAPPY_DOCUMENT);
+
+    rmSync(target);
+    const verdict = verifyWriteTarget(target, GAPPY_DOCUMENT);
+
+    assert.equal(verdict.ok, false, 'a target deleted in the window is caught');
+    assert.match((verdict as { error: string }).error, /changed on disk/, 'the refusal names the removal');
+  });
+
+  it('is what the write itself consults: a target flipped to a symlink is not overwritten', () => {
+    // The window cannot be opened from inside one synchronous handler, so the
+    // write is driven directly with a target that is already a link: the
+    // rename must never reach it, and the temporary file must not survive.
+    const real = resolve(root, 'flip-real.md');
+    writeFileSync(real, GAPPY_DOCUMENT);
+    const target = resolve(root, 'flip.md');
+    symlinkSync(real, target);
+
+    const verdict = writeDocumentAtomically(target, `${GAPPY_DOCUMENT}\npatched\n`, GAPPY_DOCUMENT);
+
+    assert.equal(verdict.ok, false, 'the write was refused');
+    assert.match((verdict as { error: string }).error, /symbolic link/, 'because the target became a link');
+    assert.ok(lstatSync(target).isSymbolicLink(), 'the rename never replaced the link');
+    assert.equal(readFileSync(real, 'utf8'), GAPPY_DOCUMENT, 'the file the link names is untouched');
+    assert.deepEqual(
+      readdirSync(root).filter((name) => name.includes('.tmp')),
+      [],
+      'no temporary file was left behind',
+    );
   });
 });
 

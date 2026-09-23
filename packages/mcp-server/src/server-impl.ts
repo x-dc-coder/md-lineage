@@ -29,7 +29,6 @@ import {
   writeFileSync,
   realpathSync,
   lstatSync,
-  existsSync,
   accessSync,
   openSync,
   closeSync,
@@ -59,6 +58,7 @@ import {
   applyProposalToContent,
   diffOf,
   resetProposalIds,
+  type AcceptedProposal,
   type MetadataProposal,
 } from './proposals.js';
 
@@ -123,7 +123,9 @@ export function createMdlineageMcpServer(context: McpServerContext): {
         'MDLineage: validate Markdown metadata, resolve document identities, and review metadata proposals. ' +
         'Use validate_document for one file, validate_repository for the whole workspace, and suggest_metadata ' +
         'followed by apply_metadata_patch to fill missing metadata — apply returns a diff and writes nothing ' +
-        'unless it is called with write: true, which overwrites the document on disk with the reviewed text.',
+        'unless it is called with write: true, which overwrites the document on disk with the reviewed text. ' +
+        'A proposal over a document that was never saved writes that document into existence; one over a document ' +
+        'that has since been deleted or renamed is refused instead.',
     },
   );
 
@@ -274,8 +276,16 @@ export function resolvePath(path: string, root: string): string {
  * the containment test, and the root is resolved too — a workspace whose root
  * is itself a symlink is a legitimate setup, and a write that lands inside the
  * real root is the correct behaviour, not a rejection.
+ *
+ * A trailing symlink is followed when it stays inside the real root, and the
+ * returned `writePath` is the file it names: writing through the link instead
+ * would let the rename replace the link with a regular file, destroying the
+ * alias. One that resolves outside the root is refused.
  */
-function resolveWriteTarget(diskPath: string, root: string): { ok: true } | { ok: false; error: string } {
+function resolveWriteTarget(
+  diskPath: string,
+  root: string,
+): { ok: true; writePath: string } | { ok: false; error: string } {
   let realRoot: string;
   try {
     realRoot = realpathSync(root);
@@ -300,18 +310,36 @@ function resolveWriteTarget(diskPath: string, root: string): { ok: true } | { ok
     };
   }
 
-  // A trailing symlink is refused rather than followed: the rename would
-  // replace the link itself with a regular file, destroying it, and the text
-  // would land wherever the link points.
+  let isLink = false;
   try {
-    if (lstatSync(diskPath).isSymbolicLink()) {
-      return { ok: false, error: `Refusing to write through a symbolic link: ${diskPath} is a symlink.` };
-    }
+    isLink = lstatSync(diskPath).isSymbolicLink();
   } catch {
-    // Nothing there: the caller's existence check reports a missing target.
+    // Nothing there: a proposal over an unsaved buffer may still create it.
+  }
+  if (isLink) {
+    let realTarget: string;
+    try {
+      realTarget = realpathSync(diskPath);
+    } catch {
+      return {
+        ok: false,
+        error: `Refusing to write through a symbolic link: ${diskPath} is a symlink whose target cannot be resolved.`,
+      };
+    }
+    const targetRel = relative(realRoot, realTarget);
+    if (targetRel === '..' || targetRel.startsWith(`..${sep}`) || isAbsolute(targetRel)) {
+      return {
+        ok: false,
+        error:
+          `Refusing to write through a symbolic link: ${diskPath} resolves to ${realTarget}, ` +
+          `which is not inside ${realRoot}.`,
+      };
+    }
+    // The link survives, and the reviewed text lands on the file it names.
+    return { ok: true, writePath: realTarget };
   }
 
-  return { ok: true };
+  return { ok: true, writePath: diskPath };
 }
 
 /** A file's text, or null when it cannot be read (missing, a directory, …). */
@@ -323,6 +351,15 @@ function readDiskText(path: string): string | null {
   }
 }
 
+/** True when `path` names a regular file that exists on disk right now. */
+function documentIsOnDisk(path: string): boolean {
+  try {
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Write `text` to `path` through a sibling temporary file and a rename.
  *
@@ -330,14 +367,34 @@ function readDiskText(path: string): string | null {
  * the old file or the new one, never a truncated one, and a failure before the
  * rename leaves the original untouched. The temporary file is removed when it
  * was created but could not be renamed, so a refused write leaves no litter.
+ *
+ * `expected` is the text the target held when the guards ran, or null when it
+ * was absent. It is re-checked immediately before the rename, which narrows
+ * the window a racing process had to turn the target into a symlink (the
+ * rename would replace the link itself) or to change its content.
+ *
+ * Exported for the test suite: the guards around it live in the tool handler,
+ * and a test that drives the write directly is the only way to show what a
+ * target flipped mid-write costs.
  */
-function writeDocumentAtomically(path: string, text: string): { ok: true } | { ok: false; error: string } {
+export function writeDocumentAtomically(
+  path: string,
+  text: string,
+  expected: string | null,
+): { ok: true } | { ok: false; error: string } {
+  const present = statSync(path, { throwIfNoEntry: false }) !== undefined;
   // `rename` checks the DIRECTORY's permissions, not the target file's, so a
   // file its owner marked read-only would be replaced with no error at all.
   // The target's own writability is checked first, and a refusal here has not
-  // touched a single byte.
-  if (!targetIsWritable(path)) {
-    return { ok: false, error: `cannot write ${path}: the file is not writable` };
+  // touched a single byte. A target that is not there yet needs the directory
+  // to be writable instead.
+  if (present ? !pathIsWritable(path) : !pathIsWritable(dirname(path))) {
+    return {
+      ok: false,
+      error: present
+        ? `cannot write ${path}: the file is not writable`
+        : `cannot create ${path}: the directory ${dirname(path)} is not writable`,
+    };
   }
 
   const temporary = `${path}.mdlineage-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
@@ -348,6 +405,14 @@ function writeDocumentAtomically(path: string, text: string): { ok: true } | { o
     // Nothing there yet: the process umask decides the new file's mode.
   }
   let created = false;
+  const discardTemporary = (): void => {
+    if (!created) return;
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // The temporary file may never have been created; nothing to clean up.
+    }
+  };
   try {
     // `wx` creates the temporary exclusively: a predictable name would let
     // another process pre-create it, or let a stale one survive a restart.
@@ -355,28 +420,63 @@ function writeDocumentAtomically(path: string, text: string): { ok: true } | { o
     created = true;
     writeFileSync(descriptor, text);
     closeSync(descriptor);
+    const verified = verifyWriteTarget(path, expected);
+    if (!verified.ok) {
+      // A refusal from the re-check is a refusal like any other: the
+      // temporary goes before the answer does, so no litter survives it.
+      discardTemporary();
+      return { ok: false, error: `cannot write ${path}: ${verified.error}` };
+    }
     renameSync(temporary, path);
     return { ok: true };
   } catch (error) {
-    if (created) {
-      try {
-        rmSync(temporary, { force: true });
-      } catch {
-        // The temporary file may never have been created; nothing to clean up.
-      }
-    }
+    discardTemporary();
     return { ok: false, error: `cannot write ${path}: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
 
 /**
- * True when the file at `path` may be written by this process.
+ * Re-check the target's state immediately before the rename.
  *
- * `access(W_OK)` is the real check, except that root passes it for any file:
+ * The guards in the tool ran earlier, and in that window a racing process
+ * could have replaced the target with a symbolic link — which the rename would
+ * overwrite with a regular file, destroying the link — or edited or removed
+ * the file, in which case the write would replace text the reviewed diff does
+ * not show. Re-reading narrows that window; it cannot close it, because a
+ * genuinely atomic swap needs `renameat2(RENAME_EXCHANGE)` or `linkat`, which
+ * Node does not expose.
+ */
+export function verifyWriteTarget(
+  path: string,
+  expected: string | null,
+): { ok: true } | { ok: false; error: string } {
+  let isLink = false;
+  try {
+    isLink = lstatSync(path).isSymbolicLink();
+  } catch {
+    // Absent, which is only correct when it was absent before too.
+  }
+  if (isLink) {
+    return { ok: false, error: 'the target became a symbolic link while the write was being prepared' };
+  }
+  const now = readDiskText(path);
+  if (now !== expected) {
+    return {
+      ok: false,
+      error: 'the target changed on disk (removed, replaced or edited) while the write was being prepared',
+    };
+  }
+  return { ok: true };
+}
+
+/**
+ * True when this process may write to `path` — a file or a directory.
+ *
+ * `access(W_OK)` is the real check, except that root passes it for any path:
  * there the permission bits are the only signal left that the owner meant the
  * file to stay read-only, so they are read directly.
  */
-function targetIsWritable(path: string): boolean {
+function pathIsWritable(path: string): boolean {
   try {
     accessSync(path, constants.W_OK);
   } catch {
@@ -671,7 +771,11 @@ function registerSuggestMetadata(server: McpServer, context: McpServerContext, q
       }
       // The buffer snapshot travels with the proposal: apply must work on the
       // exact text suggest_metadata analysed, even when it never hit the disk.
-      const proposal = queue.enqueue(candidate, read.content);
+      // Whether that text had a file behind it is recorded too, because it is
+      // what separates a never-saved buffer (which `write: true` may create)
+      // from a document that has since been deleted or renamed (which it must
+      // not resurrect).
+      const proposal = queue.enqueue(candidate, read.content, documentIsOnDisk(read.diskPath));
       return asJson({
         path: read.resolvedPath,
         proposals: [proposal],
@@ -696,10 +800,15 @@ function registerSuggestMetadata(server: McpServer, context: McpServerContext, q
  * here instead of in a second tool. It writes the reviewed `patchedContent` —
  * the very text the returned diff describes, never a second computation —
  * after the guards below: the target must resolve inside the workspace root,
- * it must still be on disk, it must be writable, and the file must still hold
- * the text the diff was computed against. Every refusal is a structured error
- * that leaves the file untouched, requeues the proposal and reports the new id
- * as `requeuedProposalId`.
+ * the file must still hold the text the diff was computed against, and the
+ * target (or the directory that would hold it) must be writable. A proposal
+ * over a document that was on disk and has since been deleted or renamed is
+ * refused rather than resurrected; a proposal over a buffer that was never
+ * saved creates the document, which is the unsaved-buffer case the decision
+ * log requires to stay writable. Every refusal is a structured error that
+ * leaves the file untouched, requeues the proposal and reports the new id as
+ * `requeuedProposalId` — null when the id named no queued proposal, because
+ * then there is nothing to put back.
  */
 function registerApplyMetadataPatch(server: McpServer, context: McpServerContext, queue: ProposalQueue): void {
   server.registerTool(
@@ -711,15 +820,19 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         'By default nothing is written: apply the returned edits in an editor, or write the returned text, after a human has reviewed the diff. ' +
         'Pass `write: true` to OVERWRITE the document on disk with the reviewed `patchedContent` — the write replaces the target file\'s current ' +
         'content and is not reversible from here. The write is refused, with the file untouched and the proposal requeued ' +
-        '(`requeuedProposalId`), when the target resolves outside the workspace root (a symlink included), when the file no longer ' +
-        'exists on disk, when the file is not writable, or when the file no longer holds the text the diff was computed against.',
+        '(`requeuedProposalId`, which is null when the id named no queued proposal and so nothing could be requeued), ' +
+        'when the target resolves outside the workspace root (a symbolic link that leaves the root included), when the proposal was made over a ' +
+        'document that was on disk and that document has since been deleted or renamed, when the target or the directory that would hold it is ' +
+        'not writable, or when the file no longer holds the text the diff was computed against. A proposal made over an unsaved buffer that was ' +
+        'never on disk creates the document at its path, and a symbolic link that stays inside the root is followed: the reviewed text lands on ' +
+        'the file the link names, and the link itself survives.',
       inputSchema: {
         proposal_id: z.string().min(1).describe('The id returned by suggest_metadata.'),
         write: z
           .boolean()
           .optional()
           .describe(
-            'Write the reviewed `patchedContent` to the document on disk, overwriting its current content. Defaults to false: nothing is written, and only the edits, diff and patched text are returned.',
+            'Write the reviewed `patchedContent` to the document on disk, overwriting its current content. Defaults to false: nothing is written, and only the edits, diff and patched text are returned. When the proposal came from a buffer that was never on disk, the write creates the document at its path; when it came from a document that has since been deleted or renamed, the write is refused.',
           ),
       },
       // No readOnlyHint: `write: true` modifies a file, and a client told
@@ -734,6 +847,10 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         return asJson({
           proposalId: proposal_id,
           applied: false,
+          written: false,
+          // Nothing to put back: the id named no proposal, so there is no
+          // requeued entry to report. Every other refusal requeues.
+          requeuedProposalId: null,
           error:
             `No queued proposal with id '${proposal_id}'. Call suggest_metadata first; the queue lives in memory ` +
             'and does not survive a server restart.',
@@ -742,7 +859,7 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
 
       // Prefer the buffer snapshot the proposal was built from; the disk is
       // only a fallback for proposals whose source reached the filesystem.
-      const sourceText = (proposal as { sourceContent?: string }).sourceContent;
+      const sourceText = proposal.sourceContent;
       const read = readDocument(proposal.path, sourceText, context.root);
       if (read.content === null) {
         return asJson({
@@ -799,10 +916,15 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         });
       }
 
-      // Guard 1b: a target that is not on disk is not a document to patch.
-      // Writing would recreate a file the user deleted, or create a fresh one
-      // at a path the document was renamed away from.
-      if (!existsSync(read.diskPath)) {
+      // Guard 1b: what the target's absence means. A proposal over a document
+      // that was on disk when it was made and has since gone away is a
+      // deletion or a rename: writing would resurrect text the user removed,
+      // so it is refused. A proposal over a buffer that never reached the disk
+      // is the unsaved-buffer case, and `write: true` creates the document —
+      // the guards above already put it inside the root, with a writable
+      // parent and no symlink at the path.
+      const existed = documentIsOnDisk(target.writePath);
+      if (!existed && proposal.sourceOnDisk) {
         return asJson({
           ...answer,
           applied: false,
@@ -818,7 +940,7 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
       // from, and the file must still hold the text the diff was computed
       // against — otherwise the write would replace content the diff, which
       // the human reviewed, never showed.
-      const onDisk = readDiskText(read.diskPath);
+      const onDisk = readDiskText(target.writePath);
       if (
         hashOf(read.content) !== proposal.contentHash ||
         (onDisk !== null && hashOf(onDisk) !== hashOf(read.content))
@@ -834,7 +956,7 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         });
       }
 
-      const written = writeDocumentAtomically(read.diskPath, applied.patched);
+      const written = writeDocumentAtomically(target.writePath, applied.patched, onDisk);
       if (!written.ok) {
         return asJson({
           ...answer,
@@ -845,13 +967,22 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         });
       }
 
+      const notes = [
+        `The reviewed \`patchedContent\` was written to ${target.writePath}.`,
+        target.writePath === read.diskPath
+          ? null
+          : `${read.diskPath} is a symbolic link, so the text landed on the file it names and the link survived.`,
+        existed
+          ? null
+          : 'The document was not on disk: the proposal came from an unsaved buffer, so this write created it.',
+        'Run validate_document on it to confirm the gaps the proposal addressed are closed.',
+      ].filter((line): line is string => line !== null);
       return asJson({
         ...answer,
         written: true,
-        writtenPath: read.diskPath,
-        note:
-          `The reviewed \`patchedContent\` was written to ${read.diskPath}. ` +
-          'Run validate_document on it to confirm the gaps the proposal addressed are closed.',
+        writtenPath: target.writePath,
+        created: !existed,
+        note: notes.join(' '),
       });
     },
   );
@@ -865,12 +996,9 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
  * diff and can retry against the requeued id. The id changes because the queue
  * keys on a monotonic sequence, and the requeued answer says so.
  */
-function requeue(
-  queue: ProposalQueue,
-  proposal: MetadataProposal & { sourceContent?: string },
-): MetadataProposal {
-  const { sourceContent, ...rest } = proposal;
-  return queue.enqueue(rest, sourceContent);
+function requeue(queue: ProposalQueue, proposal: AcceptedProposal): MetadataProposal {
+  const { sourceContent, sourceOnDisk, ...rest } = proposal;
+  return queue.enqueue(rest, sourceContent, sourceOnDisk);
 }
 
 /** The two schemas as read-only resources, so a client can read them by URI. */

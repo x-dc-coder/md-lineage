@@ -74,7 +74,26 @@ interface QueuedProposal {
   accepted: boolean;
   /** The buffer snapshot suggest_metadata analysed, when it was given inline. */
   sourceContent?: string;
+  /**
+   * Whether the document was on disk when the proposal was made.
+   *
+   * This is what tells a proposal over a never-saved buffer from one over a
+   * document that has since been deleted or renamed: the write may create the
+   * former and must never resurrect the latter.
+   */
+  readonly sourceOnDisk: boolean;
 }
+
+/**
+ * A proposal as `accept` hands it back: the queue entry's source facts, so a
+ * requeue can carry them over unchanged.
+ */
+export type AcceptedProposal = MetadataProposal & {
+  /** The buffer snapshot suggest_metadata analysed, when it was given inline. */
+  sourceContent?: string;
+  /** Whether the document was on disk when the proposal was made. */
+  sourceOnDisk: boolean;
+};
 
 /** Monotonic proposal id, so the queue's ids are unique within a session. */
 let sequence = 0;
@@ -93,16 +112,24 @@ export function resetProposalIds(): void {
 export class ProposalQueue {
   private readonly entries = new Map<string, QueuedProposal>();
 
-  /** Add a proposal and return it with its id assigned. `sourceContent`
-   *  carries the exact buffer the proposal was built from, so `apply` works
-   *  on unsaved documents that never reached the disk. */
+  /**
+   * Add a proposal and return it with its id assigned.
+   *
+   * `sourceContent` carries the exact buffer the proposal was built from, so
+   * `apply` works on unsaved documents that never reached the disk.
+   * `sourceOnDisk` records whether that document had a file behind it, which
+   * is what separates a never-saved buffer from a deleted one; it defaults to
+   * "it did", because a proposal enqueued without a snapshot was necessarily
+   * derived from the disk.
+   */
   enqueue(
     proposal: Omit<MetadataProposal, 'id' | 'createdAt'>,
     sourceContent?: string,
+    sourceOnDisk: boolean = sourceContent === undefined,
   ): MetadataProposal {
     const id = `proposal-${++sequence}`;
     const full: MetadataProposal = { ...proposal, id, createdAt: new Date().toISOString() };
-    this.entries.set(id, { proposal: full, accepted: false, sourceContent });
+    this.entries.set(id, { proposal: full, accepted: false, sourceContent, sourceOnDisk });
     return full;
   }
 
@@ -127,14 +154,14 @@ export class ProposalQueue {
   }
 
   /** Mark a proposal accepted and drop it: applying it is the caller's step. */
-  accept(id: string): (MetadataProposal & { sourceContent?: string }) | null {
+  accept(id: string): AcceptedProposal | null {
     const entry = this.entries.get(id);
     if (!entry) return null;
     entry.accepted = true;
     this.entries.delete(id);
     return entry.sourceContent === undefined
-      ? entry.proposal
-      : { ...entry.proposal, sourceContent: entry.sourceContent };
+      ? { ...entry.proposal, sourceOnDisk: entry.sourceOnDisk }
+      : { ...entry.proposal, sourceContent: entry.sourceContent, sourceOnDisk: entry.sourceOnDisk };
   }
 }
 
