@@ -19,9 +19,23 @@
  *     is the one the returned diff describes.
  */
 
-import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { resolve, isAbsolute, relative, sep, dirname, join } from 'node:path';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  readFileSync,
+  readdirSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  realpathSync,
+  lstatSync,
+  existsSync,
+  accessSync,
+  openSync,
+  closeSync,
+  constants,
+} from 'node:fs';
+import { resolve, isAbsolute, relative, sep, dirname, join, basename } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
@@ -109,7 +123,7 @@ export function createMdlineageMcpServer(context: McpServerContext): {
         'MDLineage: validate Markdown metadata, resolve document identities, and review metadata proposals. ' +
         'Use validate_document for one file, validate_repository for the whole workspace, and suggest_metadata ' +
         'followed by apply_metadata_patch to fill missing metadata — apply returns a diff and writes nothing ' +
-        'unless it is called with write: true, which writes the reviewed text to the document on disk.',
+        'unless it is called with write: true, which overwrites the document on disk with the reviewed text.',
     },
   );
 
@@ -250,14 +264,54 @@ export function resolvePath(path: string, root: string): string {
 }
 
 /**
- * True when `diskPath` names something inside `root` — the whole of the write
- * guard. A proposal's path is resolved by `readDocument` without checking it,
- * so a `../` spelling (or an absolute path outside the root) reaches this
- * check and must be refused rather than written.
+ * Resolve the real path a write would land on, and refuse one that escapes the
+ * workspace root.
+ *
+ * A `path.relative` containment test on the spelling the caller gave is a
+ * string prefix test, and a symlink inside the root makes it lie:
+ * `root/link/doc.md` compares as inside the root while `link` points anywhere
+ * at all. The whole parent chain is therefore resolved with `realpath` before
+ * the containment test, and the root is resolved too — a workspace whose root
+ * is itself a symlink is a legitimate setup, and a write that lands inside the
+ * real root is the correct behaviour, not a rejection.
  */
-function insideWorkspace(diskPath: string, root: string): boolean {
-  const rel = relative(root, diskPath);
-  return rel.length > 0 && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+function resolveWriteTarget(diskPath: string, root: string): { ok: true } | { ok: false; error: string } {
+  let realRoot: string;
+  try {
+    realRoot = realpathSync(root);
+  } catch {
+    return { ok: false, error: `the workspace root ${root} cannot be resolved on disk` };
+  }
+
+  let realParent: string;
+  try {
+    realParent = realpathSync(dirname(diskPath));
+  } catch {
+    return { ok: false, error: `cannot resolve the real path of ${dirname(diskPath)}` };
+  }
+
+  const rel = relative(realRoot, realParent);
+  if (rel === '..' || rel.startsWith(`..${sep}`) || isAbsolute(rel)) {
+    return {
+      ok: false,
+      error:
+        `Refusing to write outside the workspace root: ${diskPath} resolves to ` +
+        `${join(realParent, basename(diskPath))}, which is not inside ${realRoot}.`,
+    };
+  }
+
+  // A trailing symlink is refused rather than followed: the rename would
+  // replace the link itself with a regular file, destroying it, and the text
+  // would land wherever the link points.
+  try {
+    if (lstatSync(diskPath).isSymbolicLink()) {
+      return { ok: false, error: `Refusing to write through a symbolic link: ${diskPath} is a symlink.` };
+    }
+  } catch {
+    // Nothing there: the caller's existence check reports a missing target.
+  }
+
+  return { ok: true };
 }
 
 /** A file's text, or null when it cannot be read (missing, a directory, …). */
@@ -269,9 +323,6 @@ function readDiskText(path: string): string | null {
   }
 }
 
-/** Unique suffix for the temporary file an atomic write goes through. */
-let writeSequence = 0;
-
 /**
  * Write `text` to `path` through a sibling temporary file and a rename.
  *
@@ -281,25 +332,64 @@ let writeSequence = 0;
  * was created but could not be renamed, so a refused write leaves no litter.
  */
 function writeDocumentAtomically(path: string, text: string): { ok: true } | { ok: false; error: string } {
-  const temporary = `${path}.mdlineage-${process.pid}-${++writeSequence}.tmp`;
+  // `rename` checks the DIRECTORY's permissions, not the target file's, so a
+  // file its owner marked read-only would be replaced with no error at all.
+  // The target's own writability is checked first, and a refusal here has not
+  // touched a single byte.
+  if (!targetIsWritable(path)) {
+    return { ok: false, error: `cannot write ${path}: the file is not writable` };
+  }
+
+  const temporary = `${path}.mdlineage-${process.pid}-${randomBytes(8).toString('hex')}.tmp`;
   let mode: number | null = null;
   try {
     mode = statSync(path).mode & 0o777;
   } catch {
     // Nothing there yet: the process umask decides the new file's mode.
   }
+  let created = false;
   try {
-    writeFileSync(temporary, text, mode === null ? {} : { mode });
+    // `wx` creates the temporary exclusively: a predictable name would let
+    // another process pre-create it, or let a stale one survive a restart.
+    const descriptor = openSync(temporary, 'wx', mode ?? 0o666);
+    created = true;
+    writeFileSync(descriptor, text);
+    closeSync(descriptor);
     renameSync(temporary, path);
     return { ok: true };
   } catch (error) {
-    try {
-      rmSync(temporary, { force: true });
-    } catch {
-      // The temporary file may never have been created; nothing to clean up.
+    if (created) {
+      try {
+        rmSync(temporary, { force: true });
+      } catch {
+        // The temporary file may never have been created; nothing to clean up.
+      }
     }
     return { ok: false, error: `cannot write ${path}: ${error instanceof Error ? error.message : String(error)}` };
   }
+}
+
+/**
+ * True when the file at `path` may be written by this process.
+ *
+ * `access(W_OK)` is the real check, except that root passes it for any file:
+ * there the permission bits are the only signal left that the owner meant the
+ * file to stay read-only, so they are read directly.
+ */
+function targetIsWritable(path: string): boolean {
+  try {
+    accessSync(path, constants.W_OK);
+  } catch {
+    return false;
+  }
+  if (process.getuid?.() === 0) {
+    try {
+      return (statSync(path).mode & 0o200) !== 0;
+    } catch {
+      return false;
+    }
+  }
+  return true;
 }
 
 /** SHA-256 of a document, the content hash every proposal carries. */
@@ -605,9 +695,11 @@ function registerSuggestMetadata(server: McpServer, context: McpServerContext, q
  * `write: true` is the explicit opt-in that closes §16 M4's acceptance loop
  * here instead of in a second tool. It writes the reviewed `patchedContent` —
  * the very text the returned diff describes, never a second computation —
- * after two guards: the target must be inside the workspace root, and the file
- * must still hold the text the diff was computed against. Either refusal is a
- * structured error that leaves the file untouched and the proposal queued.
+ * after the guards below: the target must resolve inside the workspace root,
+ * it must still be on disk, it must be writable, and the file must still hold
+ * the text the diff was computed against. Every refusal is a structured error
+ * that leaves the file untouched, requeues the proposal and reports the new id
+ * as `requeuedProposalId`.
  */
 function registerApplyMetadataPatch(server: McpServer, context: McpServerContext, queue: ProposalQueue): void {
   server.registerTool(
@@ -617,22 +709,24 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
       description:
         'Apply a queued proposal by id. Returns Front Matter TextEdits, the resulting document text and a unified diff for review. ' +
         'By default nothing is written: apply the returned edits in an editor, or write the returned text, after a human has reviewed the diff. ' +
-        'Pass `write: true` to write the reviewed `patchedContent` to the document on disk. The write is refused, with the file untouched, ' +
-        'when the document is outside the workspace root or when the file no longer holds the text the diff was computed against.',
+        'Pass `write: true` to OVERWRITE the document on disk with the reviewed `patchedContent` — the write replaces the target file\'s current ' +
+        'content and is not reversible from here. The write is refused, with the file untouched and the proposal requeued ' +
+        '(`requeuedProposalId`), when the target resolves outside the workspace root (a symlink included), when the file no longer ' +
+        'exists on disk, when the file is not writable, or when the file no longer holds the text the diff was computed against.',
       inputSchema: {
         proposal_id: z.string().min(1).describe('The id returned by suggest_metadata.'),
         write: z
           .boolean()
           .optional()
           .describe(
-            'Write the reviewed `patchedContent` to the document on disk. Defaults to false: nothing is written, and only the edits, diff and patched text are returned.',
+            'Write the reviewed `patchedContent` to the document on disk, overwriting its current content. Defaults to false: nothing is written, and only the edits, diff and patched text are returned.',
           ),
       },
       // No readOnlyHint: `write: true` modifies a file, and a client told
       // "read-only" would skip the approval this tool can require. The write
-      // is additive (front matter fields, never a deletion), hence
-      // destructiveHint false rather than the schema's default of true.
-      annotations: { readOnlyHint: false, destructiveHint: false },
+      // replaces the target file's content, which is not reversible from here,
+      // so the destructive hint is the schema's default rather than a denial.
+      annotations: { readOnlyHint: false, destructiveHint: true },
     },
     ({ proposal_id, write }) => {
       const proposal = queue.accept(proposal_id);
@@ -651,8 +745,13 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
       const sourceText = (proposal as { sourceContent?: string }).sourceContent;
       const read = readDocument(proposal.path, sourceText, context.root);
       if (read.content === null) {
-        queue.enqueue(proposal);
-        return asJson({ proposalId: proposal_id, applied: false, error: read.error });
+        return asJson({
+          proposalId: proposal_id,
+          applied: false,
+          written: false,
+          requeuedProposalId: requeue(queue, proposal).id,
+          error: read.error,
+        });
       }
 
       const applied = applyProposalToContent(proposal, read.content);
@@ -660,6 +759,8 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         return asJson({
           proposalId: proposal_id,
           applied: false,
+          written: false,
+          requeuedProposalId: requeue(queue, proposal).id,
           error:
             'The proposal named no location this document has, or the document has no mdlineage front matter block ' +
             'to insert into (adding one is MDL003’s fix, a human or LLM decision).',
@@ -685,14 +786,31 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
       }
 
       // Guard 1: the write never leaves the workspace root, whatever spelling
-      // the proposal's path arrived in.
-      if (!insideWorkspace(read.diskPath, context.root)) {
+      // the proposal's path arrived in — and a symlink inside the root cannot
+      // make a path that points outside compare as inside it.
+      const target = resolveWriteTarget(read.diskPath, context.root);
+      if (!target.ok) {
         return asJson({
           ...answer,
           applied: false,
           written: false,
           requeuedProposalId: requeue(queue, proposal).id,
-          error: `Refusing to write outside the workspace root: ${read.diskPath} is not inside ${context.root}.`,
+          error: target.error,
+        });
+      }
+
+      // Guard 1b: a target that is not on disk is not a document to patch.
+      // Writing would recreate a file the user deleted, or create a fresh one
+      // at a path the document was renamed away from.
+      if (!existsSync(read.diskPath)) {
+        return asJson({
+          ...answer,
+          applied: false,
+          written: false,
+          requeuedProposalId: requeue(queue, proposal).id,
+          error:
+            `The document ${read.diskPath} no longer exists on disk, so writing would recreate a file the user ` +
+            'deleted or renamed. Call suggest_metadata on the document as it is now.',
         });
       }
 
@@ -740,7 +858,7 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
 }
 
 /**
- * Put a proposal back after a refused or failed write, and return the entry
+ * Put a proposal back after a refused or failed accept, and return the entry
  * with its new id.
  *
  * A refusal is a review state, not a lost proposal: the caller keeps the

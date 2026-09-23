@@ -21,7 +21,7 @@
  */
 
 import type { Diagnostic } from '@mdlineage/validator';
-import { scanBoundary, parseFrontmatter, buildLineMap, positionAt } from '@mdlineage/validator';
+import { scanBoundary, parseFrontmatter, buildLineMap, positionAt, scanLineEndings } from '@mdlineage/validator';
 import type { LineMap } from '@mdlineage/validator';
 
 /** One edit to the front matter, addressed the way §8.3 addresses everything. */
@@ -348,7 +348,7 @@ export function locateInsertions(
         indent: containerIndent(lineMap, mapPair.value.items, boundary.rawStart),
         line: at.line - 1,
         column: at.column - 1,
-        text: `${containerIndent(lineMap, mapPair.value.items, boundary.rawStart)}${parts[0]!}: ${formatValue(op.value)}\n`,
+        text: `${containerIndent(lineMap, mapPair.value.items, boundary.rawStart)}${parts[0]!}: ${formatValue(op.value)}${eolAt(content, offset)}`,
       });
       continue;
     }
@@ -382,8 +382,10 @@ export function locateInsertions(
     // still inside the sequence, because YAML keeps it at the item's indent.
     // rangeEnd(item) includes the item's trailing terminator, so the sibling
     // key goes right BEFORE that terminator: on its own line, directly under
-    // `target: …`, with the front matter closer pushed down intact.
-    const beforeTerminator = endOffset - 1;
+    // `target: …`, with the front matter closer pushed down intact. The whole
+    // terminator is stepped over (a CRLF pair, not just its LF), so a CRLF
+    // document keeps its CR on the line it ends.
+    const beforeTerminator = terminatorStartBefore(content, endOffset);
     const endLine = positionAt(lineMap, beforeTerminator);
     spots.push({
       jsonPointer: op.jsonPointer,
@@ -393,7 +395,7 @@ export function locateInsertions(
       indent: siblingIndent,
       line: endLine.line - 1,
       column: endLine.column - 1,
-      text: `\n${siblingIndent}${parts[parts.length - 1]!}: ${formatValue(op.value)}`,
+      text: `${content.slice(beforeTerminator, endOffset)}${siblingIndent}${parts[parts.length - 1]!}: ${formatValue(op.value)}`,
     });
   }
 
@@ -470,6 +472,34 @@ function containerIndent(
   const absolute = rawStart + keyStart;
   const lineStart = lineStartOf(lineMap, absolute);
   return ' '.repeat(Math.max(0, absolute - lineStart));
+}
+
+/**
+ * The line ending an insertion at `offset` must use.
+ *
+ * The terminator that ends the line the insertion joins decides it, so a CRLF
+ * document never gains a bare LF (MDL601) from a patch that claims to add one
+ * field. A document with no terminator to read falls back to its own style.
+ */
+function eolAt(content: string, offset: number): string {
+  if (offset > 0 && content.charCodeAt(offset - 1) === 0x0a) {
+    return offset > 1 && content.charCodeAt(offset - 2) === 0x0d ? '\r\n' : '\n';
+  }
+  return scanLineEndings(content).style === 'crlf' ? '\r\n' : '\n';
+}
+
+/**
+ * Offset of the line terminator that ends at `end`, stepping over a CRLF pair
+ * as one unit so an insertion placed before it does not strand the CR.
+ */
+function terminatorStartBefore(content: string, end: number): number {
+  let start = end;
+  while (start > 0) {
+    const code = content.charCodeAt(start - 1);
+    if (code !== 0x0a && code !== 0x0d) break;
+    start -= 1;
+  }
+  return start;
 }
 
 /** Render a proposal value the way YAML writes it. */
