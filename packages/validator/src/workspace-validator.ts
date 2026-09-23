@@ -435,15 +435,34 @@ function stronglyConnectedComponents(graph: Map<string, readonly string[]>): str
  *     outside the repository, and not MDLineage's to judge;
  *   - same-page anchors (`#section`) — an in-page anchor is MDL201's domain;
  *   - an empty path, which covers a bare `#`.
- * A link carrying BOTH a path and an anchor is split: the path is checked here
- * and the fragment by MDL402, so one bad link produces at most one of each.
+ * A link carrying BOTH a path and an anchor is split (`splitLink`): the path is
+ * checked here and the fragment by MDL402 below, so one bad link produces at
+ * most one diagnostic. The fragment check needs the target's heading anchors,
+ * so it only fires when the path resolves to exactly one indexed document —
+ * a missing target stays MDL401's alone. A same-page anchor (`path === ''`) is
+ * skipped: it belongs to MDL201's in-document domain, never the link layer.
  */
 function mdl401(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
   const out: WorkspaceDiagnostic[] = [];
   for (const link of entry.links) {
     if (!link.path) continue;
     if (isExternal(link.path)) continue;
-    if (resolveLinkPath(index, entry.path, link.path).length > 0) continue;
+    const targets = resolveLinkPath(index, entry.path, link.path);
+    if (targets.length > 0) {
+        if (link.anchor !== '' && !index.anchorsOf(targets[0]!).has(link.anchor)) {
+        out.push(
+          build(
+            'MDL402',
+            `Markdown link fragment does not exist in ${targets[0]!}: #${link.anchor}`,
+            entry,
+            link.offset,
+            config,
+            { url: link.url, path: link.path, anchor: link.anchor },
+          ),
+        );
+      }
+      continue;
+    }
     out.push(
       build('MDL401', `Markdown link target does not exist: ${link.path}`, entry, link.offset, config, {
         url: link.url,
@@ -463,6 +482,9 @@ function isExternal(url: string): boolean {
 
 /**
  * MDL402 — a relation evidence anchor absent from the target document.
+ *
+ * (Link fragments missing from their target are the same code, reported by
+ * `mdl401` once the link's path resolves.)
  *
  * `evidence` resolves against the relation's TARGET document (frontmatter-spec:
  * "The anchor is resolved against the relation's `target` document"), so the

@@ -341,7 +341,7 @@ describe('MDL401 — markdown link targets', () => {
 
   it('splits a file link with an anchor into path and anchor parts', () => {
     const files = new Map<string, string>([
-      ['a.md', doc('docs.a', relations(), body('See [it](./present.md#anchor).'))],
+      ['a.md', doc('docs.a', relations(), body('See [it](./present.md#heading).'))],
       ['present.md', doc('docs.b', relations(), '# Heading\n')],
     ]);
     const index = createWorkspaceIndex(files, defaultConfig());
@@ -406,6 +406,96 @@ describe('MDL401 — markdown link targets', () => {
     const all = validateWorkspace(index, { includeSingleDocument: false });
     assert.equal(byCode(all, 'MDL401').length, 0);
     assert.equal(index.linkReferrersOf('README.md').length, 1);
+  });
+});
+
+describe('MDL402 — link fragments', () => {
+  const body = (links: string) => `${links}\n`;
+
+  it('reports a fragment the target document lacks', () => {
+    const files = new Map<string, string>([
+      ['a.md', doc('docs.a', relations(), body('See [it](./b.md#nope).'))],
+      ['b.md', doc('docs.b', relations(), '# Real\n')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    const d402 = byCode(all, 'MDL402');
+    assert.equal(d402.length, 1, 'path resolves, fragment does not');
+    assert.equal(d402[0]!.path, 'a.md');
+    assert.equal(d402[0]!.data?.anchor, 'nope');
+    assert.equal(d402[0]!.data?.path, './b.md');
+    assert.equal(byCode(all, 'MDL401').length, 0, 'the path part is fine');
+  });
+
+  it('accepts a fragment matching the target slug, including CJK and emoji', () => {
+    const files = new Map<string, string>([
+      [
+        'a.md',
+        doc('docs.a', relations(), body(['[zh](./b.md#缓存-key)', '[emoji](./b.md#identity--scope-)'].join('\n'))),
+      ],
+      ['b.md', doc('docs.b', relations(), '# 缓存 Key\n\n## Identity & scope: 😀\n')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL402').length, 0, 'fragments slugify the same way as anchorsOf');
+  });
+
+  it('is case-sensitive, like the evidence anchor check', () => {
+    const files = new Map<string, string>([
+      ['a.md', doc('docs.a', relations(), body('[x](./b.md#Cache-Key).'))],
+      ['b.md', doc('docs.b', relations(), '# cache key\n')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL402').length, 1, 'GitHub slugs keep case in comparisons');
+  });
+
+  it('treats an empty fragment as no fragment', () => {
+    const files = new Map<string, string>([
+      ['a.md', doc('docs.a', relations(), body('[x](./b.md#).'))],
+      ['b.md', doc('docs.b')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL402').length, 0);
+    assert.equal(byCode(all, 'MDL401').length, 0);
+  });
+
+  it('reports only MDL401 when the target itself is missing', () => {
+    const files = new Map<string, string>([['a.md', doc('docs.a', relations(), body('[x](./nope.md#frag).'))]]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 1, 'one bad link, one diagnostic');
+    assert.equal(byCode(all, 'MDL402').length, 0, 'no fragment check without an indexed target');
+  });
+
+  it('does not check external links with fragments', () => {
+    const files = new Map<string, string>([
+      ['a.md', doc('docs.a', relations(), body('[web](https://example.com/a#nope).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL402').length, 0);
+    assert.equal(byCode(all, 'MDL401').length, 0);
+  });
+
+  it('leaves same-page anchors to MDL201, not the link layer', () => {
+    const files = new Map<string, string>([['a.md', doc('docs.a', relations(), body('[x](#nope).'))]]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL402').length, 0);
+    assert.equal(byCode(all, 'MDL401').length, 0);
+  });
+
+  it('honors a severity override from config diagnostics', () => {
+    const files = new Map<string, string>([
+      ['a.md', doc('docs.a', relations(), body('[x](./b.md#nope).'))],
+      ['b.md', doc('docs.b')],
+    ]);
+    const config = { ...defaultConfig(), diagnostics: { MDL402: 'error' } } as ReturnType<typeof defaultConfig>;
+    const index = createWorkspaceIndex(files, config);
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL402')[0]!.severity, 'error');
   });
 });
 
