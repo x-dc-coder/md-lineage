@@ -14,7 +14,7 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, scanBoundary, parseFrontmatter, buildLineMap } from '@mdlineage/validator';
+import { scanBoundary, parseFrontmatter, buildLineMap } from '@mdlineage/validator';
 import { attrPolicyLine } from '../src/init.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
@@ -984,7 +984,7 @@ describe('mdlineage init', () => {
     }
   });
 
-  it('the .gitattributes policy line comes from the config eolPolicy, not a constant', () => {
+  it('the .gitattributes policy line maps every eolPolicy, and init writes the configured one', () => {
     const dir = scratchDir();
     try {
       // The mapping itself, for every policy the validator can carry.
@@ -993,13 +993,25 @@ describe('mdlineage init', () => {
       // git's `eol` attribute has no CR form, so a CR policy keeps the
       // normalization rule without claiming an eol it cannot express.
       assert.equal(attrPolicyLine('cr'), '* text=auto');
-      // End to end: what init writes is the line the loaded config's policy
-      // maps to, so a repository that declares one gets the matching attribute.
-      const policy = loadConfig(undefined, dir.root).config.eolPolicy;
+      // End to end: a config declaring eolPolicy: crlf produces the CRLF
+      // attribute — an explicit expectation, not one derived from the same
+      // code path under test.
+      writeFileSync(join(dir.root, 'mdlineage.config.yaml'), 'configVersion: 1\neolPolicy: crlf\n');
       const out = runCli(['init', '--write'], dir.root);
       assert.equal(out.status, 0);
-      assert.equal(readFileSync(join(dir.root, '.gitattributes'), 'utf8'), `${attrPolicyLine(policy)}\n`);
-      assert.match(out.stdout, new RegExp(`\\+${attrPolicyLine(policy).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+      assert.equal(readFileSync(join(dir.root, '.gitattributes'), 'utf8'), '* text=auto eol=crlf\n');
+      assert.match(out.stdout, /\+\* text=auto eol=crlf/);
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it('without eolPolicy in the config, init writes the default LF policy line', () => {
+    const dir = scratchDir();
+    try {
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 0);
+      assert.equal(readFileSync(join(dir.root, '.gitattributes'), 'utf8'), '* text=auto eol=lf\n');
     } finally {
       dir.cleanup();
     }

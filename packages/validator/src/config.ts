@@ -49,8 +49,7 @@ export interface RelationSwitch {
  *     (the test suite asserts it), so it never carries a key the schema does
  *     not know.
  *   - `derived` — values the validator computes that are not config-file keys:
- *     the line-ending policy (which comes from .gitattributes and the
- *     repository convention, not from a schema key) and bookkeeping.
+ *     bookkeeping such as `raw`, `source` and `extendsChain`.
  */
 export interface Config {
   readonly configVersion: number;
@@ -65,7 +64,7 @@ export interface Config {
   readonly relations: Readonly<Record<string, RelationSwitch>>;
   /** Severity overrides keyed by diagnostic code. */
   readonly diagnostics: Readonly<Record<string, 'error' | 'warning' | 'information' | 'hint'>>;
-  /** Line-ending policy. Not a schema key (docs/line-ending-management.md §4.1). */
+  /** Line-ending policy (§4.3). Schema key; git's `eol` attribute has no CR form. */
   readonly eolPolicy: EolPolicy;
   /** The unparsed configuration object, for keys this version does not interpret. */
   readonly raw: Readonly<Record<string, unknown>> | null;
@@ -91,6 +90,7 @@ export function configToSchema(config: Config): Readonly<Record<string, unknown>
     vocabulary: { ...config.vocabulary },
     relations: { ...config.relations },
     diagnostics: { ...config.diagnostics },
+    eolPolicy: config.eolPolicy,
   };
   for (const key of Object.keys(out)) {
     if (out[key] === undefined) delete out[key];
@@ -576,6 +576,12 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string, exten
     },
     relations: mergeRelationSwitches(relations, base.relations),
     diagnostics: mergeDiagnostics(diagnostics, base.diagnostics),
+    // The schema enum guarantees validity; the guard keeps the cast honest if
+    // a caller ever hands `normalize` an unvalidated document.
+    eolPolicy:
+      raw.eolPolicy === 'lf' || raw.eolPolicy === 'crlf' || raw.eolPolicy === 'cr'
+        ? (raw.eolPolicy as EolPolicy)
+        : base.eolPolicy,
     raw,
     extendsChain,
   };

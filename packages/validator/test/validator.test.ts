@@ -277,6 +277,16 @@ describe('line endings', () => {
     const { diagnostics } = validateDocumentSync({ content });
     assert.ok(codes(diagnostics).includes('MDL602'));
   });
+
+  it('a CR-only document fails YAML parsing (MDL002) before any proposal can be made', () => {
+    // The yaml library does not treat a lone CR as a newline, so a CR-only
+    // document never yields front matter: MDL002 fires first, and fix /
+    // suggest_metadata have nothing to patch. Pinning this boundary here
+    // (not just in a comment) fails loudly if YAML handling ever changes.
+    const content = '---\rmdlineage:\r  schema: 1\r  id: a\r  kind: p\r  status: d\r---\r\r# T\r';
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.ok(codes(diagnostics).includes('MDL002'));
+  });
 });
 
 /** Load config from a directory or file, inside this process. */
@@ -313,6 +323,18 @@ describe('config defaults', () => {
     assert.deepEqual(result.diagnostics, []);
     assert.equal(result.config.metadata.required, true);
     assert.equal(result.config.eolPolicy, 'lf');
+  });
+
+  it('a config file may declare eolPolicy and normalize reads it', () => {
+    const tmp = resolve(repoRoot, 'node_modules', '.mdlineage-eol-policy.yaml');
+    writeFileSync(tmp, 'configVersion: 1\neolPolicy: crlf\n');
+    try {
+      const result = loadConfigFrom(tmp);
+      assert.deepEqual(result.diagnostics, [], 'eolPolicy is a legal top-level key');
+      assert.equal(result.config.eolPolicy, 'crlf');
+    } finally {
+      rmSync(tmp);
+    }
   });
 
   it('a broken config yields MDL900 diagnostics and falls back to defaults', () => {

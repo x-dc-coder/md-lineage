@@ -154,6 +154,11 @@
       },
       "description": "Severity overrides keyed by diagnostic code, for example `{MDL301: error, MDL304: warning}`."
     },
+    "eolPolicy": {
+      "enum": ["lf", "crlf", "cr"],
+      "default": "lf",
+      "description": "Line-ending policy the validator enforces (MDL601/MDL602) and `mdlineage init` writes into .gitattributes (§4.3: \"`* text=auto eol=lf` (or the configured policy)\"). git's `eol` attribute has no CR form, so a `cr` policy yields the bare `* text=auto` normalization rule."
+    },
     "schemaFile": {
       "type": "string",
       "minLength": 1,
