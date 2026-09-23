@@ -817,7 +817,7 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
       title: 'Accept a metadata proposal',
       description:
         'Apply a queued proposal by id. Returns Front Matter TextEdits, the resulting document text and a unified diff for review. ' +
-        'By default nothing is written: apply the returned edits in an editor, or write the returned text, after a human has reviewed the diff. ' +
+        'By default nothing is written. The edits\' offsets target the ORIGINAL text: apply them from the highest offset downward (never top-to-bottom on the shifting text), or simply write the returned `patchedContent`, after a human has reviewed the diff. ' +
         'Pass `write: true` to OVERWRITE the document on disk with the reviewed `patchedContent` — the write replaces the target file\'s current ' +
         'content and is not reversible from here. The write is refused, with the file untouched and the proposal requeued ' +
         '(`requeuedProposalId`, which is null when the id named no queued proposal and so nothing could be requeued), ' +
@@ -898,7 +898,7 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         return asJson({
           ...answer,
           written: false,
-          note: 'Nothing was written. Apply the edits in an editor, or write `patchedContent`, after reviewing `diff`.',
+          note: 'Nothing was written. The edits\' offsets target the original text: apply them from the highest offset downward, or write `patchedContent`, after reviewing `diff`.',
         });
       }
 

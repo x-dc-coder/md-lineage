@@ -264,7 +264,13 @@ export interface FrontMatterTextEdit {
 export interface AppliedPatch {
   readonly proposalId: string;
   readonly path: string;
-  /** The edits, in document order, for an editor or a caller to apply. */
+  /**
+   * The edits, in document order. Each offset targets the ORIGINAL text, not
+   * the text left by the previous edit: apply them from the highest offset
+   * downward, or write `patchedContent` directly. Applying top-to-bottom on
+   * the shifting text double-counts the earlier insertions and corrupts the
+   * document.
+   */
   readonly edits: readonly FrontMatterTextEdit[];
   /** The unified diff a human reviews before anything is written. */
   readonly diff: string;
