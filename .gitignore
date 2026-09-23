@@ -12,3 +12,5 @@ logs/
 # MDLineage build and dependency output
 node_modules/
 dist/
+# schemas copied into the packages that read them at pack time (scripts/copy-schemas.mjs)
+packages/*/schemas/

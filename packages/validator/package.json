@@ -11,9 +11,19 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist"],
+  "files": ["dist", "schemas", "!dist/**/*.map", "!dist/.tsbuildinfo"],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x-dc-coder/md-lineage.git",
+    "directory": "packages/validator"
+  },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
+    "prepack": "node ../../scripts/copy-schemas.mjs",
     "test": "node --import tsx --test \"test/*.test.ts\""
   },
   "dependencies": {

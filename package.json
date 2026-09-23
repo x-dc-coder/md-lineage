@@ -7,11 +7,19 @@
   "engines": {
     "node": ">=20"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x-dc-coder/md-lineage.git"
+  },
+  "bugs": {
+    "url": "https://github.com/x-dc-coder/md-lineage/issues"
+  },
+  "homepage": "https://github.com/x-dc-coder/md-lineage#readme",
   "workspaces": [
     "packages/*"
   ],
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node scripts/ensure-bin-exec.mjs",
     "clean": "tsc -b --clean",
     "lint:md": "remark docs README.md --frail --no-stdout",
     "check:md": "mdlineage check .",

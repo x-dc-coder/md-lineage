@@ -14,9 +14,18 @@
       "import": "./dist/server.js"
     }
   },
-  "files": ["dist"],
+  "files": ["dist", "!dist/**/*.map", "!dist/.tsbuildinfo"],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x-dc-coder/md-lineage.git",
+    "directory": "packages/language-server"
+  },
   "scripts": {
-    "build": "tsc -b",
+    "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
     "test": "node --import tsx --test \"test/*.test.ts\""
   },
   "dependencies": {
