@@ -89,7 +89,7 @@ The first agent integration should expose focused operations instead of requirin
 - `suggest_metadata(document_id, changed_sections)` — MCP: `suggest_metadata`
 - `analyze_impact(document_id or diff)` — MCP: `analyze_impact`
 - `validate_document(path, content?)` / `validate_repository(paths)` — MCP: same names
-- `apply_metadata_patch(proposal_id)` — explicit accept step; MCP exposes it under this name (see `docs/remark-language-server-solution.md` §12 for the authoritative tool list, signatures, and proposal lifecycle)
+- `apply_metadata_patch(proposal_id, write?)` — explicit accept step; by default it returns a reviewable diff and writes nothing, `write: true` atomically persists the reviewed text; MCP exposes it under this name (see `docs/remark-language-server-solution.md` §12 for the authoritative tool list, signatures, and proposal lifecycle)
 
 Read operations should return concise results with document paths and evidence. Writing metadata should be an explicit operation that produces a reviewable diff.
 

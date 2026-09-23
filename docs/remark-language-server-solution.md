@@ -489,14 +489,14 @@ Front Matter 修复必须采用 CST/TextEdit 局部编辑，不能 parse 后整�
 mdlineage server --stdio
 mdlineage check [paths...]
 mdlineage check --changed
-mdlineage fix [paths...]
-mdlineage init
-mdlineage config validate
-mdlineage index rebuild
+mdlineage fix [paths...]        （已实现）
+mdlineage init                  （已实现）
+mdlineage config validate       （未实现）
+mdlineage index rebuild         （未实现）
 mdlineage mcp
 ```
 
-`fix` 输出安全修复（含行尾规范化，见 `docs/line-ending-management.md` §4.2）；`init` 引导仓库接入：生成 `mdlineage.config.yaml`、`.gitattributes` 行尾策略（`* text=auto eol=lf` 或配置的策略）与空 schema 目录，已有属性文件时只追加缺失路径并先展示 dry-run diff。
+`fix` 输出安全修复（含行尾规范化，见 `docs/line-ending-management.md` §4.2），已实现（默认 dry-run，`--write` 落盘）；`init` 引导仓库接入：生成 `mdlineage.config.yaml`、`.gitattributes` 行尾策略（`* text=auto eol=lf` 或配置的策略）与空 schema 目录，已有属性文件时只追加缺失路径并先展示 dry-run diff——已实现，同样默认 dry-run。`config validate` 与 `index rebuild` 仍未实现。
 
 编辑器只配置一个 LSP：
 
@@ -614,11 +614,11 @@ MCP 复用 validator 和 Workspace Index，提供：
 - `suggest_metadata(path)`
 - `search_documents(query, filters?)`
 - `analyze_impact(document_id | diff)`
-- `apply_metadata_patch(proposal_id)`
+- `apply_metadata_patch(proposal_id, write?)`
 
 前七项（至 `analyze_impact`）为确定性操作。`suggest_metadata` 可使用检索或 LLM，但返回结果必须标记为 proposal，不能混入 diagnostics，也不能直接写权威 Front Matter。
 
-工具面的总表（含 `get_document` 等只读操作）以本节为准；`docs/architecture.md` 的 Agent interface 是概念层清单，落地签名以这里为准。proposal 的存储与生命周期：`suggest_metadata` 将 proposal（含 evidence、confidence、分析版本、内容哈希）写入本地待审队列，`apply_metadata_patch(proposal_id)` 经用户确认后将补丁作为 TextEdit 应用并生成可审阅 diff——LLM 永远没有直接写 Front Matter 的通道，闭环由这个显式接受动作完成。
+工具面的总表（含 `get_document` 等只读操作）以本节为准；`docs/architecture.md` 的 Agent interface 是概念层清单，落地签名以这里为准。proposal 的存储与生命周期：`suggest_metadata` 将 proposal（含 evidence、confidence、分析版本、内容哈希）写入本地待审队列，`apply_metadata_patch(proposal_id)` 经用户确认后将补丁作为 TextEdit 应用并生成可审阅 diff——默认只返 diff、不落盘；`write: true` 是显式 opt-in，把审阅过的内容原子写入 Front Matter。LLM 没有隐式写 Front Matter 的通道，落盘只经由这个显式接受动作并显式开启。
 
 ## 13. 性能和并发目标
 
@@ -745,7 +745,7 @@ MCP 复用 validator 和 Workspace Index，提供：
 - preset、自定义规则 API
 - 插件 allowlist/隔离
 
-验收：大模型能在提交前获得结构化诊断；proposal 经显式接受写入 Front Matter 并生成可审阅 diff；组织规则无需 fork 核心项目即可复用。
+验收：大模型能在提交前获得结构化诊断；proposal 经显式接受产生可审阅的 diff，`write: true` 时把审阅过的内容原子写入 Front Matter（默认只返 diff、不落盘）；组织规则无需 fork 核心项目即可复用。
 
 ## 17. 推荐首批范围
 
