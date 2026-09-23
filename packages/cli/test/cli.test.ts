@@ -971,6 +971,70 @@ describe('mdlineage init', () => {
       dir.cleanup();
     }
   });
+
+  it('a stray path argument is a usage error, the way check refuses one', () => {
+    const dir = scratchDir();
+    try {
+      const out = runCli(['init', 'extra.md'], dir.root);
+      assert.equal(out.status, 2);
+      assert.match(out.stderr, /init takes no paths \(unexpected: extra\.md\)/);
+      assert.equal(existsSync(join(dir.root, 'mdlineage.config.yaml')), false, 'nothing was written');
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it('the .gitattributes policy line comes from the config eolPolicy, not a constant', () => {
+    const dir = scratchDir();
+    try {
+      // The mapping itself, for every policy the validator can carry.
+      assert.equal(attrPolicyLine('lf'), '* text=auto eol=lf');
+      assert.equal(attrPolicyLine('crlf'), '* text=auto eol=crlf');
+      // git's `eol` attribute has no CR form, so a CR policy keeps the
+      // normalization rule without claiming an eol it cannot express.
+      assert.equal(attrPolicyLine('cr'), '* text=auto');
+      // End to end: what init writes is the line the loaded config's policy
+      // maps to, so a repository that declares one gets the matching attribute.
+      const policy = loadConfig(undefined, dir.root).config.eolPolicy;
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 0);
+      assert.equal(readFileSync(join(dir.root, '.gitattributes'), 'utf8'), `${attrPolicyLine(policy)}\n`);
+      assert.match(out.stdout, new RegExp(`\\+${attrPolicyLine(policy).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it('a read-only directory is reported, not crashed on', () => {
+    const dir = scratchDir();
+    try {
+      chmodSync(dir.root, 0o555);
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 1);
+      assert.match(out.stderr, /mdlineage: cannot write mdlineage\.config\.yaml: EACCES/);
+      assert.ok(!out.stderr.includes('\n    at '), 'no stack trace is leaked');
+    } finally {
+      chmodSync(dir.root, 0o755);
+      dir.cleanup();
+    }
+  });
+
+  it('a read-only .gitattributes is reported, not crashed on', () => {
+    const dir = scratchDir();
+    const custom = '# my rules\n';
+    writeFileSync(join(dir.root, '.gitattributes'), custom);
+    chmodSync(join(dir.root, '.gitattributes'), 0o444);
+    try {
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 1);
+      assert.match(out.stderr, /mdlineage: cannot write \.gitattributes: EACCES/);
+      assert.ok(!out.stderr.includes('\n    at '), 'no stack trace is leaked');
+      assert.equal(readFileSync(join(dir.root, '.gitattributes'), 'utf8'), custom, 'the file is untouched');
+    } finally {
+      chmodSync(join(dir.root, '.gitattributes'), 0o644);
+      dir.cleanup();
+    }
+  });
 });
 
 describe('mdlineage fix', () => {
