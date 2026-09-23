@@ -21,7 +21,9 @@
 
 import { parseArgs } from 'node:util';
 import { cwd as processCwd } from 'node:process';
-import { relative } from 'node:path';
+import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { resolve, relative } from 'node:path';
 import {
   checkFiles,
   renderText,
@@ -30,11 +32,13 @@ import {
   type CheckResult,
   type CheckOptions,
 } from './check.js';
+import { validateDocumentSync, loadConfig } from '@mdlineage/validator';
 import { renderSarif } from './sarif.js';
 import { expandMarkdownPaths, type ExpandedPath } from './paths.js';
 import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from './git.js';
 import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verifyBaseline, baselineRoot, BASELINE_FILE } from './baseline.js';
 import { startStdio } from '@mdlineage/language-server';
+import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
 
@@ -45,6 +49,8 @@ Usage:
   mdlineage baseline show           List the committed baseline
   mdlineage baseline verify         CI gate: diagnostics must match the baseline
   mdlineage server --stdio          Run the language server over stdio
+  mdlineage mcp --stdio             Run the MCP server over stdio
+  mdlineage suggest <file>          Propose metadata for a document (no writes)
 
 Options:
   --format <text|json|sarif>  Output shape (default: text)
@@ -57,6 +63,7 @@ Options:
   --force                     baseline update: write despite an unreadable baseline
   --report-only               baseline update: print the change set, write nothing
   --frail                     Any diagnostic fails the run, warnings included
+  --root <dir>                mcp: the workspace to index (default: the CWD)
   --help, -h                  Show this text
   --version, -v               Print the version
 
@@ -86,6 +93,7 @@ interface ParsedArgs {
     force?: boolean;
     'report-only'?: boolean;
     stdio?: boolean;
+    root?: string;
     help?: boolean;
     version?: boolean;
   };
@@ -113,9 +121,12 @@ function readArgs(argv: string[]): ParsedArgs {
       frail: { type: 'boolean' },
       force: { type: 'boolean' },
       'no-baseline': { type: 'boolean' },
-      // `mdlineage server --stdio`: routed to the LSP transport switch, so it
-      // must parse as a known boolean instead of an unknown option.
+      // `mdlineage server --stdio` and `mdlineage mcp --stdio`: routed to the
+      // transport switch of whichever server the command names, so it must
+      // parse as a known boolean instead of an unknown option.
       stdio: { type: 'boolean' },
+      // `mdlineage mcp --root <dir>` names the tree the MCP server indexes.
+      root: { type: 'string' },
       'report-only': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -147,6 +158,12 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (command === 'server') {
     return runServer(parsed.positionals.slice(1), parsed.values);
+  }
+  if (command === 'mcp') {
+    return runMcp(parsed.positionals.slice(1), parsed.values);
+  }
+  if (command === 'suggest') {
+    return runSuggest(parsed.positionals.slice(1), parsed.values);
   }
   if (command !== 'check') {
     process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
@@ -331,6 +348,85 @@ function runServer(args: string[], values: ParsedArgs['values']): number {
     // The lifecycle answer is "clean shutdown acknowledged"; the process exits
     // when stdio closes or `exit` arrives.
   });
+  return 0;
+}
+
+/**
+ * `mdlineage mcp`: the MCP server (§12), the model-facing channel.
+ *
+ * Only stdio exists, same as the LSP's M3-a transport surface: a stream the
+ * process owns from here on is the only transport this CLI hands out.
+ */
+function runMcp(args: string[], values: ParsedArgs['values']): number {
+  if (values.help) {
+    process.stdout.write(`${HELP}\n`);
+    return 0;
+  }
+  if (!values.stdio) {
+    const transport = args[0];
+    process.stderr.write(
+      `mdlineage: unknown mcp transport '${transport ?? '(none)'}' (expected --stdio)\n\n${HELP}\n`,
+    );
+    return 2;
+  }
+  // The MCP server owns stdin/stdout from here on, exactly like the LSP: the
+  // first framing byte this writes is JSON-RPC, so nothing may print first.
+  startMcpStdio({
+    root: values.root ?? processCwd(),
+    configFile: values.config,
+  }).catch((error: unknown) => {
+    process.stderr.write(
+      `mdlineage: the MCP server failed to start: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    process.exitCode = 1;
+  });
+  return 0;
+}
+
+/**
+ * `mdlineage suggest <file>`: the deterministic half of the accept loop, on the
+ * command line.
+ *
+ * Prints the proposals `suggest_metadata` would return over MCP, as JSON. The
+ * queue is this process's own — a CLI run is one suggestion, nothing to accept
+ * against — so the proposal ids here are a demonstration of the shape an MCP
+ * session hands a model, and the file is never written. Accepting is
+ * `apply_metadata_patch` over MCP, or an editor applying the printed edits.
+ */
+function runSuggest(args: string[], values: ParsedArgs['values']): number {
+  if (values.help) {
+    process.stdout.write(`${HELP}\n`);
+    return 0;
+  }
+  const file = args[0];
+  if (!file) {
+    process.stderr.write(`mdlineage: suggest needs a file\n\n${HELP}\n`);
+    return 2;
+  }
+  const root = processCwd();
+  const target = resolve(root, file);
+  let content: string;
+  try {
+    content = readFileSync(target, 'utf8');
+  } catch (error) {
+    process.stderr.write(
+      `mdlineage: cannot read ${file}: ${error instanceof Error ? error.message : String(error)}\n`,
+    );
+    return 1;
+  }
+
+  const loaded = loadConfig(values.config, values.config ? undefined : root);
+  const result = validateDocumentSync({ path: file, content, config: loaded.config });
+  const candidate = buildProposals(result.diagnostics, {
+    vocabulary: {
+      kinds: loaded.config.vocabulary.kinds ?? [],
+      statuses: loaded.config.vocabulary.statuses ?? [],
+    },
+    contentHash: createHash('sha256').update(content, 'utf8').digest('hex'),
+    path: file,
+  });
+
+  process.stdout.write(`${JSON.stringify({ ...candidate, id: null, createdAt: null }, null, 2)}\n`);
   return 0;
 }
 

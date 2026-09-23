@@ -20,6 +20,7 @@
   },
   "dependencies": {
     "@mdlineage/language-server": "*",
+    "@mdlineage/mcp-server": "*",
     "@mdlineage/validator": "*",
     "glob": "^10.5.0"
   },

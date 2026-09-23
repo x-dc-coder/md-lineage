@@ -19,7 +19,7 @@
 import { statSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { dirname, resolve, sep } from 'node:path';
 import { parseDocument } from 'yaml';
 // `ajv` ships no `exports` map, so the Draft 2020-12 build is imported by path;
 // its default export is the Ajv2020 class.
@@ -71,6 +71,12 @@ export interface Config {
   readonly raw: Readonly<Record<string, unknown>> | null;
   /** Absolute path the config was loaded from, or null for built-in defaults. */
   readonly source: string | null;
+  /**
+   * Presets this config was assembled from, innermost first. Empty for a config
+   * with no `extends` (§7.5). The chain's own file is NOT included here — it is
+   * `source` — so the two together describe the whole assembly.
+   */
+  readonly extendsChain: readonly string[];
 }
 
 /**
@@ -125,6 +131,7 @@ export function defaultConfig(): Config {
     eolPolicy: 'lf',
     raw: null,
     source: null,
+    extendsChain: [],
   };
 }
 
@@ -199,7 +206,9 @@ function resolveSchemaPath(name: string): string {
  *
  * This is the only function in the validator package that touches the
  * filesystem, and it is called by adapters at setup time — never by
- * `validateDocument`, which stays pure.
+ * `validateDocument`, which stays pure. A config that `extends` preset files
+ * reads those too, through `applyExtends`; the reads stay here so the
+ * "no IO outside this module" boundary holds for the whole chain.
  */
 export function loadConfig(path?: string, from?: string): ConfigLoadResult {
   const configPath = path ? resolve(path) : findConfig(from ?? process.cwd());
@@ -276,7 +285,201 @@ export function loadConfig(path?: string, from?: string): ConfigLoadResult {
     };
   }
 
-  return { config: normalize(raw, configPath), diagnostics: [] };
+  // `extends` resolves before `normalize`, so the file the caller named is
+  // assembled from its presets first and interpreted once afterwards.
+  const extended = applyExtends(raw, configPath);
+  if (extended.diagnostics.length > 0) {
+    return { config: defaultConfig(), diagnostics: extended.diagnostics };
+  }
+
+  return { config: normalize(extended.raw, configPath, extended.chain), diagnostics: [] };
+}
+
+/**
+ * Organization presets (docs/remark-language-server-solution.md §7.5).
+ *
+ * `extends: [path|package]` names files whose keys this config inherits. The
+ * presets are read, schema-validated and merged BEFORE the file itself is
+ * interpreted, and the file's own keys win, which is the §7.5 rule "仓库可收紧
+ * preset；放宽 error 级组织规则必须显式写出 override 和原因" made mechanical:
+ * an override has to be written in the repository's own file to take effect.
+ *
+ * Merge is a deep overlay of plain data — arrays and scalars replace, maps
+ * merge key by key — which is the whole of what the config schema permits, so
+ * no merge rule can produce a shape the schema would reject.
+ *
+ * Resolution is a relative path (against the extending file's directory, so a
+ * preset ships beside or above the configs that use it). A package name is
+ * resolved as `node_modules/<name>/mdlineage.config.yaml`, which is the layout
+ * a published preset will use; the resolved file is still only READ, never
+ * executed (§15's allowlist boundary), so a preset cannot carry code.
+ */
+function applyExtends(
+  raw: Readonly<Record<string, unknown>>,
+  configPath: string,
+  /** Files already being extended, for cycle detection across the whole chain. */
+  ancestors: ReadonlySet<string> = new Set([configPath]),
+): { raw: Readonly<Record<string, unknown>>; chain: string[]; diagnostics: ConfigDiagnostic[] } {
+  const declared = raw['extends'];
+  if (declared === undefined) return { raw, chain: [], diagnostics: [] };
+  // The schema permits only a non-empty array of non-empty strings, so a value
+  // that reaches here is already shape-valid; `extends: []` means "no presets".
+  const names = (Array.isArray(declared) ? declared : []).filter((n): n is string => typeof n === 'string');
+  if (names.length === 0) return { raw, chain: [], diagnostics: [] };
+
+  const diagnostics: ConfigDiagnostic[] = [];
+  const chain: string[] = [];
+  /**
+   * Every file the assembly has entered, including this one. A preset's own
+   * presets see this set as their ancestors, so a cycle is caught at the link
+   * that closes it no matter how deep the chain is.
+   */
+  const stack = new Set<string>(ancestors);
+
+  let merged: Record<string, unknown> = {};
+
+  for (const name of names) {
+    const preset = resolvePresetPath(name, dirname(configPath));
+    if (preset === null) {
+      diagnostics.push({
+        code: 'MDL900',
+        severity: 'error',
+        message: `Config file not found: ${name} (extended from ${configPath})`,
+      });
+      continue;
+    }
+    // A cycle is a hard refusal, not a silent depth limit: `a extends b extends
+    // a` would otherwise merge the same files until the stack overflowed, and
+    // the honest answer is that the configuration is not well-formed.
+    if (stack.has(preset)) {
+      diagnostics.push({
+        code: 'MDL900',
+        severity: 'error',
+        message: `Circular extends: ${preset} is already being extended (${[...stack, preset].join(' → ')})`,
+      });
+      continue;
+    }
+    const withPreset = new Set(stack);
+    withPreset.add(preset);
+    try {
+      const loaded = loadExtendsFile(preset, withPreset);
+      chain.push(preset);
+      for (const ancestor of loaded.chain) {
+        // A preset's own presets are part of THIS file's assembly, and the
+        // chain reports the whole assembly in load order.
+        if (!chain.includes(ancestor)) chain.push(ancestor);
+      }
+      merged = deepMerge(merged, loaded.raw);
+    } catch (error) {
+      // `loadExtendsFile` reports its own MDL900 for the recoverable cases and
+      // re-throws nothing; this is the catch-all for an unexpected throw, which
+      // still must not take validation down with it.
+      diagnostics.push({
+        code: 'MDL900',
+        severity: 'error',
+        message: `Cannot read configuration file ${preset}: ${errorMessage(error)}`,
+      });
+    }
+  }
+
+  if (diagnostics.length > 0) return { raw, chain: [], diagnostics };
+
+  // The file's own keys overlay the presets it named. `extends` itself is
+  // dropped: the assembled config is one document, and carrying the chain
+  // forward would make every downstream merge re-walk it.
+  const { 'extends': _omit, ...own } = raw as Record<string, unknown>;
+  return { raw: deepMerge(merged, own), chain, diagnostics: [] };
+}
+
+/**
+ * Load one preset file: read, YAML-check, schema-check, then resolve ITS
+ * `extends`. A failure throws with a message the caller wraps in MDL900, so
+ * the diagnostics the caller reports name the file that is actually broken.
+ *
+ * `ancestors` is the set of files this preset is nested inside of, passed down
+ * so a chain a → b → c refuses the moment c names a again instead of after
+ * unwinding back to the top.
+ */
+function loadExtendsFile(
+  path: string,
+  ancestors: ReadonlySet<string>,
+): { raw: Record<string, unknown>; chain: string[] } {
+  const text = readFileSync(path, 'utf8');
+  const doc = parseDocument(text);
+  if (doc.errors.length > 0) {
+    const first = doc.errors[0]!;
+    throw new Error(`${path} is not valid YAML: ${first.message}`);
+  }
+  const raw = doc.toJS() as Record<string, unknown>;
+  if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new Error(`${path} must contain a YAML mapping`);
+  }
+  const validate = configValidator();
+  if (!validate(raw)) {
+    const first = (validate.errors ?? [])[0] as { message?: string } | undefined;
+    throw new Error(`${path} fails the config schema: ${first?.message ?? 'invalid configuration'}`);
+  }
+
+  if (raw['extends'] === undefined) return { raw, chain: [] };
+  const extended = applyExtends(raw, path, ancestors);
+  if (extended.diagnostics.length > 0) {
+    // The chain is broken somewhere below; report it once, at the link the
+    // caller can actually see.
+    throw new Error(extended.diagnostics[0]!.message);
+  }
+  return { raw: extended.raw as Record<string, unknown>, chain: extended.chain };
+}
+
+/**
+ * Where a preset name points.
+ *
+ * A name with a path separator, or one that is already absolute, is a path
+ * resolved against the extending file's directory — the spelling a
+ * repository-internal preset uses (`../presets/base.yaml`, `./mdlineage.base.yaml`).
+ * A bare name is a package: `node_modules/<name>/mdlineage.config.yaml`, which
+ * is the only layout a published preset can guarantee, and the only way to
+ * name one without a path that depends on where the repository keeps its
+ * configuration.
+ */
+function resolvePresetPath(name: string, baseDir: string): string | null {
+  const isPath = name.startsWith('./') || name.startsWith('../') || name.startsWith('/') || name.includes(sep);
+  const candidate = isPath ? resolve(baseDir, name) : resolve(baseDir, 'node_modules', name, 'mdlineage.config.yaml');
+  try {
+    if (!statSync(candidate).isFile()) return null;
+  } catch {
+    return null;
+  }
+  return candidate;
+}
+
+/**
+ * Deep overlay of `overrides` on `base`, neither of which is mutated.
+ *
+ * Scalars and arrays REPLACE (a vocabulary the preset narrows is the preset's
+ * vocabulary, not a union with the repository's); maps merge key by key so a
+ * repository can override one relation type's switches without re-declaring the
+ * other six. `undefined` values are dropped, so a key the overlay sets to
+ * `undefined` cannot punch a hole in the base.
+ */
+function deepMerge(
+  base: Readonly<Record<string, unknown>>,
+  overrides: Readonly<Record<string, unknown>>,
+): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...base };
+  for (const [key, value] of Object.entries(overrides)) {
+    if (value === undefined) continue;
+    const existing = out[key];
+    out[key] =
+      isPlainObject(existing) && isPlainObject(value)
+        ? deepMerge(existing as Record<string, unknown>, value as Record<string, unknown>)
+        : value;
+  }
+  return out;
+}
+
+/** True when `value` is a plain mapping (the only shape deepMerge recurses into). */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function errorMessage(error: unknown): string {
@@ -338,7 +541,7 @@ export function defaultConfigIsValid(): boolean {
 }
 
 /** Map a validated config document onto the Config the validator consumes. */
-function normalize(raw: Readonly<Record<string, unknown>>, source: string): Config {
+function normalize(raw: Readonly<Record<string, unknown>>, source: string, extendsChain: readonly string[] = []): Config {
   const base = defaultConfig();
   const files = (raw.files ?? {}) as Record<string, unknown>;
   const metadata = (raw.metadata ?? {}) as Record<string, unknown>;
@@ -374,6 +577,7 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string): Conf
     relations: mergeRelationSwitches(relations, base.relations),
     diagnostics: mergeDiagnostics(diagnostics, base.diagnostics),
     raw,
+    extendsChain,
   };
 }
 

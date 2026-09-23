@@ -34,6 +34,7 @@ export { defaultConfig, loadConfig, defaultConfigIsValid, resolveSeverity, vocab
 export type { Diagnostic, DiagnosticLayer, Severity, Position, Range } from './diagnostic.js';
 export { layerOf, severityOf, sortByRange } from './diagnostic.js';
 export { buildLineMap, positionAt, rangeAt } from './source-map.js';
+export type { LineMap, ResolvedRange } from './source-map.js';
 export { scanLineEndings, validateLineEndings } from './line-endings.js';
 export { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
 export { parseMarkdown, parseMarkdownSync } from './parse-markdown.js';
