@@ -11,13 +11,16 @@
  *   - `suggest_metadata` turns a document's gaps into proposals (never into
  *     diagnostics — §12 is explicit that a proposal is not a diagnostic);
  *   - `apply_metadata_patch` accepts a proposal and returns Front Matter
- *     TextEdits plus a reviewable diff. It writes nothing. Writing is the
- *     caller's step, after a human has read the diff, which is the "LLM 永远
- *     没有直接写 Front Matter 的通道" boundary §12 draws.
+ *     TextEdits plus a reviewable diff. By default it writes nothing: writing
+ *     is the caller's step, after a human has read the diff, which is the
+ *     "LLM 永远没有直接写 Front Matter 的通道" boundary §12 draws. `write:
+ *     true` is the explicit opt-in that lets the accept loop finish here
+ *     (§16 M4) without a second tool, and it is guarded so the file it touches
+ *     is the one the returned diff describes.
  */
 
 import { createHash } from 'node:crypto';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { resolve, isAbsolute, relative, sep, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
@@ -42,6 +45,7 @@ import {
   applyProposalToContent,
   diffOf,
   resetProposalIds,
+  type MetadataProposal,
 } from './proposals.js';
 
 export { resetProposalIds, ProposalQueue, buildProposals, applyProposalToContent, diffOf };
@@ -104,7 +108,8 @@ export function createMdlineageMcpServer(context: McpServerContext): {
       instructions:
         'MDLineage: validate Markdown metadata, resolve document identities, and review metadata proposals. ' +
         'Use validate_document for one file, validate_repository for the whole workspace, and suggest_metadata ' +
-        'followed by apply_metadata_patch to fill missing metadata — apply returns a diff and never writes.',
+        'followed by apply_metadata_patch to fill missing metadata — apply returns a diff and writes nothing ' +
+        'unless it is called with write: true, which writes the reviewed text to the document on disk.',
     },
   );
 
@@ -242,6 +247,59 @@ export function resolvePath(path: string, root: string): string {
   const rel = relative(root, absolute);
   if (rel === '' || rel.startsWith('..')) return absolute;
   return rel.split(sep).join('/');
+}
+
+/**
+ * True when `diskPath` names something inside `root` — the whole of the write
+ * guard. A proposal's path is resolved by `readDocument` without checking it,
+ * so a `../` spelling (or an absolute path outside the root) reaches this
+ * check and must be refused rather than written.
+ */
+function insideWorkspace(diskPath: string, root: string): boolean {
+  const rel = relative(root, diskPath);
+  return rel.length > 0 && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+}
+
+/** A file's text, or null when it cannot be read (missing, a directory, …). */
+function readDiskText(path: string): string | null {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** Unique suffix for the temporary file an atomic write goes through. */
+let writeSequence = 0;
+
+/**
+ * Write `text` to `path` through a sibling temporary file and a rename.
+ *
+ * The rename is what makes the write atomic on one filesystem: a reader sees
+ * the old file or the new one, never a truncated one, and a failure before the
+ * rename leaves the original untouched. The temporary file is removed when it
+ * was created but could not be renamed, so a refused write leaves no litter.
+ */
+function writeDocumentAtomically(path: string, text: string): { ok: true } | { ok: false; error: string } {
+  const temporary = `${path}.mdlineage-${process.pid}-${++writeSequence}.tmp`;
+  let mode: number | null = null;
+  try {
+    mode = statSync(path).mode & 0o777;
+  } catch {
+    // Nothing there yet: the process umask decides the new file's mode.
+  }
+  try {
+    writeFileSync(temporary, text, mode === null ? {} : { mode });
+    renameSync(temporary, path);
+    return { ok: true };
+  } catch (error) {
+    try {
+      rmSync(temporary, { force: true });
+    } catch {
+      // The temporary file may never have been created; nothing to clean up.
+    }
+    return { ok: false, error: `cannot write ${path}: ${error instanceof Error ? error.message : String(error)}` };
+  }
 }
 
 /** SHA-256 of a document, the content hash every proposal carries. */
@@ -492,7 +550,7 @@ function registerSuggestMetadata(server: McpServer, context: McpServerContext, q
     {
       title: 'Propose metadata completions',
       description:
-        'Analyse a document and propose metadata to fill its gaps: missing required fields (schema, id, kind, status) and missing relation reasons on strong types. Returns PROPOSALS, not diagnostics: nothing is written. Call apply_metadata_patch with a returned proposal id to produce the reviewable edits and diff.',
+        'Analyse a document and propose metadata to fill its gaps: missing required fields (schema, id, kind, status) and missing relation reasons on strong types. Returns PROPOSALS, not diagnostics: nothing is written. Call apply_metadata_patch with a returned proposal id to produce the reviewable edits and diff, and pass `write: true` there to have the reviewed text written to the document.',
       inputSchema: {
         path: z.string().min(1).describe('Path to the document, relative to the workspace root or absolute.'),
         content: z.string().optional().describe('Document text to analyse instead of reading the file. Use for unsaved buffers.'),
@@ -534,14 +592,22 @@ function registerSuggestMetadata(server: McpServer, context: McpServerContext, q
 }
 
 /**
- * `apply_metadata_patch(proposal_id)` — the accept action, and the only thing
- * in this server that produces edits.
+ * `apply_metadata_patch(proposal_id, write?)` — the accept action, and the only
+ * thing in this server that produces edits.
  *
- * The tool applies the proposal IN MEMORY and returns the TextEdits, the
- * resulting text and a unified diff. It never opens the file for writing: the
- * §12 boundary is that accepting produces a reviewable artifact, and writing
- * is a separate, deliberate step the caller takes (an editor applies the edits,
- * or the caller writes the returned text once a human has approved the diff).
+ * The default is IN MEMORY: the proposal is applied to the text it was derived
+ * from, and the TextEdits, the resulting text and a unified diff come back for
+ * a human to review. Nothing is opened for writing — the §12 boundary is that
+ * accepting produces a reviewable artifact, and writing is a separate,
+ * deliberate step the caller takes (an editor applies the edits, or the caller
+ * writes the returned text once a human has approved the diff).
+ *
+ * `write: true` is the explicit opt-in that closes §16 M4's acceptance loop
+ * here instead of in a second tool. It writes the reviewed `patchedContent` —
+ * the very text the returned diff describes, never a second computation —
+ * after two guards: the target must be inside the workspace root, and the file
+ * must still hold the text the diff was computed against. Either refusal is a
+ * structured error that leaves the file untouched and the proposal queued.
  */
 function registerApplyMetadataPatch(server: McpServer, context: McpServerContext, queue: ProposalQueue): void {
   server.registerTool(
@@ -549,13 +615,26 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
     {
       title: 'Accept a metadata proposal',
       description:
-        'Apply a queued proposal by id, IN MEMORY ONLY. Returns Front Matter TextEdits, the resulting document text and a unified diff for review. This tool NEVER writes to disk: apply the returned edits in an editor, or write the returned text, after a human has reviewed the diff.',
+        'Apply a queued proposal by id. Returns Front Matter TextEdits, the resulting document text and a unified diff for review. ' +
+        'By default nothing is written: apply the returned edits in an editor, or write the returned text, after a human has reviewed the diff. ' +
+        'Pass `write: true` to write the reviewed `patchedContent` to the document on disk. The write is refused, with the file untouched, ' +
+        'when the document is outside the workspace root or when the file no longer holds the text the diff was computed against.',
       inputSchema: {
         proposal_id: z.string().min(1).describe('The id returned by suggest_metadata.'),
+        write: z
+          .boolean()
+          .optional()
+          .describe(
+            'Write the reviewed `patchedContent` to the document on disk. Defaults to false: nothing is written, and only the edits, diff and patched text are returned.',
+          ),
       },
-      annotations: { readOnlyHint: true },
+      // No readOnlyHint: `write: true` modifies a file, and a client told
+      // "read-only" would skip the approval this tool can require. The write
+      // is additive (front matter fields, never a deletion), hence
+      // destructiveHint false rather than the schema's default of true.
+      annotations: { readOnlyHint: false, destructiveHint: false },
     },
-    ({ proposal_id }) => {
+    ({ proposal_id, write }) => {
       const proposal = queue.accept(proposal_id);
       if (!proposal) {
         return asJson({
@@ -587,7 +666,7 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         });
       }
 
-      return asJson({
+      const answer = {
         proposalId: proposal_id,
         applied: true,
         path: proposal.path,
@@ -595,10 +674,85 @@ function registerApplyMetadataPatch(server: McpServer, context: McpServerContext
         edits: applied.edits,
         diff: diffOf(read.content, applied.patched),
         patchedContent: applied.patched,
-        note: 'Nothing was written. Apply the edits in an editor, or write `patchedContent`, after reviewing `diff`.',
+      };
+
+      if (!write) {
+        return asJson({
+          ...answer,
+          written: false,
+          note: 'Nothing was written. Apply the edits in an editor, or write `patchedContent`, after reviewing `diff`.',
+        });
+      }
+
+      // Guard 1: the write never leaves the workspace root, whatever spelling
+      // the proposal's path arrived in.
+      if (!insideWorkspace(read.diskPath, context.root)) {
+        return asJson({
+          ...answer,
+          applied: false,
+          written: false,
+          requeuedProposalId: requeue(queue, proposal).id,
+          error: `Refusing to write outside the workspace root: ${read.diskPath} is not inside ${context.root}.`,
+        });
+      }
+
+      // Guard 2: the patch must describe the text the proposal was derived
+      // from, and the file must still hold the text the diff was computed
+      // against — otherwise the write would replace content the diff, which
+      // the human reviewed, never showed.
+      const onDisk = readDiskText(read.diskPath);
+      if (
+        hashOf(read.content) !== proposal.contentHash ||
+        (onDisk !== null && hashOf(onDisk) !== hashOf(read.content))
+      ) {
+        return asJson({
+          ...answer,
+          applied: false,
+          written: false,
+          requeuedProposalId: requeue(queue, proposal).id,
+          error:
+            'The document changed since the proposal was made (its content no longer matches the proposal hash), ' +
+            'so writing now would replace text the reviewed diff does not show. Call suggest_metadata again.',
+        });
+      }
+
+      const written = writeDocumentAtomically(read.diskPath, applied.patched);
+      if (!written.ok) {
+        return asJson({
+          ...answer,
+          applied: false,
+          written: false,
+          requeuedProposalId: requeue(queue, proposal).id,
+          error: written.error,
+        });
+      }
+
+      return asJson({
+        ...answer,
+        written: true,
+        writtenPath: read.diskPath,
+        note:
+          `The reviewed \`patchedContent\` was written to ${read.diskPath}. ` +
+          'Run validate_document on it to confirm the gaps the proposal addressed are closed.',
       });
     },
   );
+}
+
+/**
+ * Put a proposal back after a refused or failed write, and return the entry
+ * with its new id.
+ *
+ * A refusal is a review state, not a lost proposal: the caller keeps the
+ * diff and can retry against the requeued id. The id changes because the queue
+ * keys on a monotonic sequence, and the requeued answer says so.
+ */
+function requeue(
+  queue: ProposalQueue,
+  proposal: MetadataProposal & { sourceContent?: string },
+): MetadataProposal {
+  const { sourceContent, ...rest } = proposal;
+  return queue.enqueue(rest, sourceContent);
 }
 
 /** The two schemas as read-only resources, so a client can read them by URI. */

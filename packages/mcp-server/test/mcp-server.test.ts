@@ -10,14 +10,17 @@
  *
  * The closed loop this milestone exists for is asserted end to end:
  * `suggest_metadata` queues a proposal, `apply_metadata_patch` accepts it and
- * returns edits plus a diff, and nothing is written.
+ * returns edits plus a diff, and nothing is written unless the caller passes
+ * `write: true` — the opt-in is asserted in both directions, including the
+ * guards that refuse it.
  *
  * Run with: node --import tsx --test packages/mcp-server/test/mcp-server.test.ts
  */
 
 import { describe, it, before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, statSync, readdirSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,15 +32,23 @@ import {
   createContext,
   resetProposalIds,
 } from '../src/server.js';
-import type { MetadataProposal } from '../src/proposals.js';
+import type { MetadataProposal, ProposalQueue } from '../src/proposals.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const fixtureRoot = resolve(repoRoot, 'test', 'fixtures');
+
+/** A document with a mdlineage block that is missing `status` — MDL102's shape. */
+const GAPPY_DOCUMENT = '---\nmdlineage:\n  schema: 1\n  id: docs.loop\n  kind: policy\n---\n\n# Loop\n';
 
 /** A client and server joined by an in-memory transport pair. */
 interface Harness {
   client: Client;
   close(): Promise<void>;
+}
+
+/** The same pair, with the server's proposal queue in reach for setup steps. */
+interface HarnessWithQueue extends Harness {
+  queue: ProposalQueue;
 }
 
 /** Start the server over the repo root, wired to a client. */
@@ -49,6 +60,22 @@ async function harness(root = repoRoot): Promise<Harness> {
   await client.connect(clientTransport);
   return {
     client,
+    async close() {
+      await client.close();
+    },
+  };
+}
+
+/** The same harness, keeping the server's proposal queue for direct setup. */
+async function harnessWithQueue(root: string): Promise<HarnessWithQueue> {
+  const context = createContext(root);
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  const client = new Client({ name: 'mdlineage-test', version: '0.0.0' });
+  const { queue } = await connectToTransport(context, serverTransport);
+  await client.connect(clientTransport);
+  return {
+    client,
+    queue,
     async close() {
       await client.close();
     },
@@ -104,6 +131,30 @@ describe('MCP server — tool surface', () => {
       // one of the seven takes arguments.
       for (const tool of listed.tools) {
         assert.equal(tool.inputSchema.type, 'object', `${tool.name} declares an object input schema`);
+      }
+    } finally {
+      await h.close();
+    }
+  });
+
+  it('keeps the read-only tools read-only and says apply_metadata_patch may write', async () => {
+    const h = await harness();
+    try {
+      const listed = await h.client.listTools();
+      const byName = new Map(listed.tools.map((t) => [t.name, t]));
+      // `apply_metadata_patch` takes `write: true`, so a readOnlyHint on it
+      // would tell a client the opposite of what the tool can do.
+      assert.notEqual(byName.get('apply_metadata_patch')?.annotations?.readOnlyHint, true);
+      assert.equal(byName.get('apply_metadata_patch')?.annotations?.destructiveHint, false, 'the write is additive');
+      for (const name of [
+        'validate_document',
+        'validate_repository',
+        'get_schema',
+        'list_document_ids',
+        'resolve_relation_target',
+        'suggest_metadata',
+      ]) {
+        assert.equal(byName.get(name)?.annotations?.readOnlyHint, true, `${name} stays read-only`);
       }
     } finally {
       await h.close();
@@ -481,6 +532,251 @@ describe('MCP server — the suggest/apply accept loop', () => {
       assert.ok(answer.note, 'the caller learns why nothing was proposed');
     } finally {
       await h.close();
+    }
+  });
+});
+
+describe('MCP server — apply_metadata_patch write opt-in', () => {
+  /** Queue one proposal for `path` and return its id. */
+  async function propose(h: Harness, path: string, content?: string): Promise<string> {
+    const { payload } = await callTool(h, 'suggest_metadata', content === undefined ? { path } : { path, content });
+    const answer = payload as { proposals: MetadataProposal[] };
+    assert.equal(answer.proposals.length, 1, `a proposal was queued for ${path}`);
+    return answer.proposals[0]!.id;
+  }
+
+  it('writes nothing by default: the content and the mtime are untouched', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-ro-'));
+    const target = resolve(root, 'doc.md');
+    writeFileSync(target, GAPPY_DOCUMENT);
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'doc.md');
+        const before = statSync(target);
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId });
+        const applied = payload as { applied: boolean; written: boolean; patchedContent: string; note: string };
+
+        assert.equal(applied.applied, true);
+        assert.equal(applied.written, false, 'the answer states that nothing was written');
+        assert.ok(
+          applied.note.toLowerCase().includes('nothing') || applied.note.toLowerCase().includes('never'),
+          'the answer says writing did not happen',
+        );
+        assert.equal(readFileSync(target, 'utf8'), GAPPY_DOCUMENT, 'the file still holds the original text');
+        assert.equal(statSync(target).mtimeMs, before.mtimeMs, 'the file was not even opened for writing');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true writes exactly the reviewed patchedContent and closes the gap', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-wr-'));
+    const target = resolve(root, 'doc.md');
+    writeFileSync(target, GAPPY_DOCUMENT);
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'doc.md');
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as {
+          applied: boolean;
+          written: boolean;
+          writtenPath: string;
+          patchedContent: string;
+          diff: string;
+        };
+
+        assert.equal(applied.applied, true);
+        assert.equal(applied.written, true, 'the opt-in was honoured');
+        assert.equal(applied.writtenPath, target, 'the answer names the file it wrote');
+        assert.equal(
+          readFileSync(target, 'utf8'),
+          applied.patchedContent,
+          'what landed on disk is the text the diff described, not a second computation',
+        );
+        // The diff names the line that was written: its `+ ` prefix plus the
+        // front matter's own two-space indent (the pairing itself is the naive
+        // one the queue ships with — see the progress leftovers).
+        assert.match(applied.diff, /^\+ {3}status: draft$/m, 'the diff still describes the change that was written');
+
+        // The loop closes: the diagnostic the proposal addressed is gone.
+        const validated = (await callTool(h, 'validate_document', { path: 'doc.md' })).payload as {
+          diagnostics: Array<{ code: string }>;
+        };
+        assert.ok(
+          !validated.diagnostics.some((d) => d.code === 'MDL102'),
+          `the written document no longer reports MDL102, got ${validated.diagnostics.map((d) => d.code).join(', ')}`,
+        );
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true refuses a path outside the workspace root and leaves it alone', async () => {
+    const parent = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-esc-'));
+    const root = resolve(parent, 'ws');
+    const outside = resolve(parent, 'outside');
+    mkdirSync(root);
+    mkdirSync(outside);
+    const outsideDoc = resolve(outside, 'doc.md');
+    writeFileSync(outsideDoc, GAPPY_DOCUMENT);
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, '../outside/doc.md');
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as {
+          applied: boolean;
+          written: boolean;
+          error: string;
+          requeuedProposalId: string;
+          patchedContent: string;
+        };
+
+        assert.equal(applied.written, false, 'the escape was refused');
+        assert.equal(applied.applied, false);
+        assert.match(applied.error, /outside the workspace root/, 'the refusal says why');
+        assert.equal(readFileSync(outsideDoc, 'utf8'), GAPPY_DOCUMENT, 'the file outside the root is unchanged');
+        assert.deepEqual(readdirSync(outside), ['doc.md'], 'nothing was created next to it either');
+
+        // The refusal is a review state: the proposal is still queued, and a
+        // default apply of it still writes nothing.
+        const { payload: retried } = await callTool(h, 'apply_metadata_patch', {
+          proposal_id: applied.requeuedProposalId,
+        });
+        assert.equal((retried as { written: boolean }).written, false);
+        assert.equal(readFileSync(outsideDoc, 'utf8'), GAPPY_DOCUMENT, 'the retry wrote nothing either');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true refuses to replace a document that moved on since the proposal', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-stale-'));
+    const target = resolve(root, 'doc.md');
+    writeFileSync(target, GAPPY_DOCUMENT);
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'doc.md');
+        // A human edited the document after the proposal was queued: the diff
+        // the caller reviewed no longer describes the file on disk.
+        const edited = GAPPY_DOCUMENT.replace('# Loop', '# Loop, edited\n\nA human typed this.');
+        writeFileSync(target, edited);
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as { applied: boolean; written: boolean; error: string };
+
+        assert.equal(applied.written, false, 'the stale write was refused');
+        assert.match(applied.error!, /changed since the proposal/, 'the refusal names the reason');
+        assert.equal(readFileSync(target, 'utf8'), edited, 'the human edit survives');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true keeps the no-front-matter branch and writes nothing', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-nofm-'));
+    const target = resolve(root, 'doc.md');
+    writeFileSync(target, GAPPY_DOCUMENT);
+    try {
+      const h = await harnessWithQueue(root);
+      try {
+        // suggest_metadata always travels with the buffer snapshot it analysed,
+        // so the branch that reads the document from disk is reached by
+        // queueing a proposal without one.
+        const queued = h.queue.enqueue({
+          path: 'doc.md',
+          operations: [{ jsonPointer: '/status', value: 'draft', rationale: 'MDL102 requires status.' }],
+          addresses: ['MDL102'],
+          source: 'rules',
+          contentHash: createHash('sha256').update(GAPPY_DOCUMENT, 'utf8').digest('hex'),
+        });
+        // The document loses its mdlineage block between the proposal and the
+        // accept, which is the branch the tool has always reported.
+        const stripped = '# Loop\n';
+        writeFileSync(target, stripped);
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: queued.id, write: true });
+        const applied = payload as { applied: boolean; written: boolean; error: string };
+
+        assert.equal(applied.applied, false, 'the existing error branch is unchanged by the flag');
+        assert.match(applied.error!, /front matter block/, 'the error names the missing block');
+        assert.equal(readFileSync(target, 'utf8'), stripped, 'nothing was written');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true reports a failed write as a structured error with no half-written file', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-fail-'));
+    const target = resolve(root, 'doc.md');
+    writeFileSync(target, GAPPY_DOCUMENT);
+    chmodSync(root, 0o500);
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'doc.md');
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as { applied: boolean; written: boolean; error: string };
+
+        assert.equal(applied.written, false);
+        assert.equal(applied.applied, false);
+        assert.match(applied.error!, /cannot write/, 'the failure is reported, not thrown');
+        assert.equal(readFileSync(target, 'utf8'), GAPPY_DOCUMENT, 'the original file is intact');
+        assert.deepEqual(readdirSync(root), ['doc.md'], 'the temporary file was cleaned up');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      chmodSync(root, 0o700);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('write: true fails cleanly when the target cannot be replaced', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-isdir-'));
+    // A directory where the document should be: the proposal comes from the
+    // buffer (nothing readable on disk), and the rename that would replace the
+    // directory fails — the case a permissions trick cannot produce as root.
+    mkdirSync(resolve(root, 'doc.md'));
+    try {
+      const h = await harness(root);
+      try {
+        const proposalId = await propose(h, 'doc.md', GAPPY_DOCUMENT);
+
+        const { payload } = await callTool(h, 'apply_metadata_patch', { proposal_id: proposalId, write: true });
+        const applied = payload as { applied: boolean; written: boolean; error: string };
+
+        assert.equal(applied.written, false);
+        assert.match(applied.error!, /cannot write/, 'the rename failure is reported as an error');
+        assert.ok(statSync(resolve(root, 'doc.md')).isDirectory(), 'the directory is still there');
+        assert.deepEqual(readdirSync(root), ['doc.md'], 'no temporary file was left behind');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });

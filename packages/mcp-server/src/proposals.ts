@@ -6,8 +6,11 @@
  * matter, marked as a PROPOSAL and never as a diagnostic (§12: "返回结果必须
  * 标记为 proposal，不能混入 diagnostics，也不能直接写权威 Front Matter").
  * `apply_metadata_patch` turns a queued proposal into Front Matter TextEdits
- * plus a reviewable diff — the explicit accept action — and writes nothing to
- * disk. Writing is the caller's job, after a human has read the diff.
+ * plus a reviewable diff — the explicit accept action. It writes nothing by
+ * default; `write: true` is the opt-in that persists the reviewed text, and it
+ * is guarded in the server so the file it touches is the one the diff shows.
+ * Writing without that flag stays the caller's job, after a human has read the
+ * diff.
  *
  * The queue is in-memory by design. It lives as long as the server session that
  * created it, which is the lifecycle §12 assigns the "本地待审队列": the model
