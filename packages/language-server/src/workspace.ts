@@ -10,7 +10,7 @@
  */
 
 import { readFileSync, statSync, readdirSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Config } from '@mdlineage/validator';
 
@@ -81,6 +81,32 @@ export function indexPathOfUri(root: string, uri: string): string | null {
 /** The absolute filesystem path an index key names. */
 export function toAbsolutePath(root: string, path: string): string {
   return resolve(root, path);
+}
+
+/**
+ * The directory a root hint names: `path` itself when it is one, its parent
+ * when it is a file, null when it cannot be read.
+ *
+ * A client's `rootUri`/`rootPath` is supposed to name a folder, but some spell
+ * the document they opened (`rootPath: /tree/docs/a.md`), and a FILE as the
+ * root corrupts the index's vocabulary: `toIndexPath` never applies its
+ * root-relative spelling to the root itself, the document keeps an absolute
+ * key, and its Markdown links then resolve against an index keyed
+ * root-relatively — so each one reports MDL401 for a target that IS in the
+ * tree. The document's own directory is the only reading of the hint that is
+ * defensible, and it is what an editor that reports a file means by "here".
+ *
+ * A path that does not exist yields null rather than the parent chain: the
+ * parent of a typo is another directory this server has no business scanning,
+ * and the caller falls back to the CWD it already chose.
+ */
+export function toRootDirectory(path: string): string | null {
+  try {
+    const stats = statSync(path);
+    return stats.isDirectory() ? path : dirname(path);
+  } catch {
+    return null;
+  }
 }
 
 /** True when a path is worth indexing: a readable Markdown file under `root`. */

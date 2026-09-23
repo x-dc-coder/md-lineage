@@ -63,6 +63,7 @@ import {
   pathToUri,
   indexPathOfUri,
   toAbsolutePath,
+  toRootDirectory,
   MAX_DOCUMENT_BYTES,
 } from './workspace.js';
 import { relative } from 'node:path';
@@ -82,6 +83,7 @@ export {
   toIndexPath,
   indexPathOfUri,
   toAbsolutePath,
+  toRootDirectory,
 } from './workspace.js';
 
 /** §13: the settling window before a burst of edits triggers a validation. */
@@ -379,13 +381,22 @@ function effectiveRoot(): string {
  * URI in some clients, so both spellings are accepted rather than guessed at.
  * Reading either is what keeps such a client scanning the folder it opened
  * instead of the server process's CWD.
+ *
+ * The hint names a DIRECTORY, and only a directory survives (`toRootDirectory`):
+ * a path that turns out to be a file — a client that opened a single document,
+ * or a `rootPath` copied from a buffer's own path — makes the index key every
+ * document absolutely and MDL401 reports each root-relative link in the tree as
+ * missing, so it degrades to its parent instead. A path that cannot be read is
+ * dropped, which leaves the process CWD as the honest answer.
  */
 function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null }): string | null {
   const uri = typeof params.rootUri === 'string' ? params.rootUri : null;
-  if (uri !== null) return uriToPath(uri);
+  const asPath = uri !== null ? uriToPath(uri) : null;
   const legacy = typeof params.rootPath === 'string' ? params.rootPath : null;
-  if (legacy === null) return null;
-  return legacy.startsWith('file:') ? uriToPath(legacy) : resolve(legacy);
+  const legacyPath = legacy === null ? null : legacy.startsWith('file:') ? uriToPath(legacy) : resolve(legacy);
+  const candidate = asPath ?? legacyPath;
+  if (candidate === null) return null;
+  return toRootDirectory(candidate);
 }
 
   /** §13: coalesce a burst of edits into one validation pass per path. */
