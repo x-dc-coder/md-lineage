@@ -258,6 +258,7 @@ function diagnosticsFor(h: Harness, uri: string): Array<{
   code: string;
   source: string;
   message: string;
+  data?: unknown;
 }> {
   for (let i = h.received.length - 1; i >= 0; i--) {
     const message = h.received[i]!;
@@ -1145,6 +1146,121 @@ describe('symbols', () => {
       h.close();
     }
   });
+
+  it('finds a document by its heading text, not only by id or alias', async () => {
+    // §10.2 promises "ID、标题、alias"; the heading search reads the TITLE as
+    // authored, and the title is not its slug — "Authentication model" slugifies
+    // to `authentication-model`, so a query for the words a developer reads is
+    // unanswerable from the slug set alone.
+    const h = harness();
+    try {
+      writeFileSync(
+        resolve(h.root, 'docs/v06.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.authentication-model', '  kind: reference', '  status: active', '---', '', '# Authentication model', '', '## Identity and scope', '', '## Cache key', ''].join('\n'),
+      );
+      writeFileSync(
+        resolve(h.root, 'docs/v01.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.cache-policy', '  kind: policy', '  status: active', '---', '', '# Cache policy', '', '## Cache key', ''].join('\n'),
+      );
+      await initialize(h);
+
+      // The query shares no substring with any id or alias, so only a heading
+      // search can answer it: "Identity and scope" is v06's body heading and
+      // appears in no front matter value.
+      const byTitle = await request(h, 'workspace/symbol', { query: 'Identity and scope' });
+      const titleSymbols = byTitle.result as Array<{ name: string; location: { uri: string } }>;
+      assert.deepEqual(
+        titleSymbols.map((s) => s.name),
+        ['docs.authentication-model'],
+        'a title substring matches the document that carries the heading',
+      );
+
+      // A deeper heading, lower-cased and spelled nothing like either id:
+      // only a heading search can name both documents here.
+      const sub = await request(h, 'workspace/symbol', { query: 'cache key' });
+      const subSymbols = sub.result as Array<{ name: string; location: { uri: string } }>;
+      assert.deepEqual(
+        subSymbols.map((s) => s.name).sort(),
+        ['docs.authentication-model', 'docs.cache-policy'],
+        'a sub-heading title matches the documents that carry it',
+      );
+
+      // The existing surface is untouched: an id query still answers, and a
+      // query no id, alias or heading carries answers null — not [], which a
+      // client treats as "no symbols here" and greys the menu out on.
+      const idHit = await request(h, 'workspace/symbol', { query: 'authentication-model' });
+      assert.ok((idHit.result as Array<{ name: string }>).some((s) => s.name === 'docs.authentication-model'), 'the id still matches');
+
+      const aliasHit = await request(h, 'workspace/symbol', { query: 'no-such-title-anywhere' });
+      assert.equal(aliasHit.result, null, 'a miss answers null, not an empty list');
+
+      const all = await request(h, 'workspace/symbol', { query: '' });
+      assert.deepEqual(
+        ((all.result as Array<{ name: string }>).map((s) => s.name)).sort(),
+        ['docs.authentication-model', 'docs.cache-policy'],
+        'an empty query lists every document',
+      );
+    } finally {
+      h.close();
+    }
+  });
+
+  it('positions a symbol where the id is declared', async () => {
+    // The location is the id declaration, converted through `characterOf` like
+    // every other Location this module builds. `characterOf` is not a spelling
+    // of `column - 1`: it derives the character from the line's TEXT, and the
+    // difference is the clamp — a diagnostic whose column falls past the end of
+    // a short line lands ON the line's end rather than beyond it. A document
+    // whose id line is the LAST line and shorter than the declaration's column
+    // is the case where the two spellings disagree.
+    const h = harness();
+    try {
+      writeFileSync(
+        resolve(h.root, 'docs/a.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: policy', '  status: active', '  aliases:', '    - Cache TTL', '---', '', '# A', ''].join('\n'),
+      );
+      await initialize(h);
+      const response = await request(h, 'workspace/symbol', { query: 'docs.a' });
+      const symbols = response.result as Array<{ name: string; location: { uri: string; range: { start: { line: number; character: number } } } }>;
+      const hit = symbols.find((s) => s.name === 'docs.a')!;
+      assert.equal(hit.location.range.start.line, 3, 'the id value is on 0-based line 3');
+      assert.equal(hit.location.range.start.character, 6, '`  id: ` ends at character 6');
+      assert.equal(hit.location.uri, uri(h, 'docs/a.md'));
+    } finally {
+      h.close();
+    }
+  });
+
+  it('clamps a symbol character that falls past the end of its line', async () => {
+    // A document whose id declaration is on the final line, with no trailing
+    // newline, is where `column - 1` and `characterOf` part company: the
+    // validator reports a column one past the line's last unit and
+    // `characterOf` pulls it back onto the line, while a literal subtraction
+    // would point past the text the client renders.
+    const h = harness();
+    try {
+      writeFileSync(
+        resolve(h.root, 'docs/a.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: policy', '  status: active', '---', '', '# A'].join('\n'),
+      );
+      await initialize(h);
+      const response = await request(h, 'workspace/symbol', { query: 'docs.a' });
+      const symbols = response.result as Array<{ name: string; location: { uri: string; range: { start: { line: number; character: number }; end: { character: number } } } }>;
+      const hit = symbols.find((s) => s.name === 'docs.a')!;
+      const text = readFileSync(resolve(h.root, 'docs/a.md'), 'utf8');
+      const lineText = text.split('\n')[3]!;
+      assert.ok(
+        hit.location.range.start.character <= lineText.length,
+        `the character (${hit.location.range.start.character}) stays inside the line's ${lineText.length} UTF-16 units`,
+      );
+      assert.ok(
+        hit.location.range.end.character <= lineText.length,
+        'the end character is clamped too, so the client never selects past the text',
+      );
+    } finally {
+      h.close();
+    }
+  });
 });
 
 describe('code actions', () => {
@@ -1202,6 +1318,64 @@ describe('code actions', () => {
       const edits = insert!.edit.changes[u]!;
       assert.equal(edits[0]!.newText, '  status: draft\n', 'the vocabulary first value is inserted');
       assert.ok(edits[0]!.range.start.line <= 5, 'the skeleton stays inside the mdlineage block');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('forwards the validator diagnostic data and names the field from it (MDL102)', async () => {
+    // The diagnostic's `data` is the structured payload the CLI and the MCP
+    // already carry. Without it, the code action parsed the field name out of
+    // the message, so a wording change silently broke the fix; `data` is now
+    // authoritative and the message is only a fallback.
+    const h = harness();
+    try {
+      const text = [
+        '---', 'mdlineage:', '  schema: 1', '  id: docs.probe', '  kind: policy',
+        '  relations:', '    - type: depends_on', '      target: docs.other', '      reason: needs it',
+        '---', '', '# Probe', '',
+      ].join('\n');
+      writeFileSync(resolve(h.root, 'docs/probe.md'), text);
+      await initialize(h);
+      const u = uri(h, 'docs/probe.md');
+      didOpen(h, u, 1, text);
+      const diagnostics = await waitForDiagnostics(h, u);
+      const missing = diagnostics.find((d) => d.code === 'MDL102');
+      assert.ok(missing, 'the document is missing a required field');
+      assert.deepEqual(
+        (missing as { data?: unknown }).data,
+        { jsonPointer: '/status', keyword: 'required', missingProperty: 'status' },
+        'the LSP diagnostic forwards the validator data',
+      );
+
+      // A reworded message must not change the fix: the field name comes from
+      // `data`. This is the assertion that falsifies "regex only".
+      const rewritten = diagnostics.map((d) =>
+        d.code === 'MDL102' ? { ...d, message: 'A required field is absent (wording changed).' } : d,
+      );
+      const response = await request(h, 'textDocument/codeAction', {
+        textDocument: { uri: u },
+        range: { start: at(2, 0), end: at(2, 12) },
+        context: { diagnostics: rewritten as never },
+      });
+      const actions = response.result as Array<{ title: string; edit: { changes: Record<string, Array<{ range: { start: { line: number } }; newText: string }>> } }>;
+      const insert = actions.find((a) => a.title.toLowerCase().includes('missing'));
+      assert.ok(insert, 'the MDL102 fix is still offered with a message the regex cannot parse');
+      const edits = insert!.edit.changes[u]!;
+      assert.equal(edits[0]!.newText, '  status: draft\n', 'the field name came from data, not the message');
+
+      // The fallback survives too: a hand-built diagnostic with no `data` still
+      // names its field through the message.
+      const handBuilt = diagnostics.map((d) =>
+        d.code === 'MDL102' ? { ...d, data: undefined } : d,
+      ) as never;
+      const fallback = await request(h, 'textDocument/codeAction', {
+        textDocument: { uri: u },
+        range: { start: at(2, 0), end: at(2, 12) },
+        context: { diagnostics: handBuilt },
+      });
+      const fallbackActions = fallback.result as Array<{ title: string }>;
+      assert.ok(fallbackActions.some((a) => a.title.includes('status')), 'the message regex remains the fallback path');
     } finally {
       h.close();
     }
@@ -1515,6 +1689,167 @@ describe('initialize root negotiation', () => {
       const diagnostics = await waitForDiagnostics(h, u);
       assert.deepEqual(diagnostics.map((d) => d.code), ['MDL401']);
       assert.match(diagnostics[0]!.message, /docs\/nope\.md/, 'the tree rootUri named is the tree that was scanned');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('falls back to the parent when a deprecated rootUri names a file', async () => {
+    // A client that names the DOCUMENT it opened instead of its folder used to
+    // adopt that file as the workspace root verbatim. `toIndexPath` never
+    // applies its root-relative spelling to the root itself, so the entry kept
+    // an absolute key while the scan's keys stayed `README.md`-relative — every
+    // link of the opened document then read as a missing target (four MDL401
+    // for links that resolve). The document's own directory is the folder the
+    // client meant.
+    const h = harness();
+    try {
+      writeFileSync(
+        resolve(h.root, 'README.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.readme', '  kind: policy', '  status: active', '---', '', '# Project', ''].join('\n'),
+      );
+      writeFileSync(
+        resolve(h.root, 'docs/target.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.target', '  kind: policy', '  status: active', '---', '', '# Target', ''].join('\n'),
+      );
+      writeFileSync(
+        resolve(h.root, 'docs/referrer.md'),
+        // Three resolvable spellings plus one genuinely broken link: a
+        // root-relative link, its `./` form, a sibling link, and a miss.
+        [
+          '---', 'mdlineage:', '  schema: 1', '  id: docs.referrer', '  kind: policy', '  status: active',
+          '---', '', '# Referrer', '',
+          '[target](target.md), [via root](docs/target.md), [dotted](./target.md) and [broken](nope.md)', '',
+        ].join('\n'),
+      );
+      // `docs/referrer.md` — a FILE — is what a client that opened a single
+      // document would name. Its parent, `docs/`, is the tree its links spell.
+      h.send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { processId: process.pid, rootUri: pathUri(resolve(h.root, 'docs', 'referrer.md')), capabilities: {} },
+      });
+      await waitFor(h, (m) => m.id === 1);
+      h.send({ jsonrpc: '2.0', method: 'initialized', params: {} });
+
+      const u = uri(h, 'docs/referrer.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/referrer.md'), 'utf8'));
+      const diagnostics = await waitForDiagnostics(h, u);
+      assert.deepEqual(
+        diagnostics.map((d) => d.code),
+        ['MDL401', 'MDL401'],
+        'the two links spelled against the repository root stay reported; the sibling and ./ spellings resolve',
+      );
+      const messages = diagnostics.map((d) => d.message).sort();
+      assert.match(messages[0]!, /docs\/target\.md/, 'a root-relative spelling misses under a document-directory root');
+      assert.match(messages[1]!, /nope\.md/, 'the genuinely broken link is still reported');
+
+      // The resolved root is the parent, so the scan's keys are relative to it
+      // and the sibling target is in the index.
+      const all = await request(h, 'workspace/symbol', { query: '' });
+      const symbols = ((all.result as Array<{ name: string }>).map((s) => s.name)).sort();
+      assert.deepEqual(symbols, ['docs.referrer', 'docs.target'], 'the scan covers the document\'s directory');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('ignores a rootPath hint that names a file outside any scanned tree', async () => {
+    // `rootPath` (LSP 2.x's plain-path spelling) gets the same treatment as
+    // `rootUri`, including the file case.
+    const h = harness();
+    try {
+      writeFileSync(
+        resolve(h.root, 'docs/referrer.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.referrer', '  kind: policy', '  status: active',
+         '---', '', '# Referrer', '', '[broken](nope.md)', ''].join('\n'),
+      );
+      h.send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { processId: process.pid, rootPath: resolve(h.root, 'docs', 'referrer.md'), capabilities: {} },
+      });
+      await waitFor(h, (m) => m.id === 1);
+      h.send({ jsonrpc: '2.0', method: 'initialized', params: {} });
+
+      const u = uri(h, 'docs/referrer.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/referrer.md'), 'utf8'));
+      const diagnostics = await waitForDiagnostics(h, u);
+      assert.deepEqual(diagnostics.map((d) => d.code), ['MDL401'], 'the hint resolved to the document directory');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('ignores a rootUri that names no existing entry', async () => {
+    // A root that cannot be stat'ed (a typo, or a path the client lost) must be
+    // dropped, and the server then keeps the root it was started with. The
+    // harness starts the server with `--root <dir>` precisely so that fallback
+    // is this tree rather than the process CWD.
+    //
+    // The hint is a path under a directory that itself does not exist, so the
+    // PARENT is not a defensible root either: returning it keeps the server
+    // rooted at nothing, and the opened README reports MDL401 for every
+    // resolvable link because nothing in the tree is indexed.
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-root-'));
+    try {
+      mkdirSync(resolve(root, 'docs'), { recursive: true });
+      writeFileSync(
+        resolve(root, 'README.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.readme', '  kind: policy', '  status: active', '---', '', '# Project', '',
+         'See [vision](docs/vision.md) and [broken](docs/nope.md).', ''].join('\n'),
+      );
+      writeFileSync(
+        resolve(root, 'docs/vision.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.vision', '  kind: policy', '  status: active', '---', '', '# Vision', ''].join('\n'),
+      );
+      const h = harness(root);
+      try {
+        h.send({
+          jsonrpc: '2.0',
+          id: 1,
+          method: 'initialize',
+          params: { processId: process.pid, rootUri: pathUri(resolve(root, 'gone', 'docs', 'nope.md')), capabilities: {} },
+        });
+        await waitFor(h, (m) => m.id === 1);
+        h.send({ jsonrpc: '2.0', method: 'initialized', params: {} });
+
+        const u = pathUri(resolve(root, 'README.md'));
+        didOpen(h, u, 1, readFileSync(resolve(root, 'README.md'), 'utf8'));
+        const diagnostics = await waitForDiagnostics(h, u);
+        // Exactly one MDL401 — the genuinely broken `docs/nope.md` — is the
+        // signature of a root that resolved: `docs/vision.md` stays clean
+        // because the index is keyed root-relatively under the started root. A
+        // root pointed at nothing reports both.
+        assert.deepEqual(
+          diagnostics.filter((d) => d.code === 'MDL401').map((d) => d.message),
+          ['Markdown link target does not exist: docs/nope.md'],
+          'only the genuinely broken link is reported, so the hint was dropped',
+        );
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps ServerContext.rootPath live after initialize names a folder', async () => {
+    // Commit 752ae3a turned `rootPath` into the `effectiveRoot()` getter, so a
+    // handler that reads `context.rootPath` after `initialize` sees the
+    // client's folder, not the pre-handshake guess. A symbol's location URI is
+    // spelled from that root, so a stale value would name a directory the
+    // scanned files are not under.
+    const h = harness();
+    try {
+      rootLinkWorkspace(h);
+      await initialize(h);
+      const response = await request(h, 'workspace/symbol', { query: 'docs.readme' });
+      const symbols = response.result as Array<{ location: { uri: string } }>;
+      assert.equal(symbols.length, 1, 'the README is indexed');
+      assert.equal(symbols[0]!.location.uri, uri(h, 'README.md'), 'the URI is spelled under the client folder');
     } finally {
       h.close();
     }

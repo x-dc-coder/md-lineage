@@ -950,23 +950,32 @@ function workspaceSymbols(context: ServerContext, params: WorkspaceSymbolParams)
   const query = params.query.trim().toLowerCase();
   const out: import('vscode-languageserver-types').SymbolInformation[] = [];
   for (const id of context.index.ids()) {
-    // Case-insensitive substring over the id and every alias, which is the
-    // §10.2 search surface; an empty query lists the whole index.
+    // Case-insensitive substring over the id, every alias and every heading —
+    // §10.2's "ID、标题、alias" search surface; an empty query lists the whole
+    // index. The heading match reads the TITLE as authored, not its slug: the
+    // slug drops case, punctuation and CJK, so "Cache key" is not findable as
+    // "cache key" through it.
     const idHit = query === '' || id.toLowerCase().includes(query);
-    if (!idHit && !aliasHits(context, id, query)) continue;
+    if (!idHit && !aliasHits(context, id, query) && !headingHits(context, id, query)) continue;
     const paths = context.index.idToPaths(id);
     const first = paths[0];
     if (first === undefined) continue;
     const entry = context.index.entryOf(first);
     if (!entry) continue;
     const at = positionAt({ lineStarts: entry.lineMap.lineStarts, length: entry.lineMap.length }, entry.idOffset);
+    // `characterOf`, the same conversion `locationOf` applies everywhere else
+    // in this module: it derives the UTF-16 character count from the line's
+    // text. A literal `column - 1` agrees with it for ASCII and drifts on a
+    // heading whose line carries astral characters.
+    const lines = splitLinesOf(context, first);
+    const start = characterOf(lines[at.line - 1] ?? '', at.column);
     out.push(
       SymbolInformation.create(
         id,
         SymbolKind.Class,
         {
-          start: { line: at.line - 1, character: at.column - 1 },
-          end: { line: at.line - 1, character: at.column - 1 + id.length },
+          start: { line: at.line - 1, character: start },
+          end: { line: at.line - 1, character: start + id.length },
         },
         pathToUriOf(context, first),
         'mdlineage',
@@ -985,6 +994,23 @@ function aliasHits(context: ServerContext, id: string, query: string): boolean {
     if (!Array.isArray(aliases)) continue;
     for (const alias of aliases) {
       if (typeof alias === 'string' && alias.toLowerCase().includes(query)) return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * True when any heading of a document claiming `id` contains the query.
+ *
+ * The query reaches the TEXT of the heading, which is what §10.2's "标题" names;
+ * the index keeps the slug set for evidence anchors (MDL402's predicate), and
+ * the two differ on every heading whose title carries case, punctuation or CJK.
+ */
+function headingHits(context: ServerContext, id: string, query: string): boolean {
+  if (query === '') return false;
+  for (const p of context.index.idToPaths(id)) {
+    for (const heading of context.index.headingsOf(p)) {
+      if (heading.toLowerCase().includes(query)) return true;
     }
   }
   return false;
@@ -1149,7 +1175,14 @@ function codeAction(
   return action;
 }
 
-/** The field name an MDL102 diagnostic names (from its `data` or message). */
+/**
+ * The field name an MDL102 diagnostic names.
+ *
+ * `data.missingProperty` is authoritative (the schema layer put it there); the
+ * message regex is a FALLBACK for a diagnostic a caller assembled by hand, and
+ * it is only the fallback — a reworded message would silently break a fixer
+ * that relied on it alone.
+ */
 function missingFieldOf(diag: LspDiagnosticLike): string | null {
   const data = diag.data as Record<string, unknown> | undefined;
   if (data && typeof data['missingProperty'] === 'string') return data['missingProperty'] as string;

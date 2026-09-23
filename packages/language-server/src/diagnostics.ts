@@ -23,6 +23,15 @@ export interface LspDiagnostic {
   code: string;
   source: string;
   message: string;
+  /**
+   * The validator's structured payload, forwarded untouched.
+   *
+   * LSP's `Diagnostic.data` is the protocol's own extension slot, so the code
+   * actions read the field name from `data.missingProperty` instead of parsing
+   * it out of `message`, and a client that wants MDL301's `claimedBy` or
+   * MDL305's `cycle` gets them without re-deriving the graph.
+   */
+  data?: Record<string, unknown>;
 }
 
 /** The validator's four severities, in §8.2's order, as LSP levels. */
@@ -51,5 +60,9 @@ export function toLspDiagnostic(diag: Diagnostic, lines: ReadonlyArray<string>):
     code: diag.code,
     source: 'mdlineage',
     message: diag.message,
+    // Forwarded, not re-derived: the code actions read `data.missingProperty`
+    // instead of parsing it out of `message`, and the CLI/MCP contract for the
+    // same diagnostic's payload is kept across every entry point.
+    data: diag.data,
   };
 }

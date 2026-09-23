@@ -31,11 +31,12 @@ export interface ServerHooks {
    *   - references        `index.referrersOf(id)` / `linkReferrersOf(path)`
    *   - rename            `referrersOf` + `WorkspaceEdit`; MDL301's `data` and
    *                        the reverse maps are the machinery it needs
-   *   - codeAction        §9.1's safe fixes; `data` carries `expected` values a
-   *                        `TextEdit.replace` can apply
+   *   - codeAction        §9.1's safe fixes; the diagnostic's `data` names what
+   *                        a fix edits, with `message` parsing only as a fallback
    *   - documentSymbol    `index.anchorsOf(path)` plus the mdast tree the index
    *                        keeps on the entry
-   *   - workspaceSymbol   `ids()` and `entryOf().id` over the whole index
+   *   - workspaceSymbol   `ids()`, `aliases` and `index.headingsOf(path)` — the
+   *                        title search §10.2 names — over the whole index
    *
    * Each handler also needs its capability declared in `createServer`'s
    * `onInitialize` result; M3-b adds those declarations beside the handlers.
