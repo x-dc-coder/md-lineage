@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: build & test (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [20, 22]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+
+  gates:
+    name: hygiene gates (line endings, baseline, markdown lint)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+      # Roadmap P3: fail on line-ending policy violations regardless of the
+      # committing platform. `.gitattributes` marks the two EOL fixtures with
+      # `-text`; everything else must have pure-LF working-tree bytes.
+      - name: Enforce LF-only line endings (outside -text exemptions)
+        run: |
+          offenders=$(git ls-files --eol | grep -v 'attr/-text' | awk '$2=="w/crlf"||$2=="w/mixed"{print}')
+          if [ -n "$offenders" ]; then
+            echo "::error::Line-ending policy violation (CRLF/mixed in working tree):"
+            printf '%s\n' "$offenders"
+            exit 1
+          fi
+
+      # CI gate per docs/progress.md M2: current diagnostics must exactly match
+      # the committed accepted debt, so newly introduced violations fail.
+      - name: Verify committed baseline
+        run: node packages/cli/dist/main.js baseline verify
+
+      # Currently red: 6 no-literal-urls warnings in docs/open-source-landscape.md.
+      # Kept visible on purpose; do not skip or soften.
+      - name: Markdown lint (remark)
+        run: npm run lint:md
