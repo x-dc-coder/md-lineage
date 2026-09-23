@@ -14,3 +14,5 @@ node_modules/
 dist/
 # schemas copied into the packages that read them at pack time (scripts/copy-schemas.mjs)
 packages/*/schemas/
+# local `npm pack` tarballs must never be committed
+packages/**/*.tgz

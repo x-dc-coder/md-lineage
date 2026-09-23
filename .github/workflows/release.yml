@@ -1,0 +1,83 @@
+name: Release
+
+on:
+  # A GitHub Release is the release lever: npm publish is only ever attempted
+  # from here, so a tag is always the provenance subject.
+  release:
+    types: [published]
+  # Manual path for republishing or publishing outside the Release flow.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Git tag to publish (must already exist)
+        required: true
+        type: string
+
+# `publishConfig.provenance: true` makes npm attach a Sigstore provenance
+# statement, which it can only mint from the GitHub OIDC token this job
+# requests. Without `id-token: write`, npm fails with EUSAGE instead.
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: publish (${{ github.event.release.tag_name || inputs.tag }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout (Release ref or dispatched tag)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+
+      - name: Setup Node 22 with npm registry
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          registry-url: https://registry.npmjs.org
+
+      - name: Install (npm ci)
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      - name: Test
+        run: npm test
+
+      # `npm publish --workspaces` would publish all five packages, but it
+      # skips a package whose version already exists on the registry with only
+      # a warning, which would let a partially published release pass green.
+      # Publishing one package at a time makes that a hard, local failure.
+      - name: Publish @mdlineage/validator
+        run: npm publish --provenance --access public
+        working-directory: packages/validator
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @mdlineage/remark-lint-mdlineage
+        run: npm publish --provenance --access public
+        working-directory: packages/remark-lint-mdlineage
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @mdlineage/cli
+        run: npm publish --provenance --access public
+        working-directory: packages/cli
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @mdlineage/language-server
+        run: npm publish --provenance --access public
+        working-directory: packages/language-server
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @mdlineage/mcp-server
+        run: npm publish --provenance --access public
+        working-directory: packages/mcp-server
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
