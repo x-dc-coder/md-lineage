@@ -10,7 +10,7 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFileSync, mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -967,6 +967,125 @@ describe('mdlineage init', () => {
       assert.equal(readFileSync(join(dir.root, 'mdlineage.config.yaml'), 'utf8'), existing);
     } finally {
       dir.cleanup();
+    }
+  });
+});
+
+describe('mdlineage fix', () => {
+  /** A document missing `status` and carrying a duplicate relation. */
+  function brokenDoc(): string {
+    return [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: docs.a',
+      '  kind: policy',
+      '  relations:',
+      '    - type: related_to',
+      '      target: docs.x',
+      '      reason: r',
+      '    - type: related_to',
+      '      target: docs.x',
+      '      reason: r',
+      '---',
+      '',
+      '# a',
+    ].join('\n');
+  }
+
+  it('dry run reports fixes and writes nothing', () => {
+    const ws = scratchWorkspace({ 'a.md': brokenDoc() });
+    try {
+      const out = runCli(['fix', 'a.md'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /would fix \d+ issues/);
+      assert.match(out.stdout, /\[status\]/);
+      assert.match(out.stdout, /\[duplicate-relation\]/);
+      assert.equal(readFileSync(join(ws.root, 'a.md'), 'utf8'), brokenDoc());
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('--write clears the diagnostics it fixed', () => {
+    const ws = scratchWorkspace({ 'a.md': brokenDoc(), 'docs.x.md': doc('docs.x') });
+    try {
+      const out = runCli(['fix', 'a.md', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /mdlineage fix: \d+ fixes? in 1 file/);
+      const after = runCli(['check', 'a.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(after.stdout, 'MDL102'), 0, 'missing status is fixed');
+      assert.equal(countOf(after.stdout, 'MDL202'), 0, 'the duplicate relation is gone');
+      const content = readFileSync(join(ws.root, 'a.md'), 'utf8');
+      assert.equal((content.match(/- type: related_to/g) ?? []).length, 1);
+      assert.match(content, /status: draft/);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('a CRLF document is normalized to a single line-ending style, never mixed', () => {
+    // CRLF body with a bare-LF last line: MDL601 (mixed) plus MDL602 (policy LF).
+    const crlfDoc = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: docs.crlf',
+      '  kind: policy',
+      '---',
+      '',
+      '# crlf',
+    ]
+      .join('\r\n') + '\n';
+    const ws = scratchWorkspace({ 'crlf.md': crlfDoc });
+    try {
+      const out = runCli(['fix', 'crlf.md', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      const content = readFileSync(join(ws.root, 'crlf.md'), 'utf8');
+      const crlf = (content.match(/\r\n/g) ?? []).length;
+      const lf = (content.match(/(?<!\r)\n/g) ?? []).length;
+      const cr = (content.match(/\r(?!\n)/g) ?? []).length;
+      assert.ok(lf + crlf + cr > 0, 'the fixed document still has line breaks');
+      // The style count must not grow: normalization leaves exactly one style.
+      const styles = [lf > 0, crlf > 0, cr > 0].filter(Boolean).length;
+      assert.equal(styles, 1, 'the document ends up with a single line-ending style');
+      const check = runCli(['check', 'crlf.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(check.stdout, 'MDL601'), 0);
+      assert.equal(countOf(check.stdout, 'MDL602'), 0);
+      assert.equal(countOf(check.stdout, 'MDL102'), 0);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('a read-only file is skipped without breaking the batch', () => {
+    const ws = scratchWorkspace({ 'a.md': brokenDoc(), 'b.md': brokenDoc().replace('docs.a', 'docs.b') });
+    const frozen = join(ws.root, 'a.md');
+    try {
+      chmodSync(frozen, 0o444);
+      const out = runCli(['fix', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stderr, /skipping read-only file: a\.md/);
+      assert.match(out.stdout, /b\.md/);
+      assert.equal(readFileSync(frozen, 'utf8'), brokenDoc(), 'the read-only file is untouched');
+    } finally {
+      chmodSync(frozen, 0o644);
+      ws.cleanup();
+    }
+  });
+
+  it('a path outside the workspace is refused', () => {
+    const ws = scratchWorkspace({ 'a.md': brokenDoc() });
+    const outside = join(ws.root, '..', 'mdlineage-fix-escape.md');
+    writeFileSync(outside, brokenDoc());
+    try {
+      const out = runCli(['fix', outside, '--write'], ws.root);
+      assert.equal(out.status, 1);
+      assert.match(out.stderr, /refusing path outside the workspace/);
+      assert.equal(readFileSync(outside, 'utf8'), brokenDoc(), 'the outside file is untouched');
+    } finally {
+      rmSync(outside, { force: true });
+      ws.cleanup();
     }
   });
 });

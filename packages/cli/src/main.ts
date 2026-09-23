@@ -39,6 +39,7 @@ import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from '.
 import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verifyBaseline, baselineRoot, BASELINE_FILE } from './baseline.js';
 import { startStdio } from '@mdlineage/language-server';
 import { runInit } from './init.js';
+import { runFix } from './fix.js';
 import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
@@ -53,6 +54,8 @@ Usage:
   mdlineage mcp --stdio             Run the MCP server over stdio
   mdlineage init                    Bootstrap config, .gitattributes and schemas/ (dry run)
   mdlineage suggest <file>          Propose metadata for a document (no writes)
+  mdlineage fix [paths...]          Apply safe fixes (missing fields, duplicate
+                                    relations, line endings; default: dry run)
 
 Options:
   --format <text|json|sarif>  Output shape (default: text)
@@ -64,7 +67,8 @@ Options:
   --no-baseline               Ignore the committed baseline (report accepted debt)
   --force                     baseline update: write despite an unreadable baseline
   --report-only               baseline update: print the change set, write nothing
-  --write                     init: apply the planned changes (default is a dry run)
+  --write                     init/fix: apply the planned changes (default is a
+                              dry run)
   --frail                     Any diagnostic fails the run, warnings included
   --root <dir>                mcp: the workspace to index (default: the CWD)
   --help, -h                  Show this text
@@ -173,6 +177,9 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (command === 'init') {
     return runInit(parsed.positionals.slice(1), parsed.values);
+  }
+  if (command === 'fix') {
+    return runFix(parsed.positionals.slice(1), parsed.values);
   }
   if (command !== 'check') {
     process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
