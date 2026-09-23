@@ -80,7 +80,12 @@ Exit codes:
      (--frail: any diagnostic at all)
   2  usage error`;
 
-const VERSION = 'mdlineage 0.0.0';
+// Resolved relative to this file: dist/main.js sits beside ../package.json both
+// in the repo and in the published tarball, so no source-tree path is needed.
+const CLI_PACKAGE_VERSION = (
+  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
+).version;
+const VERSION = `mdlineage ${CLI_PACKAGE_VERSION}`;
 
 type Format = 'text' | 'json' | 'sarif';
 

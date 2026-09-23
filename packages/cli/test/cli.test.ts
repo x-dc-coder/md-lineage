@@ -215,6 +215,13 @@ describe('mdlineage check — fixtures', () => {
     assert.match(runCli(['--version']).stdout, /mdlineage/);
   });
 
+  it('--version reports the cli package.json version', () => {
+    const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'packages', 'cli', 'package.json'), 'utf8')) as {
+      version: string;
+    };
+    assert.equal(runCli(['--version']).stdout.trim(), `mdlineage ${pkg.version}`);
+  });
+
   it('a bad --format value is rejected', () => {
     const out = runCli(['check', 'docs', '--format', 'sarif-please']);
     assert.equal(out.status, 2);
