@@ -143,6 +143,49 @@ async function initialize(h: Harness): Promise<Record<string, unknown>> {
   return (response.result as { capabilities: Record<string, unknown> }).capabilities;
 }
 
+let nextRequestId = 2;
+
+/**
+ * Send a language-feature request and wait for its response.
+ *
+ * The features answer over the same JSON-RPC stream as the diagnostics, so a
+ * request is matched by its id and the response is the feature's own contract:
+ * the same shapes a client renders.
+ */
+async function request(
+  h: Harness,
+  method: string,
+  params: Record<string, unknown>,
+): Promise<{ result: unknown; error?: { message?: string } }> {
+  const id = nextRequestId++;
+  h.send({ jsonrpc: '2.0', id, method, params });
+  const response = await waitFor(h, (m) => m.id === id);
+  return { result: response.result, error: response.error as { message?: string } | undefined };
+}
+
+/** A cursor position in 0-based LSP coordinates. */
+function at(line: number, character: number): { line: number; character: number } {
+  return { line, character };
+}
+
+/**
+ * A document of roughly `bytes` total size, past §13's degradation threshold.
+ *
+ * Headings and prose alternate, which is what a real large document looks
+ * like; the scan's cost would dominate `initialize` without the degradation.
+ */
+function largeDocument(bytes: number): string {
+  const head = ['---', 'mdlineage:', '  schema: 1', '  id: docs.huge', '  kind: policy', '  status: active', '---', '', ''].join('\n');
+  const body: string[] = [];
+  let total = head.length;
+  for (let i = 0; total < bytes; i++) {
+    const chunk = `## Section ${i}\n\ntext `.repeat(1) + 'word '.repeat(40) + '\n\n';
+    body.push(chunk);
+    total += chunk.length;
+  }
+  return head + body.join('');
+}
+
 /** The publishDiagnostics for `uri`, or null when none has arrived. */
 function diagnosticsFor(h: Harness, uri: string): Array<{
   range: { start: { line: number; character: number }; end: { line: number; character: number } };
@@ -166,6 +209,29 @@ async function waitForDiagnostics(h: Harness, uri: string, timeoutMs = 8000): Pr
   while (Date.now() < deadline) {
     const found = diagnosticsFor(h, uri);
     if (found.length > 0) return found as never[];
+    await new Promise((r) => setTimeout(r, 15));
+  }
+  throw new Error(`no publishDiagnostics for ${uri} within ${timeoutMs}ms`);
+}
+
+/**
+ * Wait until the server has published a diagnostics set for `uri` — empty or
+ * not.
+ *
+ * A request that reads the index must wait for the scan and the overlay to
+ * land first, or it answers against a stale index. A VALID document publishes
+ * an empty set, which is the state the feature tests start from, so this waits
+ * for the notification itself rather than for a non-empty one.
+ */
+async function waitForDiagnosticsSet(h: Harness, uri: string, timeoutMs = 8000): Promise<void> {
+  const baseline = h.received.length;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    for (let i = baseline; i < h.received.length; i++) {
+      const message = h.received[i]!;
+      if (message.method !== 'textDocument/publishDiagnostics') continue;
+      if ((message.params as { uri: string }).uri === uri) return;
+    }
     await new Promise((r) => setTimeout(r, 15));
   }
   throw new Error(`no publishDiagnostics for ${uri} within ${timeoutMs}ms`);
@@ -201,7 +267,15 @@ describe('initialize handshake', () => {
     const h = harness();
     try {
       const capabilities = await initialize(h);
-      assert.equal(capabilities['textDocumentSync'], 2, 'TextDocumentSyncKind.Incremental');
+      const textDocument = capabilities['textDocument'] as Record<string, unknown>;
+      const sync = textDocument['synchronization'] as Record<string, unknown>;
+      // The explicit sync contract (LSP 3.17): without `change` and
+      // `openClose` a strict client never pushes didOpen/didChange, so the
+      // whole diagnostics channel would be dead on arrival.
+      assert.equal(sync['openClose'], true);
+      assert.equal(sync['change'], 2, 'TextDocumentSyncKind.Incremental');
+      assert.deepEqual(sync['save'], { includeText: false });
+      assert.equal(sync['dynamicRegistration'], false);
       const workspace = capabilities['workspace'] as Record<string, unknown>;
       assert.ok(workspace, 'workspace capabilities are declared');
       assert.ok((workspace['workspaceFolders'] as Record<string, unknown>)?.supported);
@@ -210,25 +284,107 @@ describe('initialize handshake', () => {
     }
   });
 
-  it('declares no completion, definition, hover or code actions (M3-b)', async () => {
+  it('declares the §10.2 feature set (M3-b)', async () => {
     const h = harness();
     try {
       const capabilities = await initialize(h);
-      const textDocument = capabilities['textDocument'] as Record<string, unknown> | undefined;
+      const textDocument = capabilities['textDocument'] as Record<string, unknown>;
+      assert.ok(textDocument, 'textDocument capabilities are present');
       for (const key of [
-        'completionProvider',
-        'definitionProvider',
-        'hoverProvider',
-        'referencesProvider',
-        'renameProvider',
-        'codeActionProvider',
-        'documentSymbolProvider',
-        'workspaceSymbolProvider',
+        'completion',
+        'definition',
+        'references',
+        'rename',
+        'hover',
+        'documentSymbol',
+        'codeAction',
       ]) {
-        assert.equal(textDocument?.[key], undefined, `${key} is M3-b's to declare`);
+        assert.ok(textDocument[key] !== undefined, `${key} is declared`);
       }
+      assert.ok(
+        (capabilities['workspace'] as Record<string, unknown>)['symbol'] !== undefined,
+        'workspaceSymbolProvider is declared',
+      );
+      const completion = textDocument['completion'] as { triggerCharacters: string[] };
+      assert.deepEqual(
+        [...completion.triggerCharacters].sort(),
+        [' ', ':'],
+        'completion triggers on the field/value boundary and after a space',
+      );
+      const rename = textDocument['rename'] as { prepareSupport: boolean };
+      assert.equal(rename.prepareSupport, true, 'rename prepares so an invalid id is refused early');
+      const codeAction = textDocument['codeAction'] as { codeActionKinds: string[] };
+      assert.deepEqual(codeAction.codeActionKinds, ['quickfix'], 'safe fixes only');
     } finally {
       h.close();
+    }
+  });
+
+  it('keeps ServerContext live across a reconfigure (M4)', async () => {
+    // Review M3-a, Major-4: `reconfigure` rebinds the config/index `let`s when
+    // `initialize` names a workspace folder, and a context that snapshotted
+    // them at registration would keep reporting the pre-reconfigure state. The
+    // observable difference is a completion's vocabulary: the harness root is
+    // created before the server is told about it, so the server's pre-handshake
+    // guess loads the repo-root config (whose vocabulary omits `playground`)
+    // and only the client's folder config supplies it — a live context answers
+    // from the folder's, a stale one from the repo root's.
+    const h = harness();
+    try {
+      writeFileSync(
+        resolve(h.root, 'mdlineage.config.yaml'),
+        'configVersion: 1\nvocabulary:\n  kinds: [policy, guide, playground]\n',
+      );
+      await initialize(h);
+      const u = uri(h, 'docs/probe.md');
+      didOpen(h, u, 1, doc());
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/completion', {
+        textDocument: { uri: u },
+        position: at(4, 9),
+      });
+      const items = ((response.result as { items: Array<{ label: string }> })?.items) ?? [];
+      assert.ok(
+        items.some((i) => i.label === 'playground'),
+        'the context read the workspace folder\'s config, not the pre-handshake guess',
+      );
+    } finally {
+      h.close();
+    }
+  });
+
+  it('answers initialize within 3s for a tree containing a 3.7MB file (M5)', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-big-'));
+    try {
+      mkdirSync(resolve(root, 'docs'), { recursive: true });
+      writeFileSync(resolve(root, 'docs/small.md'), doc({ id: 'docs.small' }));
+      // A document past MAX_DOCUMENT_BYTES: §13 degrades it, so the scan
+      // indexes it without running its expensive rules and `initialize` does
+      // not pay the multi-second validation cost (review M3-a, Major-3/5).
+      writeFileSync(resolve(root, 'docs/huge.md'), largeDocument(3.7 * 1024 * 1024));
+      const h = harness(root);
+      try {
+        const started = Date.now();
+        await initialize(h);
+        const elapsed = Date.now() - started;
+        assert.ok(elapsed < 3000, `initialize took ${elapsed}ms over a 3.7MB file`);
+        // The degradation must be observable, not just fast: the huge file's
+        // expensive rules are skipped, so no diagnostics may be published for
+        // it, and the skip is announced exactly once.
+        const hugeUri = 'file://' + resolve(root, 'docs/huge.md');
+        const hugePublish = h.received.find((m) => (m.params as { uri?: string })?.uri === hugeUri);
+        if (hugePublish !== undefined) {
+          assert.deepEqual((hugePublish.params as { diagnostics: unknown[] }).diagnostics, []);
+        }
+        const skips = h.received.filter(
+          (m) => m.method === 'window/showMessage' && String((m.params as { message?: string })?.message ?? '').includes('larger than'),
+        );
+        assert.ok(skips.length <= 1, `the skip notice fired ${skips.length} times, expected at most once`);
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
     }
   });
 });
@@ -621,6 +777,362 @@ describe('initial scan', () => {
         diagnostics.some((d) => d.code === 'MDL401'),
         'a link into an excluded tree does not resolve',
       );
+    } finally {
+      h.close();
+    }
+  });
+});
+
+/** A two-document workspace: a referrer and its target, both clean. */
+function linkedWorkspace(h: Harness): { referrer: string; target: string } {
+  writeFileSync(
+    resolve(h.root, 'docs/target.md'),
+    ['---', 'mdlineage:', '  schema: 1', '  id: docs.target', '  kind: policy', '  status: active', '---', '', '# Target', '', '## Cache policy', ''].join('\n'),
+  );
+  writeFileSync(
+    resolve(h.root, 'docs/referrer.md'),
+    [
+      '---', 'mdlineage:', '  schema: 1', '  id: docs.referrer', '  kind: policy', '  status: active',
+      '  relations:', '    - type: depends_on', '      target: docs.target', '      reason: needs it',
+      '---', '', '# Referrer', '',
+    ].join('\n'),
+  );
+  return {
+    referrer: uri(h, 'docs/referrer.md'),
+    target: uri(h, 'docs/target.md'),
+  };
+}
+
+describe('completion', () => {
+  it('offers the config vocabulary at a `type:` value', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const u = uri(h, 'docs/referrer.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/referrer.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, u);
+      // Line 7 is `    - type: depends_on`; the cursor sits just past the `:`,
+      // where no value has been typed yet and the whole vocabulary applies.
+      const response = await request(h, 'textDocument/completion', {
+        textDocument: { uri: u },
+        position: at(7, 12),
+      });
+      const items = ((response.result as { items: Array<{ label: string; detail?: string }> })?.items) ?? [];
+      const labels = items.map((i) => i.label);
+      assert.ok(labels.includes('depends_on'), 'the configured types are offered');
+      assert.ok(labels.includes('related_to'), 'the whole vocabulary is offered');
+      assert.equal(items[0]!.detail, 'The source document relies on a rule or fact in the target.');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('offers every known document id at a `target:` value', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const u = uri(h, 'docs/referrer.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/referrer.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/completion', {
+        textDocument: { uri: u },
+        position: at(8, 20),
+      });
+      const items = ((response.result as { items: Array<{ label: string; detail?: string }> })?.items) ?? [];
+      assert.ok(items.some((i) => i.label === 'docs.target'), 'the target id is offered');
+      assert.match(items.find((i) => i.label === 'docs.target')!.detail!, /target\.md · active/);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('offers mdlineage field names while typing a key', async () => {
+    const h = harness();
+    try {
+      await initialize(h);
+      const u = uri(h, 'docs/probe.md');
+      didOpen(h, u, 1, doc());
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/completion', {
+        textDocument: { uri: u },
+        position: at(4, 2),
+      });
+      const items = ((response.result as { items: Array<{ label: string; insertText?: string }> })?.items) ?? [];
+      assert.ok(items.some((i) => i.label === 'authority'), 'the optional fields are offered too');
+      assert.equal(items.find((i) => i.label === 'id')!.insertText, 'id: ', 'the value position opens with the key');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('offers the target document headings at an `evidence:` value', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const text = [
+        '---', 'mdlineage:', '  schema: 1', '  id: docs.t', '  kind: policy', '  status: active',
+        '  relations:', '    - type: refines', '      target: docs.target', '      reason: why',
+        '      evidence: #cache', '---', '', '# T', '',
+      ].join('\n');
+      const u = uri(h, 'docs/t.md');
+      writeFileSync(resolve(h.root, 'docs/t.md'), text);
+      didOpen(h, u, 1, text);
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/completion', {
+        textDocument: { uri: u },
+        position: at(10, 20),
+      });
+      const items = ((response.result as { items: Array<{ label: string; detail?: string }> })?.items) ?? [];
+      assert.ok(items.some((i) => i.label === '#cache-policy'), 'the target document headings are offered');
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe('hover', () => {
+  it('resolves a target id to its path and status', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const u = uri(h, 'docs/referrer.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/referrer.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/hover', { textDocument: { uri: u }, position: at(8, 20) });
+      const hover = response.result as { contents: { value: string } };
+      assert.match(hover.contents.value, /docs\/target\.md · active/);
+    } finally {
+      h.close();
+    }
+  });
+
+  it('documents a relation type', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const u = uri(h, 'docs/referrer.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/referrer.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/hover', { textDocument: { uri: u }, position: at(7, 18) });
+      const hover = response.result as { contents: { value: string } };
+      assert.match(hover.contents.value, /relies on a rule or fact in the target/);
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe('definition', () => {
+  it('jumps from a target value to the target document id line', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const u = uri(h, 'docs/referrer.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/referrer.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/definition', { textDocument: { uri: u }, position: at(8, 20) });
+      const locations = response.result as Array<{ uri: string; range: { start: { line: number } } }>;
+      assert.equal(locations.length, 1, 'exactly one document claims the id');
+      assert.equal(locations[0]!.uri, uri(h, 'docs/target.md'));
+      assert.equal(locations[0]!.range.start.line, 3, 'the id value is on 0-based line 3');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('jumps from an evidence anchor to the target heading', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const text = [
+        '---', 'mdlineage:', '  schema: 1', '  id: docs.t', '  kind: policy', '  status: active',
+        '  relations:', '    - type: refines', '      target: docs.target', '      reason: why',
+        '      evidence: "#cache-policy"', '---', '', '# T', '',
+      ].join('\n');
+      const u = uri(h, 'docs/t.md');
+      writeFileSync(resolve(h.root, 'docs/t.md'), text);
+      didOpen(h, u, 1, text);
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/definition', { textDocument: { uri: u }, position: at(10, 20) });
+      const locations = response.result as Array<{ uri: string; range: { start: { line: number } } }>;
+      assert.equal(locations.length, 1);
+      assert.equal(locations[0]!.uri, uri(h, 'docs/target.md'));
+      assert.equal(locations[0]!.range.start.line, 10, '`## Cache policy` is on 0-based line 10');
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe('references', () => {
+  it('lists every document whose relation points at an id', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const target = uri(h, 'docs/target.md');
+      didOpen(h, target, 1, readFileSync(resolve(h.root, 'docs/target.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, target);
+      const response = await request(h, 'textDocument/references', {
+        textDocument: { uri: target },
+        position: at(3, 10),
+        context: { includeDeclaration: true },
+      });
+      const locations = response.result as Array<{ uri: string; range: { start: { line: number } } }>;
+      assert.ok(locations.some((l) => l.uri === uri(h, 'docs/target.md')), 'the declaration is included');
+      assert.ok(locations.some((l) => l.uri === uri(h, 'docs/referrer.md')), 'the referrer is listed');
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe('rename', () => {
+  it('renames an id and every referrer target', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const target = uri(h, 'docs/target.md');
+      didOpen(h, target, 1, readFileSync(resolve(h.root, 'docs/target.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, target);
+      const response = await request(h, 'textDocument/rename', {
+        textDocument: { uri: target },
+        position: at(3, 10),
+        newName: 'docs.target2',
+      });
+      const edit = response.result as { changes: Record<string, Array<{ range: { start: { line: number; character: number } }; newText: string }>> };
+      const byUri = new Map(Object.entries(edit.changes));
+      const own = byUri.get(target);
+      const ref = byUri.get(uri(h, 'docs/referrer.md'));
+      assert.ok(own && own[0]!.newText === 'docs.target2', 'the declaration is rewritten');
+      assert.ok(ref && ref[0]!.newText === 'docs.target2', 'the referrer target value is rewritten');
+      assert.equal(ref![0]!.range.start.line, 8, 'the edit lands on the target value line');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('refuses an id that breaks the v1 pattern', async () => {
+    const h = harness();
+    try {
+      linkedWorkspace(h);
+      await initialize(h);
+      const target = uri(h, 'docs/target.md');
+      didOpen(h, target, 1, readFileSync(resolve(h.root, 'docs/target.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, target);
+      const response = await request(h, 'textDocument/rename', {
+        textDocument: { uri: target },
+        position: at(3, 10),
+        newName: 'Docs.BAD_ID',
+      });
+      assert.ok(response.error, 'an invalid id is an error, not a silent edit');
+      assert.match(response.error!.message ?? '', /Invalid mdlineage id/);
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe('symbols', () => {
+  it('outlines the mdlineage block and the headings', async () => {
+    const h = harness();
+    try {
+      await initialize(h);
+      const u = uri(h, 'docs/probe.md');
+      didOpen(h, u, 1, doc());
+      await waitForDiagnosticsSet(h, u);
+      const response = await request(h, 'textDocument/documentSymbol', { textDocument: { uri: u } });
+      const symbols = response.result as Array<{ name: string; kind: number; children?: Array<{ name: string }> }>;
+      const block = symbols.find((s) => s.name === 'mdlineage');
+      assert.ok(block, 'the metadata block is a symbol');
+      assert.deepEqual(block!.children!.map((c) => c.name), ['schema', 'id', 'kind', 'status'], 'each authored field is a child');
+      assert.ok(symbols.some((s) => s.name === 'Probe'), 'the body heading is a symbol');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('finds ids and aliases case-insensitively across the workspace', async () => {
+    const h = harness();
+    try {
+      writeFileSync(
+        resolve(h.root, 'docs/a.md'),
+        ['---', 'mdlineage:', '  schema: 1', '  id: docs.cache-policy', '  kind: policy', '  status: active', '  aliases:', '    - Cache TTL', '---', '', '# A', ''].join('\n'),
+      );
+      await initialize(h);
+      const response = await request(h, 'workspace/symbol', { query: 'CACHE' });
+      const symbols = response.result as Array<{ name: string; location: { uri: string } }>;
+      assert.ok(symbols.some((s) => s.name === 'docs.cache-policy'), 'the id matches');
+      assert.ok(symbols.length >= 1, 'the alias matched too');
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe('code actions', () => {
+  it('deletes an unknown mdlineage field (MDL104)', async () => {
+    const h = harness();
+    try {
+      const text = [
+        '---', 'mdlineage:', '  schema: 1', '  id: docs.probe', '  kind: policy', '  tpoics: x',
+        '---', '', '# Probe', '',
+      ].join('\n');
+      writeFileSync(resolve(h.root, 'docs/probe.md'), text);
+      await initialize(h);
+      const u = uri(h, 'docs/probe.md');
+      didOpen(h, u, 1, text);
+      await waitForDiagnosticsSet(h, u);
+      const diagnostics = diagnosticsFor(h, u);
+      const response = await request(h, 'textDocument/codeAction', {
+        textDocument: { uri: u },
+        range: { start: at(5, 0), end: at(5, 12) },
+        context: { diagnostics: diagnostics as never },
+      });
+      const actions = response.result as Array<{ title: string; edit: { changes: Record<string, Array<{ range: { start: { line: number } }; newText: string }>> } }>;
+      const remove = actions.find((a) => a.title.includes('unknown'));
+      assert.ok(remove, 'the MDL104 fix is offered');
+      const edits = remove!.edit.changes[u]!;
+      assert.equal(edits[0]!.newText, '', 'the fix is a deletion');
+      assert.equal(edits[0]!.range.start.line, 5, 'the offending line is removed');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('inserts a skeleton for a missing required field (MDL102)', async () => {
+    const h = harness();
+    try {
+      const text = [
+        '---', 'mdlineage:', '  schema: 1', '  id: docs.probe', '  kind: policy',
+        '  relations:', '    - type: depends_on', '      target: docs.other', '      reason: needs it',
+        '---', '', '# Probe', '',
+      ].join('\n');
+      writeFileSync(resolve(h.root, 'docs/probe.md'), text);
+      await initialize(h);
+      const u = uri(h, 'docs/probe.md');
+      didOpen(h, u, 1, text);
+      await waitForDiagnosticsSet(h, u);
+      const diagnostics = diagnosticsFor(h, u);
+      const response = await request(h, 'textDocument/codeAction', {
+        textDocument: { uri: u },
+        range: { start: at(2, 0), end: at(2, 12) },
+        context: { diagnostics: diagnostics as never },
+      });
+      const actions = response.result as Array<{ title: string; edit: { changes: Record<string, Array<{ range: { start: { line: number } }; newText: string }>> } }>;
+      const insert = actions.find((a) => a.title.includes('missing'));
+      assert.ok(insert, 'the MDL102 fix is offered');
+      const edits = insert!.edit.changes[u]!;
+      assert.equal(edits[0]!.newText, '  status: draft\n', 'the vocabulary first value is inserted');
+      assert.ok(edits[0]!.range.start.line <= 5, 'the skeleton stays inside the mdlineage block');
     } finally {
       h.close();
     }

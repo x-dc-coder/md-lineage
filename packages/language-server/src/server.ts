@@ -17,12 +17,15 @@
  * returns, which is what keeps the incrementality promise of §10.3's
  * "校验当前文件和直接受影响引用方".
  *
- * M3-a ships the diagnostics channel only. The language features of §10.2
- * (completion, definition, references, rename, hover, symbols, code actions)
- * are M3-b; the mount points they extend are in `ServerHooks` (hooks.ts).
- *
  * Never throws: a document that cannot be parsed yields diagnostics, and an
  * unreadable file is skipped, same as in the CLI.
+ *
+ * M3-b (§10.2) adds the language features: completion, hover, definition,
+ * references, rename, document/workspace symbols and safe code actions. They
+ * live in `features.ts` and are registered through the `hooks` option, which
+ * keeps this module's control flow untouched — the lifecycle a feature needs
+ * (the index, the config, the text overlay) is exactly the state this module
+ * already maintains, so a feature never owns a second copy of it.
  */
 
 import { resolve } from 'node:path';
@@ -33,6 +36,7 @@ import {
   createConnection,
   TextDocuments,
   DidChangeWatchedFilesNotification,
+  CodeActionKind,
 } from 'vscode-languageserver';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import {
@@ -50,6 +54,7 @@ import {
 } from '@mdlineage/validator';
 import { toLspDiagnostic } from './diagnostics.js';
 import type { ServerHooks } from './hooks.js';
+import { registerLanguageFeatures } from './features.js';
 import {
   scanWorkspace,
   readDocument,
@@ -64,6 +69,7 @@ import { sep } from 'node:path';
 export { toLspDiagnostic, severityToLsp } from './diagnostics.js';
 export { diagnosticRange, toLspRange as rangeToLsp } from './position.js';
 export type { ServerHooks } from './hooks.js';
+export { registerLanguageFeatures } from './features.js';
 export {
   MAX_DOCUMENT_BYTES,
   scanWorkspace,
@@ -105,9 +111,22 @@ export interface ServerOptions {
 export interface ServerContext {
   /** The connection M3-b registers requests/notifications on. */
   readonly connection: Connection;
-  /** The index every handler reads; already kept in sync by this module. */
+  /**
+   * The index every handler reads; already kept in sync by this module.
+   *
+   * Live: `reconfigure` rebuilds the index when `initialize` names a workspace
+   * folder, and this property reads the current one every time. A handler that
+   * captured the index in a closure at registration would still hold the empty
+   * pre-scan index the module built first — the language features must see the
+   * tree the developer is editing, not the one `createServer` started with.
+   */
   readonly index: WorkspaceIndex;
-  /** The config the index was built with, including severity overrides. */
+  /**
+   * The config the index was built with, including severity overrides. Live for
+   * the same reason as `index`: `reconfigure` re-reads it from the client's
+   * folder, and a stale copy would complete from a vocabulary that no longer
+   * applies to this tree.
+   */
   readonly config: Config;
   /** The accepted-debt baseline diagnostics are suppressed against. */
   readonly baseline: Baseline | null;
@@ -221,7 +240,6 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   const debounceMs = options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
   const pending = new Map<DocPath, ReturnType<typeof setTimeout>>();
   const warnedLarge = new Set<DocPath>();
-
   // Startup config diagnostics cannot be sent here: `startStdio` calls
   // `listen()` after `createServer`, and a request (showMessageRequest) sent
   // before listen throws. Queue them and surface them as `window/showMessage`
@@ -233,6 +251,31 @@ export function createServer(connection: Connection, options: ServerOptions = {}
     return document ? document.getText() : readDocument(path);
   }
 
+  /**
+   * §13's degradation for one document: past the threshold the expensive layers
+   * are skipped and the developer is told once, so an editor stays responsive
+   * on a file the parse plus schema validation would stall.
+   *
+   * `validateNow` and `rescan` both route through here, which keeps the two
+   * entry points from disagreeing about which documents get full validation —
+   * the scan previously ran every rule on every file, so a repository's
+   * startup cost depended on its largest document (review M3-a, Major-3).
+   */
+  function degradeLarge(path: DocPath): void {
+    if (!warnedLarge.has(path)) {
+      warnedLarge.add(path);
+      void connection.sendNotification('window/showMessage', {
+        type: 2,
+        message: `mdlineage: ${path} is larger than ${MAX_DOCUMENT_BYTES} bytes; skipping validation`,
+      });
+    }
+  }
+
+  /** True when `text` crosses §13's degradation threshold. */
+  function isLarge(text: string): boolean {
+    return Buffer.byteLength(text, 'utf8') > MAX_DOCUMENT_BYTES;
+  }
+
   /** Revalidate `paths` immediately, publishing every diagnostic they own. */
   function validateNow(paths: ReadonlyArray<DocPath>): void {
     const toPublish = new Set<DocPath>();
@@ -241,14 +284,8 @@ export function createServer(connection: Connection, options: ServerOptions = {}
       if (text === null) continue;
       // §13's degradation: a document past the threshold is indexed but its
       // expensive rules are not run, and the developer is told once.
-      if (Buffer.byteLength(text, 'utf8') > MAX_DOCUMENT_BYTES) {
-        if (!warnedLarge.has(path)) {
-          warnedLarge.add(path);
-          void connection.sendNotification('window/showMessage', {
-            type: 2,
-            message: `mdlineage: ${path} is larger than ${MAX_DOCUMENT_BYTES} bytes; skipping validation`,
-          });
-        }
+      if (isLarge(text)) {
+        degradeLarge(path);
         continue;
       }
       const { affected } = updateFile(index, path, text);
@@ -263,6 +300,11 @@ export function createServer(connection: Connection, options: ServerOptions = {}
    * Publish diagnostics for the paths a change could have moved, clearing each
    * one first: an empty array means "clean" in LSP, and silence would mean the
    * previous report is still the truth.
+   *
+   * A document §13 degraded is published EMPTY, not skipped: the index still
+   * holds it (completion and definition read it), and a stale diagnostic set
+   * from before it grew past the threshold would outlive the state that
+   * produced it.
    */
   function publishAffected(paths: ReadonlySet<DocPath>): void {
     for (const path of paths) publishOne(path);
@@ -272,12 +314,7 @@ export function createServer(connection: Connection, options: ServerOptions = {}
     const uri = pathToUri(path, rootPath);
     const text = resolveText(path);
     const lines = text === null ? [] : text.split(/\r\n|\r|\n/);
-    const diagnostics =
-      text === null
-        ? []
-        : validateWorkspace(index, { paths: [path], baseline: toBaselineSuppression(path) }).map((diag) =>
-            toLspDiagnostic(diag, lines),
-          );
+    const diagnostics = text === null || isLarge(text) ? [] : validateWorkspace(index, { paths: [path], baseline: toBaselineSuppression(path) }).map((diag) => toLspDiagnostic(diag, lines));
     const params: PublishDiagnosticsParams = { uri, diagnostics };
     counters.diagnosticsPublished++;
     void connection.sendNotification('textDocument/publishDiagnostics', params);
@@ -344,21 +381,52 @@ function effectiveRoot(): string {
     }
     const scanning = first !== null ? rescan(first) : rescan(effectiveRoot());
     return scanning.then(() => {
-      const capabilities: Record<string, unknown> = {
+      // §10.2's feature set. Each declaration has a handler registered by
+      // `registerLanguageFeatures` (features.ts); a client reads this table to
+      // decide what to offer, so an unlisted feature stays unoffered even
+      // though its handler exists. The LSP nests document-scoped providers
+      // under `textDocument` and workspace-scoped ones at the root.
+      const textDocument: Record<string, unknown> = {
         // Incremental sync: the client sends range-addressed contentChanges,
-        // which `TextDocuments` applies to the in-memory overlay. Serialized as
-        // the enum's value, so a client comparing against
-        // `TextDocumentSyncKind.Incremental` reads the number it expects.
-        textDocumentSync: 2,
-        // Diagnostics is the read-only service M3-a ships. The §10.2 features
-        // are added by M3-b as capability declarations beside their handlers;
-        // declaring none of them here is what keeps a client from offering a
-        // completion this server cannot answer.
-        workspace: {
-          workspaceFolders: { supported: true, changeNotifications: true },
+        // which `TextDocuments` applies to the in-memory overlay. The sync
+        // contract is spelled out per LSP 3.17 — an absent `change` means None
+        // and an absent `openClose` means false, so a strict client would
+        // never push didOpen/didChange without these.
+        synchronization: {
+          dynamicRegistration: false,
+          openClose: true,
+          change: 2, // TextDocumentSyncKind.Incremental
+          save: { includeText: false },
+        },
+        completion: {
+          // ':' opens a value position (`type:` …) and ' ' continues a field
+          // name or a value already begun; both are the points where the next
+          // legal token is a small, knowable set.
+          triggerCharacters: [':', ' '],
+          resolveProvider: false,
+        },
+        definition: { dynamicRegistration: false },
+        references: { dynamicRegistration: false },
+        rename: { dynamicRegistration: false, prepareSupport: true },
+        hover: { dynamicRegistration: false },
+        documentSymbol: { dynamicRegistration: false, hierarchicalDocumentSymbolSupport: true },
+        // §9.1's safe fixes: a code action returns TextEdits the client applies
+        // only after the user picks it. Never an automatic write.
+        codeAction: {
+          dynamicRegistration: false,
+          codeActionKinds: [CodeActionKind.QuickFix],
+          resolveProvider: false,
         },
       };
-      return { capabilities };
+      return {
+        capabilities: {
+          textDocument,
+          workspace: {
+            workspaceFolders: { supported: true, changeNotifications: true },
+            symbol: { dynamicRegistration: false },
+          },
+        },
+      };
     });
   });
 
@@ -413,6 +481,9 @@ function effectiveRoot(): string {
     if (documents.get(pathToUri(path, rootPath)) !== undefined) return;
     const text = readDocument(path);
     if (text === null) return;
+    // The same degradation as every other entry point: a file an external
+    // change grew past the threshold is indexed but not validated.
+    if (isLarge(text)) degradeLarge(path);
     const { affected } = updateFile(index, path, text);
     publishAffected(new Set([...affected, path]));
   }
@@ -429,6 +500,13 @@ function effectiveRoot(): string {
       setImmediate(() => {
         for (const [path, content] of scanWorkspace(root, config)) {
           if (documents.get(pathToUri(path, rootPath)) !== undefined) continue;
+          // §13's degradation applies to the scan too, not just to
+          // `validateNow`: without this, a repository's startup cost was a
+          // function of its largest document, and `initialize` answered only
+          // after a multi-megabyte file's full rule stack ran (review M3-a,
+          // Major-3). The document is still indexed — completion, definition
+          // and symbol queries read it — only its expensive validation waits.
+          if (isLarge(content)) degradeLarge(path);
           updateFile(index, path, content);
         }
         scanned = true;
@@ -443,8 +521,30 @@ function effectiveRoot(): string {
     return scanPromise;
   }
 
-  const context: ServerContext = { connection, index, config, baseline, rootPath, resolveText, validateNow };
-  options.hooks?.register?.(context);
+  const context: ServerContext = {
+    connection,
+    // Getters, not snapshots: `reconfigure` rebinds these `let`s when
+    // `initialize` names a workspace folder, and a context that captured the
+    // first binding would hand every M3-b handler the config and the index of
+    // a tree the scan never validated (review M3-a, Major-4: the context kept
+    // reporting config A after `initialize` pointed at B).
+    get index(): WorkspaceIndex {
+      return index;
+    },
+    get config(): Config {
+      return config;
+    },
+    get baseline(): Baseline | null {
+      return baseline;
+    },
+    rootPath,
+    resolveText,
+    validateNow,
+  };
+  // §10.2's handlers register against the live context. The default hooks carry
+  // them; a caller passing its own hooks is the escape hatch for a host that
+  // wants a different feature set on the same index.
+  (options.hooks ?? { register: registerLanguageFeatures }).register?.(context);
 
   return {
     connection,

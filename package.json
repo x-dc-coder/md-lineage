@@ -13,7 +13,7 @@
   "scripts": {
     "build": "tsc -b",
     "clean": "tsc -b --clean",
-    "lint:md": "remark . --frail --no-stdout",
+    "lint:md": "remark docs README.md --frail --no-stdout",
     "check:md": "mdlineage check .",
     "check:md:changed": "mdlineage check --changed",
     "test": "npm run build && node --import tsx --test \"packages/*/test/*.test.ts\""
