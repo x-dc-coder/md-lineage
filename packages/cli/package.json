@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/cli",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "mdlineage command line: single-document and repository Markdown validation through @mdlineage/validator.",
   "type": "module",
   "main": "./dist/main.js",
@@ -13,7 +13,11 @@
       "import": "./dist/check.js"
     }
   },
-  "files": ["dist", "!dist/**/*.map", "!dist/.tsbuildinfo"],
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "!dist/.tsbuildinfo"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -25,7 +29,8 @@
   },
   "scripts": {
     "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
-    "test": "node --import tsx --test \"test/*.test.ts\""
+    "test": "node --import tsx --test \"test/*.test.ts\"",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@mdlineage/language-server": "*",
@@ -35,5 +40,6 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.0"
-  }
+  },
+  "license": "MIT"
 }

@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/validator",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "Transport-independent MDLineage validation core: front matter syntax, JSON Schema, single-document semantics, line-ending hygiene.",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,12 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "schemas", "!dist/**/*.map", "!dist/.tsbuildinfo"],
+  "files": [
+    "dist",
+    "schemas",
+    "!dist/**/*.map",
+    "!dist/.tsbuildinfo"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -35,5 +40,6 @@
   "devDependencies": {
     "@types/mdast": "^4.0.4",
     "@types/unist": "^3.0.3"
-  }
+  },
+  "license": "MIT"
 }

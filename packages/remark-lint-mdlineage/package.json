@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/remark-lint-mdlineage",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "remark-lint rule that runs the @mdlineage/validator single-document stack on the in-memory buffer.",
   "type": "module",
   "main": "./dist/index.js",
@@ -11,7 +11,11 @@
       "import": "./dist/index.js"
     }
   },
-  "files": ["dist", "!dist/**/*.map", "!dist/.tsbuildinfo"],
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "!dist/.tsbuildinfo"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -39,5 +43,6 @@
     "remark-parse": "^11.0.0",
     "remark-stringify": "^11.0.0",
     "unified": "^11.0.0"
-  }
+  },
+  "license": "MIT"
 }

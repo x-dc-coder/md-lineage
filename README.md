@@ -48,3 +48,8 @@ MDLineage addresses four classes of problems that Markdown repositories hit in r
 ## Status
 
 This repository starts as a product and architecture proposal. The metadata schema and tool interface are drafts, not a stable compatibility promise. The first phase adopts the remark ecosystem (remark-language-server, remark-lint, unified, yaml, ajv) as pinned repository dependencies hosting realtime validation; the long-term shape replaces the editor host with the dedicated MDLineage language server while keeping the same validator core. No graph database, embedding provider, or LLM provider has been selected as a required dependency.
+
+## License
+
+MDLineage is released under the MIT License; the full text is in the `LICENSE` file at the repository root.
+

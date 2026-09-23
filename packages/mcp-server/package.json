@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/mcp-server",
-  "version": "0.0.0",
+  "version": "0.1.0",
   "description": "MCP server exposing @mdlineage/validator as model-facing tools (docs/remark-language-server-solution.md §12).",
   "type": "module",
   "main": "./dist/server.js",
@@ -14,7 +14,12 @@
       "import": "./dist/server.js"
     }
   },
-  "files": ["dist", "schemas", "!dist/**/*.map", "!dist/.tsbuildinfo"],
+  "files": [
+    "dist",
+    "schemas",
+    "!dist/**/*.map",
+    "!dist/.tsbuildinfo"
+  ],
   "publishConfig": {
     "access": "public",
     "provenance": true
@@ -27,7 +32,8 @@
   "scripts": {
     "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
     "prepack": "node ../../scripts/copy-schemas.mjs",
-    "test": "node --import tsx --test \"test/*.test.ts\""
+    "test": "node --import tsx --test \"test/*.test.ts\"",
+    "prepublishOnly": "npm run build"
   },
   "dependencies": {
     "@mdlineage/validator": "*",
@@ -36,5 +42,6 @@
   },
   "devDependencies": {
     "@types/node": "^20.19.0"
-  }
+  },
+  "license": "MIT"
 }
