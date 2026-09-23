@@ -10,7 +10,7 @@
  */
 
 import { readFileSync, statSync, readdirSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { Config } from '@mdlineage/validator';
 
@@ -43,8 +43,44 @@ export function uriToPath(uri: string): string | null {
 }
 
 /** Absolute path → the `file://` URI the client addresses documents by. */
-export function pathToUri(path: string, _rootPath: string): string {
-  return pathToFileURL(path).href;
+export function pathToUri(path: string, rootPath: string): string {
+  // The index keys documents relative to the root, so the root is what turns a
+  // key back into the absolute path a `file://` URI names. `resolve` is a no-op
+  // for a path that is already absolute, which keeps an out-of-root key — the
+  // one spelling `toIndexPath` leaves absolute — round-tripping.
+  return pathToFileURL(resolve(rootPath, path)).href;
+}
+
+/**
+ * The index's path vocabulary: a root-relative POSIX path.
+ *
+ * Every transport keys the same tree the same way — the CLI by the spelling its
+ * arguments produced, the MCP by `relative(root, …)` — so one document's
+ * diagnostics carry the same `path` and the same message whichever entry point
+ * produced them (§14.4). It is also what makes root-relative Markdown links
+ * (`docs/vision.md` from a repository README) resolve: `resolveLinkPath` matches
+ * a destination against the index's keys verbatim, so a tree keyed by absolute
+ * paths answers "target does not exist" for every one of them.
+ *
+ * A path outside the root keeps its absolute spelling, which simply never
+ * matches a root-relative key; the CLI and the MCP make the same choice.
+ */
+export function toIndexPath(root: string, path: string): string {
+  const absolute = isAbsolute(path) ? path : resolve(root, path);
+  const rel = relative(root, absolute);
+  if (rel === '' || rel.startsWith('..')) return absolute;
+  return rel.split(sep).join('/');
+}
+
+/** The `file://` URI of a request → the index key of the document it names. */
+export function indexPathOfUri(root: string, uri: string): string | null {
+  const absolute = uriToPath(uri);
+  return absolute === null ? null : toIndexPath(root, absolute);
+}
+
+/** The absolute filesystem path an index key names. */
+export function toAbsolutePath(root: string, path: string): string {
+  return resolve(root, path);
 }
 
 /** True when a path is worth indexing: a readable Markdown file under `root`. */
@@ -82,8 +118,12 @@ export function readDocument(path: string): string | null {
 }
 
 /**
- * The Markdown documents under `root`, as an absolute path → content map the
- * index takes directly.
+ * The Markdown documents under `root`, as a root-relative path → content map
+ * the index takes directly.
+ *
+ * The keys are the index's own vocabulary (`toIndexPath`), the same spelling
+ * the CLI and the MCP key a tree by, so a document's diagnostics are identical
+ * whichever channel produced them and a root-relative link resolves.
  *
  * `config.files.exclude` is consulted as a prefix check, which covers the
  * patterns the config schema allows (glob-free directory names) without pulling
@@ -112,7 +152,7 @@ export function scanWorkspace(root: string, config: Config): Map<string, string>
       }
       if (!isCandidate(path, root)) continue;
       const text = readDocument(path);
-      if (text !== null) files.set(path, text);
+      if (text !== null) files.set(toIndexPath(root, path), text);
     }
   }
 

@@ -113,6 +113,65 @@ function harness(rootOverride?: string): Harness {
   };
 }
 
+/** A diagnostic as the CLI's JSON output spells it (1-based line/column). */
+interface CliDiagnostic {
+  code: string;
+  severity: string;
+  message: string;
+  line: number;
+  column: number;
+  endLine: number;
+  endColumn: number;
+}
+
+/**
+ * Run the REAL `mdlineage check` over a tree and return its per-file reports.
+ *
+ * The CLI is spawned as a child process reading its own JSON output rather than
+ * calling `validateWorkspace` in-process, and that is the whole point: the
+ * validator shares its implementation with the language server, so a reference
+ * built from it agreed with the server on a defect both of them had (the
+ * absolute-keyed index reported every root-relative README link as missing).
+ * §14.4's promise is about the transports, so only another transport can check
+ * it.
+ *
+ * The run is anchored at `root` (`cwd: root`, argument `.`), which is the
+ * spelling that makes the CLI key — and report — a tree root-relatively, the
+ * same vocabulary the server's index now uses.
+ */
+function cliReports(root: string): Promise<Map<string, CliDiagnostic[]>> {
+  return new Promise((fulfill, reject) => {
+    const child = spawn(
+      process.execPath,
+      [resolve(repoRoot, 'packages', 'cli', 'dist', 'main.js'), 'check', '.', '--format', 'json', '--no-baseline'],
+      { cwd: root, stdio: ['ignore', 'pipe', 'pipe'] },
+    );
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk: Buffer) => {
+      stdout += chunk.toString('utf8');
+    });
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString('utf8');
+    });
+    child.on('error', reject);
+    child.on('close', (code) => {
+      // A run with error-severity diagnostics exits 1, which is the contract,
+      // not a failure: only an empty stdout with a non-zero code is one.
+      if (stdout.trim() === '') {
+        reject(new Error(`mdlineage check exited ${code}: ${stderr.slice(0, 400)}`));
+        return;
+      }
+      try {
+        const parsed = JSON.parse(stdout) as { reports: Array<{ path: string; diagnostics: CliDiagnostic[] }> };
+        fulfill(new Map(parsed.reports.map((report) => [report.path, report.diagnostics])));
+      } catch (error) {
+        reject(new Error(`mdlineage check produced unparseable JSON: ${(error as Error).message}`));
+      }
+    });
+  });
+}
+
 /**
  * Wait until a message of `method` arrives (or a response to `id`), flushing
  * the interval once it does.
@@ -228,9 +287,13 @@ async function waitForDiagnostics(h: Harness, uri: string, timeoutMs = 8000): Pr
  * land first, or it answers against a stale index. A VALID document publishes
  * an empty set, which is the state the feature tests start from, so this waits
  * for the notification itself rather than for a non-empty one.
+ *
+ * `from` is the message index to start looking at, for a caller that sent
+ * several notifications at once and must match each one's own publish rather
+ * than whichever arrived first.
  */
-async function waitForDiagnosticsSet(h: Harness, uri: string, timeoutMs = 8000): Promise<void> {
-  const baseline = h.received.length;
+async function waitForDiagnosticsSet(h: Harness, uri: string, from = h.received.length, timeoutMs = 8000): Promise<void> {
+  const baseline = from;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     for (let i = baseline; i < h.received.length; i++) {
@@ -1190,6 +1253,60 @@ function expectedCodes(h: Harness): Map<string, string[]> {
   return byPath;
 }
 
+/**
+ * The repository's own README shape: a root document whose links are written
+ * root-relative (`docs/vision.md`, no leading `./`).
+ *
+ * This is the flagship scenario and the one an absolute-keyed index broke.
+ * `resolveLinkPath` compares a destination against the index's keys verbatim, so
+ * a root-relative link resolves only when the keys are spelled root-relatively:
+ * keyed absolutely, the server used to report every one of these links as a
+ * missing target while the CLI and the MCP reported none.
+ *
+ * One link is genuinely broken (`docs/nope.md`) so a comparison of "0 == 0"
+ * cannot pass by agreeing on nothing, one is the `./` spelling, and the tree
+ * also carries a cycle and a duplicate id so the comparison covers a diagnostic
+ * whose message embeds another document's path.
+ */
+function rootLinkWorkspace(h: Harness): void {
+  writeFileSync(
+    resolve(h.root, 'README.md'),
+    [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: docs.readme',
+      '  kind: policy',
+      '  status: active',
+      '---',
+      '',
+      '# Project',
+      '',
+      'See [vision](docs/vision.md), [architecture](docs/architecture.md) and',
+      '[the cycle](docs/cycle-a.md). [Broken](docs/nope.md) is a real break, and',
+      '[sibling](./docs/vision.md) is the `./` spelling of the first link.',
+      '',
+    ].join('\n'),
+  );
+  writeFileSync(resolve(h.root, 'docs/vision.md'), doc({ id: 'docs.vision' }));
+  writeFileSync(resolve(h.root, 'docs/architecture.md'), doc({ id: 'docs.architecture' }));
+  writeFileSync(resolve(h.root, 'docs/dup-a.md'), doc({ id: 'docs.duplicate' }));
+  writeFileSync(resolve(h.root, 'docs/dup-b.md'), doc({ id: 'docs.duplicate' }));
+  const cycle = (id: string, target: string) =>
+    [
+      '---', 'mdlineage:', '  schema: 1', `  id: ${id}`, '  kind: policy', '  status: active',
+      '  relations:', '    - type: supersedes', `      target: ${target}`, '      reason: closes the loop',
+      '---', '', '# Cycle', '',
+    ].join('\n');
+  writeFileSync(resolve(h.root, 'docs/cycle-a.md'), cycle('docs.cycle-a', 'docs.cycle-b'));
+  writeFileSync(resolve(h.root, 'docs/cycle-b.md'), cycle('docs.cycle-b', 'docs.cycle-a'));
+}
+
+/** `code@line:character` for one diagnostic set, sorted so order cannot hide a difference. */
+function positionsOf(diagnostics: ReadonlyArray<{ code: string; line: number; column: number }>): string[] {
+  return diagnostics.map((d) => `${d.code}@${d.line}:${d.column}`).sort();
+}
+
 describe('cross-file diagnostics stay on their own document (M3-a)', () => {
   it('anchors MDL305 on the cycle member and keeps every other document clean', async () => {
     // The `paths` scope a `publishOne` passes does not reach MDL305: a cycle is
@@ -1282,6 +1399,122 @@ describe('cross-file diagnostics stay on their own document (M3-a)', () => {
           h.received.indexOf(m) >= changedAt,
       );
       assert.deepEqual(diagnosticsFor(h, u), [], 'the edited bystander stays clean');
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe('the CLI and the server agree on one tree (§14.4)', () => {
+  it('reports the same codes and ranges as the real CLI for a root README\'s root-relative links', async () => {
+    // The reference is a spawned `mdlineage check`, not `validateWorkspace`: the
+    // validator shares its implementation with this server, so an in-process
+    // reference agreed with it on the defect this test now pins — the server's
+    // index used to be keyed by absolute path, so every root-relative link in
+    // the repository README was reported as a missing target here and nowhere
+    // else. Both channels now key the tree root-relatively, as the MCP does.
+    const h = harness();
+    try {
+      rootLinkWorkspace(h);
+      const reports = await cliReports(h.root);
+      await initialize(h);
+      // Every file is opened so each one's own publish is observed, rather than
+      // a notification the initial scan happened to send first.
+      const openedAt = h.received.length;
+      for (const relative of reports.keys()) {
+        didOpen(h, uri(h, relative), 1, readFileSync(resolve(h.root, relative), 'utf8'));
+      }
+      for (const relative of reports.keys()) {
+        await waitForDiagnosticsSet(h, uri(h, relative), openedAt);
+      }
+
+      for (const [relative, cli] of reports) {
+        const lsp = diagnosticsFor(h, uri(h, relative));
+        assert.deepEqual(
+          positionsOf(lsp.map((d) => ({ code: d.code, line: d.range.start.line, column: d.range.start.character }))),
+          // The CLI prints 1-based line/column, the LSP 0-based line/character.
+          positionsOf(cli.map((d) => ({ code: d.code, line: d.line - 1, column: d.column - 1 }))),
+          `${relative}: the two channels name the same codes at the same positions`,
+        );
+      }
+
+      // The point of the fixture, stated on its own: the root-relative links
+      // resolve, and the one genuinely broken link is the only MDL401.
+      const readme = reports.get('README.md') ?? [];
+      assert.deepEqual(readme.map((d) => d.code), ['MDL401'], 'only docs/nope.md is missing');
+      assert.match(readme[0]!.message, /docs\/nope\.md/);
+      assert.deepEqual(diagnosticsFor(h, uri(h, 'README.md')).map((d) => d.code), ['MDL401']);
+      // A message that embeds another document's path is the other half of
+      // §14.4: the absolute keys used to spell it differently in each channel.
+      const duplicate = reports.get('docs/dup-b.md') ?? [];
+      assert.equal(duplicate.length, 1, 'the duplicate id is reported once');
+      assert.equal(duplicate[0]!.code, 'MDL301');
+      const lspDuplicate = diagnosticsFor(h, uri(h, 'docs/dup-b.md'));
+      assert.equal(lspDuplicate.length, 1);
+      assert.equal(lspDuplicate[0]!.code, 'MDL301');
+      assert.equal(lspDuplicate[0]!.message, duplicate[0]!.message, 'MDL301 names the same claimant in both');
+    } finally {
+      h.close();
+    }
+  });
+
+  it('places MDL305 at the same range the CLI prints', async () => {
+    // The range is where a diagnostic lands, and it is the half of §14.4 a
+    // code-set comparison cannot see: an MDL305 positioned through the wrong
+    // document's line table is a correct code at a wrong place. The cycle's
+    // anchor is the lexicographically smaller member, `docs/anchor.md`.
+    const h = harness();
+    try {
+      cycleWorkspace(h);
+      const reports = await cliReports(h.root);
+      const cli = (reports.get('docs/anchor.md') ?? []).find((d) => d.code === 'MDL305');
+      assert.ok(cli, 'the CLI reports the cycle on its anchor');
+      assert.equal(cli!.line, 8, 'the relation declaration is on 1-based line 8');
+      assert.equal(cli!.column, 3);
+
+      await initialize(h);
+      const u = uri(h, 'docs/anchor.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/anchor.md'), 'utf8'));
+      const lsp = await waitForDiagnostics(h, u);
+      const cycle = lsp.find((d) => d.code === 'MDL305');
+      assert.ok(cycle, 'the server reports the cycle on its anchor');
+      // LSP line/character are 0-based, the CLI's line/column 1-based: the same
+      // position is line 7/char 2 here and line 8/col 3 there.
+      assert.equal(cycle!.range.start.line, cli!.line - 1);
+      assert.equal(cycle!.range.start.character, cli!.column - 1);
+      assert.equal(cycle!.range.end.line, cli!.endLine - 1);
+      assert.equal(cycle!.range.end.character, cli!.endColumn - 1);
+      assert.equal(cycle!.message, cli!.message, 'the message names the same loop');
+    } finally {
+      h.close();
+    }
+  });
+});
+
+describe('initialize root negotiation', () => {
+  it('treats a deprecated rootUri as the workspace root', async () => {
+    // A pre-3.6 client names the folder it opened through `rootUri` and sends no
+    // `workspaceFolders`. Reading only `workspaceFolders` made the server fall
+    // back to its process CWD, so it scanned — and validated — a different tree
+    // than the one on screen: this harness starts the server in the repository,
+    // whose README links to `docs/roadmap.md` and not to `docs/nope.md`.
+    const h = harness();
+    try {
+      rootLinkWorkspace(h);
+      h.send({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: { processId: process.pid, rootUri: pathUri(h.root), capabilities: {} },
+      });
+      await waitFor(h, (m) => m.id === 1);
+      h.send({ jsonrpc: '2.0', method: 'initialized', params: {} });
+
+      const u = uri(h, 'README.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'README.md'), 'utf8'));
+      const diagnostics = await waitForDiagnostics(h, u);
+      assert.deepEqual(diagnostics.map((d) => d.code), ['MDL401']);
+      assert.match(diagnostics[0]!.message, /docs\/nope\.md/, 'the tree rootUri named is the tree that was scanned');
     } finally {
       h.close();
     }

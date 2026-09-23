@@ -180,6 +180,30 @@ describe('workspace fixtures (manifest contract)', () => {
     assert.equal(byCode(all, 'MDL402').length, 1);
     assert.equal(byCode(all, 'MDL201').length, 0, 'an anchor resolving in the source is not an in-document failure');
   });
+
+  it('is insensitive to how the index spells its paths', () => {
+    // MDL402/MDL301/MDL302/MDL305 reach a document through its ID
+    // (`idToPaths` → `anchorsOf`/`entryOf`), never through a link destination,
+    // so re-keying the same tree absolutely changes nothing about them. This is
+    // the property that kept the absolute/relative split to MDL401 alone: only
+    // `resolveLinkPath` compares a destination against a key verbatim.
+    const build = (spell: (relative: string) => string) =>
+      createWorkspaceIndex(
+        new Map<string, string>([
+          [spell('source.md'), doc('docs.a', relations({ type: 'refines', target: 'docs.b', reason: 'x', evidence: '#missing' }), 'Body.\n')],
+          [spell('target.md'), doc('docs.b', relations(), '# Heading\n')],
+        ]),
+        defaultConfig(),
+      );
+    const codes = (index: ReturnType<typeof build>) =>
+      validateWorkspace(index, { includeSingleDocument: false }).map((d) => `${d.code}:${d.message}`);
+    const relativeKeys = codes(build((p) => p));
+    const absoluteKeys = codes(build((p) => `/repo/${p}`));
+    assert.deepEqual(relativeKeys, ['MDL402:Evidence anchor does not exist in docs.b: #missing']);
+    // The message names the target ID, never its path, so nothing about the
+    // spelling reaches the output and the two runs are byte-identical.
+    assert.deepEqual(absoluteKeys, relativeKeys);
+  });
 });
 
 describe('MDL401 — markdown link targets', () => {
@@ -311,6 +335,35 @@ describe('MDL401 — markdown link targets', () => {
     const index = createWorkspaceIndex(files, defaultConfig());
     const all = validateWorkspace(index, { includeSingleDocument: false });
     assert.equal(byCode(all, 'MDL401').length, 1);
+  });
+
+  it('resolves a root-relative link against the index keys (README → docs/)', () => {
+    // The repository's own README shape: `docs/vision.md` with no leading `./`.
+    // `resolveLinkPath` matches a destination against the index's keys verbatim,
+    // so such a link only resolves when the keys are spelled root-relatively —
+    // which is why the CLI and the MCP key a tree that way, and why the LSP's
+    // absolute keys used to report all eleven of README's links as missing.
+    const files = new Map<string, string>([
+      ['README.md', doc('docs.readme', relations(), body('See [vision](docs/vision.md).'))],
+      ['docs/vision.md', doc('docs.vision')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0);
+    assert.equal(index.linkReferrersOf('docs/vision.md').length, 1);
+  });
+
+  it('resolves a link from a nested document back to the repository root', () => {
+    // The same root-relative convention read from below: `../README.md` is the
+    // `./`-relative spelling of it, so the two forms must agree.
+    const files = new Map<string, string>([
+      ['README.md', doc('docs.readme', relations(), body('Root.'))],
+      ['docs/a.md', doc('docs.a', relations(), body('Up to [root](../README.md).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0);
+    assert.equal(index.linkReferrersOf('README.md').length, 1);
   });
 });
 

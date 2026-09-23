@@ -61,6 +61,8 @@ import {
   isMarkdownUri,
   uriToPath,
   pathToUri,
+  indexPathOfUri,
+  toAbsolutePath,
   MAX_DOCUMENT_BYTES,
 } from './workspace.js';
 import { relative } from 'node:path';
@@ -77,6 +79,9 @@ export {
   isMarkdownUri,
   uriToPath,
   pathToUri,
+  toIndexPath,
+  indexPathOfUri,
+  toAbsolutePath,
 } from './workspace.js';
 
 /** §13: the settling window before a burst of edits triggers a validation. */
@@ -217,7 +222,7 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   const documents = new TextDocuments(TextDocument);
   documents.listen(connection);
   documents.onDidChangeContent((event) => {
-    const path = uriToPath(event.document.uri);
+    const path = indexPathOfUri(effectiveRoot(), event.document.uri);
     if (path === null) return;
     scheduleValidation(path);
   });
@@ -225,9 +230,9 @@ export function createServer(connection: Connection, options: ServerOptions = {}
     // §10.3: discard the unsaved overlay and revalidate against the disk
     // snapshot, so a closed dirty buffer stops reporting what the file no longer
     // holds.
-    const path = uriToPath(event.document.uri);
+    const path = indexPathOfUri(effectiveRoot(), event.document.uri);
     if (path === null) return;
-    const onDisk = readDocument(path);
+    const onDisk = readDocument(toAbsolutePath(effectiveRoot(), path));
     if (onDisk === null) {
       const { affected } = removeFile(index, path);
       publishAffected(new Set([...affected, path]));
@@ -247,8 +252,8 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   const startupDiagnostics = loaded.diagnostics.slice();
 
   function resolveText(path: DocPath): string | null {
-    const document = documents.get(pathToUri(path, rootPath));
-    return document ? document.getText() : readDocument(path);
+    const document = documents.get(pathToUri(path, effectiveRoot()));
+    return document ? document.getText() : readDocument(toAbsolutePath(effectiveRoot(), path));
   }
 
   /**
@@ -311,7 +316,7 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   }
 
   function publishOne(path: DocPath): void {
-    const uri = pathToUri(path, rootPath);
+    const uri = pathToUri(path, effectiveRoot());
     const text = resolveText(path);
     const lines = text === null ? [] : text.split(/\r\n|\r|\n/);
     const diagnostics =
@@ -332,11 +337,13 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   }
 
   /**
-   * The index keys documents by absolute path, while the committed baseline keys
-   * them relative to the repository root (the CLI's vocabulary, so one file
-   * covers a tree checked out anywhere). Spell this path the baseline's way
-   * before matching; outside the root the absolute spelling survives and simply
-   * never matches an entry, same as the CLI's fallback.
+   * The index keys documents relative to the root, and so does the committed
+   * baseline — the CLI's vocabulary, so one file covers a tree checked out
+   * anywhere — so the two agree and the suppression comparison needs no
+   * translation. The `resolve`/`relative` round trip is kept so a path that is
+   * already absolute (a document opened from outside the root, which
+   * `toIndexPath` leaves absolute) is still matched against the baseline's own
+   * spelling instead of silently never matching.
    */
   function toBaselineSuppression(path: DocPath): Baseline | undefined {
     if (baseline === null) return undefined;
@@ -365,6 +372,22 @@ function effectiveRoot(): string {
   return workspaceRoot ?? rootPath;
 }
 
+/**
+ * The root a pre-3.6 client named through `rootUri` / `rootPath`, or null.
+ *
+ * `rootUri` is a `file://` URI; `rootPath` was a plain path in LSP 2.x and a
+ * URI in some clients, so both spellings are accepted rather than guessed at.
+ * Reading either is what keeps such a client scanning the folder it opened
+ * instead of the server process's CWD.
+ */
+function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null }): string | null {
+  const uri = typeof params.rootUri === 'string' ? params.rootUri : null;
+  if (uri !== null) return uriToPath(uri);
+  const legacy = typeof params.rootPath === 'string' ? params.rootPath : null;
+  if (legacy === null) return null;
+  return legacy.startsWith('file:') ? uriToPath(legacy) : resolve(legacy);
+}
+
   /** §13: coalesce a burst of edits into one validation pass per path. */
   function scheduleValidation(path: DocPath): void {
     const existing = pending.get(path);
@@ -382,7 +405,14 @@ function effectiveRoot(): string {
     // is returned, so a client that opens a document right after `initialize`
     // sees the repository's diagnostics and not an empty index.
     const folders = params.workspaceFolders;
-    const first = folders && folders.length > 0 ? uriToPath(folders[0]!.uri) : null;
+    const first =
+      folders && folders.length > 0
+        ? uriToPath(folders[0]!.uri)
+        : // `rootUri` (and the older `rootPath`) is the pre-3.6 spelling of the
+          // same thing. A client that still sends only it is naming the tree it
+          // opened, and falling back to the process CWD would scan — and
+          // validate — a different repository than the one on screen.
+          legacyRoot(params);
     if (first !== null) {
       workspaceRoot = first;
       // The client's folder is authoritative for config and baseline too: the
@@ -468,7 +498,7 @@ function effectiveRoot(): string {
     // §10.3: the overlay becomes the committed snapshot. The index already holds
     // the same text (the change notifications led it), so this is a refresh that
     // also republishes the file's referrers.
-    const path = uriToPath(event.textDocument.uri);
+    const path = indexPathOfUri(effectiveRoot(), event.textDocument.uri);
     if (path === null) return;
     validateNow([path]);
   });
@@ -482,15 +512,15 @@ function effectiveRoot(): string {
   });
 
   function handleWatchedFile(change: { uri: string; type: number }): void {
-    const path = uriToPath(change.uri);
+    const path = indexPathOfUri(effectiveRoot(), change.uri);
     if (path === null || !isMarkdownUri(change.uri)) return;
     if (change.type === 3 /* Deleted */) {
       const { affected } = removeFile(index, path);
       publishAffected(new Set([...affected, path]));
       return;
     }
-    if (documents.get(pathToUri(path, rootPath)) !== undefined) return;
-    const text = readDocument(path);
+    if (documents.get(pathToUri(path, effectiveRoot())) !== undefined) return;
+    const text = readDocument(toAbsolutePath(effectiveRoot(), path));
     if (text === null) return;
     // The same degradation as every other entry point: a file an external
     // change grew past the threshold is indexed but not validated.
@@ -502,6 +532,11 @@ function effectiveRoot(): string {
   /**
    * Build the initial index over the workspace, and rebuild it over a different
    * root when `initialize` names one.
+   *
+   * The index is rebuilt from empty rather than topped up: its keys are
+   * root-relative, so a tree scanned under one root and a tree scanned under
+   * another are two different vocabularies, and a leftover entry from the first
+   * would be a document this server has no business validating.
    */
   function rescan(root: string): Promise<void> {
     // `setImmediate` hands the scan to the event loop instead of running it in
@@ -509,8 +544,9 @@ function effectiveRoot(): string {
     // responsive and a large tree's cost lands after `initialize` answers.
     scanPromise = new Promise<void>((fulfill) => {
       setImmediate(() => {
+        index = createWorkspaceIndex(new Map(), config);
         for (const [path, content] of scanWorkspace(root, config)) {
-          if (documents.get(pathToUri(path, rootPath)) !== undefined) continue;
+          if (documents.get(pathToUri(path, root)) !== undefined) continue;
           // §13's degradation applies to the scan too, not just to
           // `validateNow`: without this, a repository's startup cost was a
           // function of its largest document, and `initialize` answered only
@@ -548,7 +584,12 @@ function effectiveRoot(): string {
     get baseline(): Baseline | null {
       return baseline;
     },
-    rootPath,
+    // The root the index's keys are relative to, so a feature that spells a
+    // path for the developer (`shortPath`) or for the client (`pathToUri`) uses
+    // the root the scan actually ran under rather than the pre-handshake guess.
+    get rootPath(): string {
+      return effectiveRoot();
+    },
     resolveText,
     validateNow,
   };

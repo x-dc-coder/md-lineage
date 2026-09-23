@@ -60,7 +60,6 @@ import type {
   Range as LspRange,
   Position as LspPosition,
 } from 'vscode-languageserver-protocol';
-import { fileURLToPath, pathToFileURL } from 'node:url';
 import { parseDocument } from 'yaml';
 import {
   parseMarkdownSync,
@@ -72,6 +71,7 @@ import {
 } from '@mdlineage/validator';
 import type { ServerContext } from './server.js';
 import { characterOf } from './position.js';
+import { indexPathOfUri, pathToUri } from './workspace.js';
 
 /** §10.2's relation vocabulary, with the meaning frontmatter-spec carries. */
 const RELATION_MEANINGS: Readonly<Record<string, string>> = {
@@ -119,18 +119,16 @@ export function registerLanguageFeatures(context: ServerContext): void {
  * Document access helpers
  * ------------------------------------------------------------------ */
 
-/** The absolute path of a request's document, or null when not under `file:`. */
-function requestPath(_context: ServerContext, params: { textDocument: { uri: string } }): DocPath | null {
-  return uriToPathOrNull(params.textDocument.uri);
-}
-
-function uriToPathOrNull(uri: string): string | null {
-  if (!uri.startsWith('file:')) return null;
-  try {
-    return fileURLToPath(uri);
-  } catch {
-    return null;
-  }
+/**
+ * The absolute path of a request's document, or null when not under `file:`.
+ *
+ * The request carries a `file://` URI; the index keys documents relative to the
+ * workspace root, so the URI is decoded and then re-spelled in the index's own
+ * vocabulary — the same spelling the CLI and the MCP use, which is what makes
+ * one document's diagnostics identical across every entry point (§14.4).
+ */
+function requestPath(context: ServerContext, params: { textDocument: { uri: string } }): DocPath | null {
+  return indexPathOfUri(context.rootPath, params.textDocument.uri);
 }
 
 /** The document's current text (overlay first), or null when unavailable. */
@@ -320,10 +318,8 @@ function targetItems(context: ServerContext, prefix: string): CompletionItem[] {
   return items.slice(0, 500);
 }
 
-/** A path spelled the way the developer reads it: relative to the root. */
-function shortPath(context: ServerContext, path: DocPath): string {
-  const root = context.rootPath;
-  if (path.startsWith(root + '/') || path.startsWith(root + '\\')) return path.slice(root.length + 1);
+/** A path spelled the way the developer reads it: the index's own root-relative spelling. */
+function shortPath(_context: ServerContext, path: DocPath): string {
   return path;
 }
 
@@ -1206,6 +1202,6 @@ function splitLinesOf(context: ServerContext, path: DocPath): string[] {
 }
 
 /** The `file://` URI of an indexed path. */
-function pathToUriOf(_context: ServerContext, path: DocPath): string {
-  return pathToFileURL(path).href;
+function pathToUriOf(context: ServerContext, path: DocPath): string {
+  return pathToUri(path, context.rootPath);
 }
