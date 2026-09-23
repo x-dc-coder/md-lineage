@@ -21,9 +21,9 @@ This page records projects that informed the design. They are references for cap
 
 ## Source links
 
-- CocoIndex Markdown knowledge graph example: https://cocoindex.io/docs/examples/docs-to-knowledge-graph/
-- GraphRAG indexing overview: https://microsoft.github.io/graphrag/index/overview/
-- GraphRAG command-line update operation: https://microsoft.github.io/graphrag/cli/
-- Graphiti MCP server: https://github.com/getzep/graphiti/tree/main/mcp_server
-- RAGFlow knowledge graph construction guide: https://ragflow.io/docs/ (see the knowledge-graph section; the historical GitHub path `docs/guides/dataset/advanced/construct_knowledge_graph.md` no longer resolves)
-- LightRAG project: https://github.com/HKUDS/LightRAG
+- CocoIndex Markdown knowledge graph example: <https://cocoindex.io/docs/examples/docs-to-knowledge-graph/>
+- GraphRAG indexing overview: <https://microsoft.github.io/graphrag/index/overview/>
+- GraphRAG command-line update operation: <https://microsoft.github.io/graphrag/cli/>
+- Graphiti MCP server: <https://github.com/getzep/graphiti/tree/main/mcp_server>
+- RAGFlow knowledge graph construction guide: <https://ragflow.io/docs/> (see the knowledge-graph section; the historical GitHub path `docs/guides/dataset/advanced/construct_knowledge_graph.md` no longer resolves)
+- LightRAG project: <https://github.com/HKUDS/LightRAG>
