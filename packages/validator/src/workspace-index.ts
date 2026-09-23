@@ -33,7 +33,7 @@ import type { Root, Link } from 'mdast';
 import type { Config } from './config.js';
 import type { Diagnostic } from './diagnostic.js';
 import { validateDocumentSync } from './index.js';
-import { collectAnchors, mdlineageFieldOffset, visitTree } from './document-validator.js';
+import { collectAnchors, collectHeadingTexts, mdlineageFieldOffset, visitTree } from './document-validator.js';
 import type { RelationOffsets } from './document-validator.js';
 import { relationOffsetsOf } from './document-validator.js';
 import { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
@@ -91,6 +91,11 @@ export interface DocEntry {
   readonly links: readonly LinkEntry[];
   /** Heading anchors of the document (GFM slugs); empty when the body did not parse. */
   readonly anchors: ReadonlySet<string>;
+  /**
+   * Heading TEXT of the document, in document order; empty when the body did
+   * not parse. §10.2's symbol query searches these, not the slugs.
+   */
+  readonly headings: readonly string[];
   /** Offsets of relation fields, so workspace diagnostics land on the declaration. */
   readonly offsets: RelationOffsets;
   /** Absolute offset of the first YAML byte; 0 when there is no front matter. */
@@ -117,6 +122,15 @@ export interface WorkspaceIndex {
   linkReferrersOf(path: DocPath): readonly DocPath[];
   /** Heading anchors of `path`; empty for unknown paths. */
   anchorsOf(path: DocPath): ReadonlySet<string>;
+  /**
+   * Headings of `path` as authored, oldest first; empty for unknown paths.
+   *
+   * The TEXT, not the slug: a symbol query is a developer typing a title, and
+   * §10.2's search surface is "ID、标题、alias" — the title the heading renders,
+   * which the slug only approximates (case, punctuation and CJK are all lost).
+   * Slug-based queries belong to evidence anchors and stay on `anchorsOf`.
+   */
+  headingsOf(path: DocPath): readonly string[];
   /** Relation out-edges of `path`; empty for unknown paths. */
   relationsOf(path: DocPath): readonly RelationEntry[];
   /** Config the index was built with. */
@@ -130,6 +144,7 @@ export interface UpdateResult {
 
 const EMPTY_PATHS: readonly DocPath[] = Object.freeze([]);
 const EMPTY_STRINGS: ReadonlySet<string> = new Set<string>();
+const EMPTY_HEADINGS: readonly string[] = Object.freeze([]);
 const EMPTY_RELATIONS: readonly RelationEntry[] = Object.freeze([]);
 
 /**
@@ -253,6 +268,10 @@ class IndexImpl implements WorkspaceIndex {
 
   anchorsOf(path: DocPath): ReadonlySet<string> {
     return this.entries.get(path)?.anchors ?? EMPTY_STRINGS;
+  }
+
+  headingsOf(path: DocPath): readonly string[] {
+    return this.entries.get(path)?.headings ?? EMPTY_HEADINGS;
   }
 
   relationsOf(path: DocPath): readonly RelationEntry[] {
@@ -497,6 +516,7 @@ function parseDocument(path: DocPath, content: string, config: Config): DocEntry
     links: extractLinks(result.tree, result.bodyStart),
     rawStart,
     anchors: result.tree ? collectAnchors(result.tree) : EMPTY_STRINGS,
+    headings: result.tree ? collectHeadingTexts(result.tree) : EMPTY_HEADINGS,
     offsets,
     idOffset: idFieldOffset(doc, config.metadata.key, rawStart),
     lineMap,

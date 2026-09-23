@@ -105,6 +105,21 @@ export function collectAnchors(tree: Root): Set<string> {
   return slugger.anchors();
 }
 
+/**
+ * Heading TEXT of every heading in the document, in document order.
+ *
+ * The text is what a symbol query matches (`workspace/symbol` searches the
+ * title a developer reads, and the slug is only its mangled form), so this is
+ * the same walk `collectAnchors` takes without the slugger.
+ */
+export function collectHeadingTexts(tree: Root): string[] {
+  const out: string[] = [];
+  visit(tree, (node) => {
+    if (node.type === 'heading') out.push(textOfHeading(node as unknown as Heading));
+  });
+  return out;
+}
+
 /** Visit every node in an mdast tree; shared with the workspace link scan. */
 export function visitTree(node: unknown, fn: (node: { type: string }) => void): void {
   if (!node || typeof node !== 'object') return;

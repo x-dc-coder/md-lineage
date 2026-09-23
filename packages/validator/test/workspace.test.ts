@@ -20,6 +20,8 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { defaultConfig } from '../src/index.js';
+import { parseMarkdownSync } from '../src/index.js';
+import { collectHeadingTexts } from '../src/document-validator.js';
 import { createWorkspaceIndex, updateFile, removeFile, updateFiles } from '../src/workspace-index.js';
 import type { WorkspaceIndex } from '../src/workspace-index.js';
 import { validateWorkspace } from '../src/workspace-validator.js';
@@ -78,6 +80,46 @@ function byReportOrder(a: WorkspaceDiagnostic, b: WorkspaceDiagnostic): number {
     a.code.localeCompare(b.code)
   );
 }
+
+describe('heading views', () => {
+  it('headingsOf returns the heading TEXT in document order, unlike the slug set', () => {
+    // §10.2's symbol query searches titles, and a title is not its slug:
+    // "Cache key" slugifies to `cache-key`, so the symbol surface needs the
+    // text. Both views come off the same walk, so a heading that anchors one
+    // way is reported the other way too.
+    const index = createWorkspaceIndex(
+      new Map([
+        ['docs/a.md', doc('docs.a', '', '# Cache key\n\n## Identity & scope: 😀\n')],
+        ['docs/b.md', doc('docs.b', '', '# Cache key\n')],
+      ]),
+      defaultConfig(),
+    );
+    assert.deepEqual([...index.headingsOf('docs/a.md')], ['Cache key', 'Identity & scope: 😀'], 'text, verbatim');
+    assert.deepEqual(
+      [...index.anchorsOf('docs/a.md')],
+      // The 😀 is a surrogate pair in UTF-16, which the slugger keeps as one
+      // code point and the slug table then drops as unkept.
+      ['cache-key', 'identity--scope-'],
+      'the slug mangles case, punctuation and astral characters — the point of a separate view',
+    );
+    // Duplicate headings repeat in the text list and get GitHub's `-n` suffix in
+    // the anchor set — the two views answer different questions.
+    assert.deepEqual([...index.headingsOf('docs/b.md')], ['Cache key']);
+    assert.deepEqual([...index.anchorsOf('docs/b.md')], ['cache-key']);
+  });
+
+  it('headingsOf is empty for an unknown path or a body that did not parse', () => {
+    const index = createWorkspaceIndex(new Map([['docs/a.md', doc('docs.a')]]), defaultConfig());
+    assert.deepEqual([...index.headingsOf('docs/nope.md')], [], 'an unknown path answers nothing');
+    assert.deepEqual([...index.headingsOf('docs/a.md')], [], 'a document with no headings answers nothing');
+  });
+
+  it('collectHeadingTexts walks inline code and nested emphasis like the slugger', () => {
+    // The anchor slugger renders `inlineCode` into the anchor, so the text view
+    // must collect the same children or the two views disagree.
+    assert.deepEqual(collectHeadingTexts(parseMarkdownSync('# Use `fetch` _now_')!), ['Use fetch now']);
+  });
+});
 
 describe('workspace fixtures (manifest contract)', () => {
   it('the four workspace fixtures produce MDL301 on the second claimant only', () => {

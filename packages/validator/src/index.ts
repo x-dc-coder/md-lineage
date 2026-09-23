@@ -39,7 +39,7 @@ export { scanLineEndings, validateLineEndings } from './line-endings.js';
 export { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
 export { parseMarkdown, parseMarkdownSync } from './parse-markdown.js';
 export { getSchemaValidator, validateAgainstSchema, resolveErrorRange } from './schema-validator.js';
-export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset } from './document-validator.js';
+export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset, collectAnchors, collectHeadingTexts } from './document-validator.js';
 export { Slugger, slugifyHeading } from './slugger.js';
 export type { ValidateInput, ValidateResult } from './index-types.js';
 export type { WorkspaceIndex, DocEntry, DocPath, RelationEntry, LinkEntry, UpdateResult } from './workspace-index.js';
