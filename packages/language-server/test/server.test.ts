@@ -18,6 +18,12 @@ import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  createWorkspaceIndex,
+  validateWorkspace,
+  defaultConfig,
+  type WorkspaceDiagnostic,
+} from '@mdlineage/validator';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const serverEntry = resolve(repoRoot, 'packages', 'language-server', 'dist', 'server-entry.js');
@@ -1133,6 +1139,149 @@ describe('code actions', () => {
       const edits = insert!.edit.changes[u]!;
       assert.equal(edits[0]!.newText, '  status: draft\n', 'the vocabulary first value is inserted');
       assert.ok(edits[0]!.range.start.line <= 5, 'the skeleton stays inside the mdlineage block');
+    } finally {
+      h.close();
+    }
+  });
+});
+
+/**
+ * A supersedes cycle and an uninvolved document, for the cross-file leak tests.
+ *
+ * `supersedes` is `cycles: 'forbidden'` in the default config, so the pair is
+ * one MDL305 anchored on the lexicographically smaller path — `anchor.md`
+ * sorts before `other.md`, which is what makes the anchor deterministic.
+ */
+function cycleWorkspace(h: Harness): { anchor: string; other: string; bystander: string } {
+  const cycle = (id: string, target: string) =>
+    [
+      '---', 'mdlineage:', '  schema: 1', `  id: ${id}`, '  kind: policy', '  status: active',
+      '  relations:', '    - type: supersedes', `      target: ${target}`, '      reason: closes the loop',
+      '---', '', '# Cycle', '',
+    ].join('\n');
+  writeFileSync(resolve(h.root, 'docs/anchor.md'), cycle('docs.anchor', 'docs.other'));
+  writeFileSync(resolve(h.root, 'docs/other.md'), cycle('docs.other', 'docs.anchor'));
+  writeFileSync(resolve(h.root, 'docs/bystander.md'), doc({ id: 'docs.bystander' }));
+  return {
+    anchor: uri(h, 'docs/anchor.md'),
+    other: uri(h, 'docs/other.md'),
+    bystander: uri(h, 'docs/bystander.md'),
+  };
+}
+
+/**
+ * The codes the validator itself reports for the harness tree, keyed by the
+ * relative paths the fixtures are written to.
+ *
+ * Keying the index by the same relative spelling makes `WorkspaceDiagnostic.path`
+ * come back in it, so the comparison stays on codes alone — the server's index
+ * uses absolute paths, and a diagnostic's code set does not depend on the
+ * spelling it was keyed under.
+ */
+function expectedCodes(h: Harness): Map<string, string[]> {
+  const files = new Map<string, string>();
+  for (const relative of ['docs/anchor.md', 'docs/other.md', 'docs/bystander.md']) {
+    files.set(relative, readFileSync(resolve(h.root, relative), 'utf8'));
+  }
+  const byPath = new Map<string, string[]>();
+  for (const diag of validateWorkspace(createWorkspaceIndex(files, defaultConfig()))) {
+    byPath.set(diag.path, [...(byPath.get(diag.path) ?? []), diag.code]);
+  }
+  return byPath;
+}
+
+describe('cross-file diagnostics stay on their own document (M3-a)', () => {
+  it('anchors MDL305 on the cycle member and keeps every other document clean', async () => {
+    // The `paths` scope a `publishOne` passes does not reach MDL305: a cycle is
+    // a property of the graph, so the rule always walks the whole index and the
+    // per-document pass used to leak its result onto every published file,
+    // positioned through the wrong document's line table. Only the anchor
+    // (docs/anchor.md, the cycle's lexicographically smallest member) owns it.
+    const h = harness();
+    try {
+      const paths = cycleWorkspace(h);
+      await initialize(h);
+      const anchor = await waitForDiagnostics(h, paths.anchor);
+      const cycle = anchor.find((d) => d.code === 'MDL305');
+      assert.ok(cycle, 'the anchor document carries the cycle');
+      assert.match(
+        cycle!.message,
+        /supersedes cycle among 2 documents: docs\.anchor → docs\.other → docs\.anchor/,
+        'the message names the whole loop',
+      );
+
+      for (const relative of ['docs/other.md', 'docs/bystander.md']) {
+        const u = uri(h, relative);
+        // didOpen triggers a fresh publish per document, so the assertion reads
+        // the state AFTER the scan, not a notification the scan already sent.
+        didOpen(h, u, 1, readFileSync(resolve(h.root, relative), 'utf8'));
+        await waitForDiagnosticsSet(h, u);
+        const got = diagnosticsFor(h, u);
+        assert.equal(
+          got.filter((d) => d.code === 'MDL305').length,
+          0,
+          `${relative} is not the cycle's anchor, so it carries no MDL305`,
+        );
+        assert.deepEqual(got, [], 'a document outside the cycle is clean');
+      }
+    } finally {
+      h.close();
+    }
+  });
+
+  it('publishes the same code set the workspace validator reports for a document', async () => {
+    // docs/progress.md M3-a: "diagnostics match CLI". The validator's own pass
+    // over the same fixture tree is the reference rather than a spawned CLI,
+    // which keeps the assertion on the diagnostic contract and off the CLI's
+    // path spelling.
+    const h = harness();
+    try {
+      cycleWorkspace(h);
+      const expected = expectedCodes(h);
+      assert.deepEqual(expected.get('docs/anchor.md'), ['MDL305'], 'the reference itself reports one MDL305');
+      await initialize(h);
+      for (const relative of ['docs/anchor.md', 'docs/other.md', 'docs/bystander.md']) {
+        const u = uri(h, relative);
+        didOpen(h, u, 1, readFileSync(resolve(h.root, relative), 'utf8'));
+        await waitForDiagnosticsSet(h, u);
+        assert.deepEqual(
+          diagnosticsFor(h, u).map((d) => d.code).sort(),
+          (expected.get(relative) ?? []).sort(),
+          `${relative} matches the validator's report`,
+        );
+      }
+    } finally {
+      h.close();
+    }
+  });
+
+  it('keeps the leak absent after an edit to the bystander', async () => {
+    // didChange re-runs `publishOne` for the edited document, so a fix that
+    // only filtered the initial scan's publish would still leak on every edit.
+    const h = harness();
+    try {
+      const paths = cycleWorkspace(h);
+      await initialize(h);
+      const u = paths.bystander;
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/bystander.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, u);
+      h.send({
+        jsonrpc: '2.0',
+        method: 'textDocument/didChange',
+        params: {
+          textDocument: { uri: u, version: 2 },
+          contentChanges: [{ text: doc({ id: 'docs.bystander2' }) }],
+        },
+      });
+      const changedAt = h.received.length;
+      await waitFor(
+        h,
+        (m) =>
+          m.method === 'textDocument/publishDiagnostics' &&
+          (m.params as { uri: string }).uri === u &&
+          h.received.indexOf(m) >= changedAt,
+      );
+      assert.deepEqual(diagnosticsFor(h, u), [], 'the edited bystander stays clean');
     } finally {
       h.close();
     }

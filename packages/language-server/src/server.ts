@@ -314,7 +314,18 @@ export function createServer(connection: Connection, options: ServerOptions = {}
     const uri = pathToUri(path, rootPath);
     const text = resolveText(path);
     const lines = text === null ? [] : text.split(/\r\n|\r|\n/);
-    const diagnostics = text === null || isLarge(text) ? [] : validateWorkspace(index, { paths: [path], baseline: toBaselineSuppression(path) }).map((diag) => toLspDiagnostic(diag, lines));
+    const diagnostics =
+      text === null || isLarge(text)
+        ? []
+        : validateWorkspace(index, { paths: [path], baseline: toBaselineSuppression(path) })
+            // The pass's `paths` scope does not reach MDL305 (workspace-validator:
+            // a cycle is a property of the graph, so the rule always walks the
+            // whole index), which makes the array carry diagnostics anchored on
+            // other documents. Positioning one here would borrow this document's
+            // line table for a range in another file, so only this document's
+            // own diagnostics are published.
+            .filter((diag) => diag.path === path)
+            .map((diag) => toLspDiagnostic(diag, lines));
     const params: PublishDiagnosticsParams = { uri, diagnostics };
     counters.diagnosticsPublished++;
     void connection.sendNotification('textDocument/publishDiagnostics', params);
