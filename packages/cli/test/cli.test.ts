@@ -14,6 +14,8 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadConfig, scanBoundary, parseFrontmatter, buildLineMap } from '@mdlineage/validator';
+import { attrPolicyLine } from '../src/init.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const fixtureRoot = resolve(repoRoot, 'test', 'fixtures');
@@ -993,6 +995,33 @@ describe('mdlineage fix', () => {
     ].join('\n');
   }
 
+  /** The same document with two strong relations that each lack a `reason`. */
+  function reasonlessDoc(): string {
+    return [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: docs.p3',
+      '  kind: policy',
+      '  status: active',
+      '  relations:',
+      '    - type: depends_on',
+      '      target: docs.a',
+      '    - type: depends_on',
+      '      target: docs.b',
+      '---',
+      '',
+      '# p3',
+    ].join('\n');
+  }
+
+  /** True when the document's front matter block still parses as YAML. */
+  function frontmatterParses(text: string): boolean {
+    const boundary = scanBoundary(text);
+    if (boundary === null || boundary.closeStart === null) return false;
+    return parseFrontmatter(boundary.raw, boundary.rawStart, buildLineMap(text)).parsed !== null;
+  }
+
   it('dry run reports fixes and writes nothing', () => {
     const ws = scratchWorkspace({ 'a.md': brokenDoc() });
     try {
@@ -1085,6 +1114,204 @@ describe('mdlineage fix', () => {
       assert.equal(readFileSync(outside, 'utf8'), brokenDoc(), 'the outside file is untouched');
     } finally {
       rmSync(outside, { force: true });
+      ws.cleanup();
+    }
+  });
+
+  it('a pure-CRLF document loses its duplicate relation (§9.1 dedup is line-ending agnostic)', () => {
+    // Every terminator is a CRLF pair, the last one included. The per-line
+    // patterns used to end in `$`, which never matches before a `\r`, so the
+    // whole dedup pass returned nothing and MDL202 survived the fix.
+    const crlfDoc = brokenDoc().split('\n').join('\r\n');
+    assert.ok(!crlfDoc.includes('\n\n'), 'sanity: the fixture is pure CRLF');
+    const ws = scratchWorkspace({ 'crlf.md': crlfDoc });
+    try {
+      const out = runCli(['fix', 'crlf.md', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /\[duplicate-relation\]/);
+      const content = readFileSync(join(ws.root, 'crlf.md'), 'utf8');
+      assert.equal((content.match(/- type: related_to/g) ?? []).length, 1, 'one relation survives');
+      assert.equal((content.match(/\r/g) ?? []).length, 0, 'the line-ending pass still ran');
+      const after = runCli(['check', 'crlf.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(after.stdout, 'MDL202'), 0, 'the duplicate relation is gone');
+      assert.equal(countOf(after.stdout, 'MDL102'), 0, 'the missing status is filled');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('two relations missing a reason both get one, and the YAML still parses', () => {
+    // The shared patch engine used to apply both insertions at offsets located
+    // against the ORIGINAL text, so the second landed inside the first and the
+    // front matter came out unparseable.
+    const ws = scratchWorkspace({ 'p3.md': reasonlessDoc() });
+    try {
+      const out = runCli(['fix', 'p3.md', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      const content = readFileSync(join(ws.root, 'p3.md'), 'utf8');
+      assert.equal((content.match(/reason: /g) ?? []).length, 2, 'both relations gained a reason');
+      assert.ok(frontmatterParses(content), 'the front matter is still valid YAML');
+      const after = runCli(['check', 'p3.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(after.stdout, 'MDL102'), 0, 'both gaps are closed');
+      assert.equal(countOf(after.stdout, 'MDL002'), 0, 'no YAML parse failure');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('a relation that has a reason and lacks a target does not gain a second one', () => {
+    // MDL102's pointer is the relation entry, so the proposal engine derives
+    // `/relations/N/reason` even when `target` is what is missing. Inserting it
+    // anyway produced a duplicate YAML key the parser rejects.
+    const gappy = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: docs.b4',
+      '  kind: policy',
+      '  status: active',
+      '  relations:',
+      '    - type: depends_on',
+      '      reason: r',
+      '---',
+      '',
+      '# b4',
+    ].join('\n');
+    const ws = scratchWorkspace({ 'b4.md': gappy });
+    try {
+      const out = runCli(['fix', 'b4.md', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /mdlineage fix: 0 fixes in 0 files/, 'nothing was inserted');
+      const content = readFileSync(join(ws.root, 'b4.md'), 'utf8');
+      assert.equal(content, gappy, 'the document is untouched');
+      assert.equal((content.match(/reason:/g) ?? []).length, 1, 'the existing reason is the only one');
+      const after = runCli(['check', 'b4.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(after.stdout, 'MDL002'), 0, 'the document was not corrupted');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('an empty file is not reported as a line-ending fix', () => {
+    const ws = scratchWorkspace({ 'empty.md': '' });
+    try {
+      const out = runCli(['fix', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      assert.equal(readFileSync(join(ws.root, 'empty.md'), 'utf8').length, 0, 'the file is still empty');
+      assert.ok(!out.stdout.includes('[line-endings]'), 'no fix was claimed');
+      assert.match(out.stdout, /mdlineage fix: 0 fixes in 0 files/);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('--exclude keeps the matching files out of the batch', () => {
+    const skipped = brokenDoc().replace('docs.a', 'docs.b');
+    const ws = scratchWorkspace({ 'a.md': brokenDoc(), 'skip/b.md': skipped });
+    try {
+      const out = runCli(['fix', '--exclude', 'skip/**', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /a\.md:/);
+      assert.equal(readFileSync(join(ws.root, 'skip', 'b.md'), 'utf8'), skipped, 'the excluded file is untouched');
+      const after = runCli(['check', 'a.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(after.stdout, 'MDL102'), 0, 'the file that was in scope is fixed');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('a --config that does not exist fails the run the way check does', () => {
+    const ws = scratchWorkspace({ 'a.md': brokenDoc() });
+    try {
+      const out = runCli(['fix', 'a.md', '--config', 'no-such.yaml'], ws.root);
+      assert.equal(out.status, 1);
+      assert.match(out.stderr, /MDL900 error Config file not found/);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('an enum value with one case-insensitive vocabulary match is normalized', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': 'configVersion: 1\nvocabulary:\n  kinds: [policy, guide]\n',
+      'a.md': ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: POLICY', '  status: active', '---', '', '# a'].join(
+        '\n',
+      ),
+    });
+    try {
+      const out = runCli(['fix', 'a.md', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /\[enum-normalized\]/);
+      assert.match(readFileSync(join(ws.root, 'a.md'), 'utf8'), /kind: policy/);
+      const after = runCli(['check', 'a.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(after.stdout, 'MDL103'), 0, 'the vocabulary violation is cleared');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('an ambiguous enum value is left alone and says so on stderr', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': 'configVersion: 1\nvocabulary:\n  kinds: [Policy, POLICY]\n',
+      'a.md': ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: policy', '  status: active', '---', '', '# a'].join(
+        '\n',
+      ),
+    });
+    try {
+      const out = runCli(['fix', 'a.md', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stderr, /matches 2 vocabulary members \(Policy, POLICY\)/);
+      assert.match(out.stderr, /needs a human decision/);
+      assert.match(readFileSync(join(ws.root, 'a.md'), 'utf8'), /kind: policy/, 'the value is not rewritten');
+      const after = runCli(['check', 'a.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(after.stdout, 'MDL103'), 1, 'the diagnostic survives for the human to judge');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('never touches what §9.2 reserves for a reviewer', () => {
+    // The document carries one SAFE repair (a duplicate relation) so the run is
+    // not vacuous, plus everything §9.2 withholds: a malformed id, a relation
+    // type and target outside the vocabulary, and an unknown field's block.
+    const doc = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: Docs.Bad_ID',
+      '  kind: policy',
+      '  status: active',
+      '  relations:',
+      '    - type: related_to',
+      '      target: docs.x',
+      '      reason: r',
+      '    - type: related_to',
+      '      target: docs.x',
+      '      reason: r',
+      '    - type: DEPENDS_ON',
+      '      target: Docs.Bad_Target',
+      '      reason: r',
+      '  custom_block:',
+      '    nested: value',
+      '    other: 2',
+      '---',
+      '',
+      '# a',
+    ].join('\n');
+    const ws = scratchWorkspace({ 'a.md': doc });
+    try {
+      const out = runCli(['fix', 'a.md', '--write'], ws.root);
+      assert.equal(out.status, 0);
+      const content = readFileSync(join(ws.root, 'a.md'), 'utf8');
+      assert.equal((content.match(/- type: related_to/g) ?? []).length, 1, 'the safe repair did run');
+      assert.ok(content.includes('  id: Docs.Bad_ID\n'), 'the id is neither rewritten nor inserted');
+      assert.ok(content.includes('    - type: DEPENDS_ON\n'), 'the relation type is untouched');
+      assert.ok(content.includes('      target: Docs.Bad_Target\n'), 'the relation target is untouched');
+      assert.ok(content.includes('  custom_block:\n    nested: value\n    other: 2\n'), 'the unknown block is untouched');
+      const after = runCli(['check', 'a.md', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(after.stdout, 'MDL103'), 3, 'id, relation type and relation target are all still reported');
+      assert.equal(countOf(after.stdout, 'MDL104'), 1, 'the unknown field is still reported');
+    } finally {
       ws.cleanup();
     }
   });
