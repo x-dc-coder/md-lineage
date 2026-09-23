@@ -881,3 +881,92 @@ function scratchGitRepoWithBaseline(): { root: string; cleanup: () => void } {
   git(['commit', '-q', '-m', 'initial']);
   return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
 }
+
+describe('mdlineage init', () => {
+  /** An empty scratch directory (git optional: init falls back to the CWD). */
+  function scratchDir(): { root: string; cleanup: () => void } {
+    const root = mkdtempSync(join(tmpdir(), 'mdlineage-init-'));
+    return { root, cleanup: () => rmSync(root, { recursive: true, force: true }) };
+  }
+
+  it('dry run prints the plan and writes nothing', () => {
+    const dir = scratchDir();
+    try {
+      const before = existsSync(join(dir.root, 'mdlineage.config.yaml'));
+      const out = runCli(['init'], dir.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /create mdlineage\.config\.yaml/);
+      assert.match(out.stdout, /create \.gitattributes/);
+      assert.match(out.stdout, /\+\* text=auto eol=lf/);
+      assert.match(out.stdout, /create schemas\//);
+      assert.match(out.stdout, /dry run, nothing written/);
+      assert.equal(existsSync(join(dir.root, 'mdlineage.config.yaml')), before);
+      assert.equal(existsSync(join(dir.root, '.gitattributes')), false);
+      assert.equal(existsSync(join(dir.root, 'schemas')), false);
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it('--write creates config, .gitattributes and schemas/', () => {
+    const dir = scratchDir();
+    try {
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 0);
+      const config = readFileSync(join(dir.root, 'mdlineage.config.yaml'), 'utf8');
+      assert.match(config, /configVersion: 1/);
+      assert.match(config, /required: false/);
+      assert.equal(readFileSync(join(dir.root, '.gitattributes'), 'utf8'), '* text=auto eol=lf\n');
+      assert.ok(existsSync(join(dir.root, 'schemas')));
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it('an existing .gitattributes is appended to, never rewritten', () => {
+    const dir = scratchDir();
+    const custom = '# my rules\n*.png -text\n';
+    writeFileSync(join(dir.root, '.gitattributes'), custom);
+    try {
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /append to \.gitattributes/);
+      const content = readFileSync(join(dir.root, '.gitattributes'), 'utf8');
+      assert.ok(content.startsWith(custom), 'custom rules are preserved verbatim');
+      assert.ok(content.includes('* text=auto eol=lf\n'), 'the policy line was appended');
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it('is idempotent: a second run reports no changes and files are byte-identical', () => {
+    const dir = scratchDir();
+    try {
+      assert.equal(runCli(['init', '--write'], dir.root).status, 0);
+      const snapshot = (name: string) => readFileSync(join(dir.root, name));
+      const config = snapshot('mdlineage.config.yaml');
+      const attr = snapshot('.gitattributes');
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /nothing to do, already initialized/);
+      assert.equal(snapshot('mdlineage.config.yaml').equals(config), true);
+      assert.equal(snapshot('.gitattributes').equals(attr), true);
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it('an existing mdlineage.config.yaml is not overwritten', () => {
+    const dir = scratchDir();
+    const existing = 'configVersion: 1\nmetadata:\n  required: true\n';
+    writeFileSync(join(dir.root, 'mdlineage.config.yaml'), existing);
+    try {
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /mdlineage\.config\.yaml: already present, left unchanged/);
+      assert.equal(readFileSync(join(dir.root, 'mdlineage.config.yaml'), 'utf8'), existing);
+    } finally {
+      dir.cleanup();
+    }
+  });
+});

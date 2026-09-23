@@ -38,6 +38,7 @@ import { expandMarkdownPaths, type ExpandedPath } from './paths.js';
 import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from './git.js';
 import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verifyBaseline, baselineRoot, BASELINE_FILE } from './baseline.js';
 import { startStdio } from '@mdlineage/language-server';
+import { runInit } from './init.js';
 import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
@@ -50,6 +51,7 @@ Usage:
   mdlineage baseline verify         CI gate: diagnostics must match the baseline
   mdlineage server --stdio          Run the language server over stdio
   mdlineage mcp --stdio             Run the MCP server over stdio
+  mdlineage init                    Bootstrap config, .gitattributes and schemas/ (dry run)
   mdlineage suggest <file>          Propose metadata for a document (no writes)
 
 Options:
@@ -62,6 +64,7 @@ Options:
   --no-baseline               Ignore the committed baseline (report accepted debt)
   --force                     baseline update: write despite an unreadable baseline
   --report-only               baseline update: print the change set, write nothing
+  --write                     init: apply the planned changes (default is a dry run)
   --frail                     Any diagnostic fails the run, warnings included
   --root <dir>                mcp: the workspace to index (default: the CWD)
   --help, -h                  Show this text
@@ -92,6 +95,7 @@ interface ParsedArgs {
     frail?: boolean;
     force?: boolean;
     'report-only'?: boolean;
+    write?: boolean;
     stdio?: boolean;
     root?: string;
     help?: boolean;
@@ -128,6 +132,8 @@ function readArgs(argv: string[]): ParsedArgs {
       // `mdlineage mcp --root <dir>` names the tree the MCP server indexes.
       root: { type: 'string' },
       'report-only': { type: 'boolean' },
+      // `mdlineage init --write`: writing is always an explicit action.
+      write: { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -164,6 +170,9 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (command === 'suggest') {
     return runSuggest(parsed.positionals.slice(1), parsed.values);
+  }
+  if (command === 'init') {
+    return runInit(parsed.positionals.slice(1), parsed.values);
   }
   if (command !== 'check') {
     process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
