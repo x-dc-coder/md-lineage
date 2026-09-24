@@ -10,9 +10,10 @@
  * Run with: node --import tsx --test packages/validator/test/validator.test.ts
  */
 
-import { describe, it } from 'node:test';
+import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -444,5 +445,71 @@ describe('review round 1 hardening (M1-a adjudication)', () => {
   it('M-5: an empty mdlineage mapping reports all four required fields', () => {
     const r = validateDocumentSync({ content: '---\nmdlineage: {}\n---\n' });
     assert.equal(r.diagnostics.filter((d) => d.code === 'MDL102').length, 4);
+  });
+});
+
+describe('config extends', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(resolve(tmpdir(), 'mdlineage-extends-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const write = (name: string, text: string) => {
+    writeFileSync(resolve(dir, name), text);
+    return resolve(dir, name);
+  };
+
+  it('a single preset is inherited: its keys take effect', () => {
+    write('preset.yaml', 'configVersion: 1\nmetadata:\n  required: true\n');
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nextends: [./preset.yaml]\n');
+    const r = loadConfigFrom(cfg);
+    assert.deepEqual(r.diagnostics, []);
+    assert.equal(r.config.metadata.required, true, 'preset key must survive the merge');
+    assert.equal(r.config.source, cfg);
+  });
+
+  it('the file\'s own keys override the preset', () => {
+    write('preset.yaml', 'configVersion: 1\nmetadata:\n  required: true\n');
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nextends: [./preset.yaml]\nmetadata:\n  required: false\n');
+    const r = loadConfigFrom(cfg);
+    assert.deepEqual(r.diagnostics, []);
+    assert.equal(r.config.metadata.required, false, 'the named file must win over its preset');
+  });
+
+  it('later presets win over earlier ones at the same key', () => {
+    write('a.yaml', 'configVersion: 1\nmetadata:\n  required: true\n');
+    write('b.yaml', 'configVersion: 1\nmetadata:\n  required: false\n');
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nextends: [./a.yaml, ./b.yaml]\n');
+    const r = loadConfigFrom(cfg);
+    assert.deepEqual(r.diagnostics, []);
+    assert.equal(r.config.metadata.required, false, 'extends list is merged in order, last wins');
+  });
+
+  it('circular extends is refused with a Circular extends diagnostic', () => {
+    write('a.yaml', 'configVersion: 1\nextends: [./b.yaml]\n');
+    write('b.yaml', 'configVersion: 1\nextends: [./a.yaml]\n');
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nextends: [./a.yaml]\n');
+    const r = loadConfigFrom(cfg);
+    assert.ok(r.diagnostics.some((d) => d.code === 'MDL900' && d.message.includes('Circular extends')),
+      `expected a cycle diagnostic, got: ${JSON.stringify(r.diagnostics)}`);
+  });
+
+  it('a missing preset is refused with MDL900', () => {
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nextends: [./missing.yaml]\n');
+    const r = loadConfigFrom(cfg);
+    assert.ok(r.diagnostics.some((d) => d.code === 'MDL900' && d.message.includes('missing.yaml')),
+      `expected a not-found diagnostic, got: ${JSON.stringify(r.diagnostics)}`);
+  });
+
+  it('a preset may itself extend another preset (chained)', () => {
+    write('base.yaml', 'configVersion: 1\nmetadata:\n  required: true\n');
+    write('mid.yaml', 'configVersion: 1\nextends: [./base.yaml]\n');
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nextends: [./mid.yaml]\n');
+    const r = loadConfigFrom(cfg);
+    assert.deepEqual(r.diagnostics, []);
+    assert.equal(r.config.metadata.required, true, 'the whole chain must be assembled');
   });
 });
