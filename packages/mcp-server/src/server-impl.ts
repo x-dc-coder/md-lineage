@@ -65,7 +65,10 @@ import {
 export { resetProposalIds, ProposalQueue, buildProposals, applyProposalToContent, diffOf };
 
 const SERVER_NAME = 'mdlineage';
-const SERVER_VERSION = '0.0.0';
+// Resolved relative to this file: dist/ sits beside ../package.json in the repo and the tarball.
+const SERVER_VERSION = (
+  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
+).version;
 
 /** The checked-in schema files, exposed as tools and as read-only resources. */
 const SCHEMA_V1 = 'mdlineage-v1.schema.json';

@@ -473,7 +473,7 @@ describe('mdlineage check --format sarif', () => {
   function parseSarif(stdout: string): {
     version: string;
     runs: Array<{
-      tool: { driver: { name: string; rules: Array<{ id: string; defaultConfiguration: { level: string } }> } };
+      tool: { driver: { name: string; version: string; rules: Array<{ id: string; defaultConfiguration: { level: string } }> } };
       results: Array<{
         ruleId: string;
         level: string;
@@ -499,6 +499,15 @@ describe('mdlineage check --format sarif', () => {
     assert.equal(sarif.runs[0]!.tool.driver.name, 'mdlineage');
     assert.equal(sarif.runs[0]!.tool.driver.rules.length, 1, 'one rule for one diagnostic');
     assert.equal(sarif.runs[0]!.tool.driver.rules[0]!.id, 'MDL103');
+  });
+
+  it('reports the cli package.json version as the tool driver version', () => {
+    const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'packages', 'cli', 'package.json'), 'utf8')) as {
+      version: string;
+    };
+    const out = runCli(['check', 'test/fixtures/invalid/e05-id-pattern.md', '--no-incremental', '--no-baseline', '--format', 'sarif']);
+    const sarif = parseSarif(out.stdout);
+    assert.equal(sarif.runs[0]!.tool.driver.version, pkg.version);
   });
 
   it('maps severity to SARIF level', () => {

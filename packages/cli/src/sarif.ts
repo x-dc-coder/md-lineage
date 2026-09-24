@@ -8,14 +8,18 @@
  * exact severity reads `properties.mdlineageSeverity`.
  */
 
+import { readFileSync } from 'node:fs';
+
 import type { CheckResult } from './check.js';
 
 /** SARIF severity, ordered. `none` is allowed by the spec and unused here. */
 type SarifLevel = 'error' | 'warning' | 'note';
 
 const TOOL_NAME = 'mdlineage';
-/** The CLI's own version, reported to SARIF consumers. */
-const TOOL_VERSION = '0.0.0';
+/** The CLI's own version, reported to SARIF consumers. dist/ sits beside ../package.json in the repo and the tarball. */
+const TOOL_VERSION = (
+  JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }
+).version;
 /**
  * Deterministic guid for the driver, per SARIF §3.19.4: a run's tool identity
  * is (name, version, guid), so a stable guid keeps runs grouped across formats.

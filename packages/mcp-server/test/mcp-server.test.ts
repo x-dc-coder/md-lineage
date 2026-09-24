@@ -201,7 +201,10 @@ describe('MCP server — tool surface', () => {
   it('advertises the server name and version a client sees on initialize', async () => {
     const h = await harness();
     try {
-      assert.deepEqual(h.client.getServerVersion(), { name: 'mdlineage', version: '0.0.0' });
+      const pkg = JSON.parse(readFileSync(resolve(repoRoot, 'packages', 'mcp-server', 'package.json'), 'utf8')) as {
+        version: string;
+      };
+      assert.deepEqual(h.client.getServerVersion(), { name: 'mdlineage', version: pkg.version });
       assert.ok(h.client.getServerCapabilities()?.tools, 'tools capability is advertised');
       assert.ok(h.client.getServerCapabilities()?.resources, 'resources capability is advertised');
     } finally {
