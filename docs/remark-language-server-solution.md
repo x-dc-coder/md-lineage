@@ -430,6 +430,7 @@ preset 可包含基础 Schema、关系词表、默认 severity、路径 override
 - `MDL104`：未知 `mdlineage` 字段。
 - `MDL201`：evidence anchor 不存在。
 - `MDL202`：当前文档重复关系。
+- `MDL203`：正文链接的同页锚点（`[x](#sec)`）在当前文档中不存在。
 - `MDL301`：文档 ID 重复。
 - `MDL302`：relation target 不存在。
 - `MDL303`：relation target 有歧义（仅在配置启用路径或别名回退解析时可能触发；纯 ID 解析下由 `MDL301` 保证唯一性，此码为扩展保留）。
