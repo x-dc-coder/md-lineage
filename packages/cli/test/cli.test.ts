@@ -169,6 +169,25 @@ describe('mdlineage check — fixtures', () => {
     assert.match(out.stdout, /MDL201 warning/);
   });
 
+  it('a dangling same-page anchor reports MDL203 in both channels', () => {
+    // #20: same-page links were unchecked by any layer. The rule lives at the
+    // document layer, so `--no-incremental` (one file, no index) and the
+    // default workspace pass must both surface it — and neither twice.
+    const ws = scratchWorkspace({
+      'a.md': doc('docs.a') + '\nSee [missing](#no-such-anchor) and [fine](#docsa).\n',
+    });
+    try {
+      const single = runCli(['check', 'a.md', '--no-incremental', '--format', 'json'], ws.root);
+      assert.equal(countOf(single.stdout, 'MDL203'), 1, 'the single-document channel reports it');
+      assert.equal(countOf(single.stdout, 'MDL402'), 0, 'a same-page anchor is not MDL402');
+
+      const workspace = runCli(['check', 'a.md', '--format', 'json'], ws.root);
+      assert.equal(countOf(workspace.stdout, 'MDL203'), 1, 'the workspace pass reports it once, not twice');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
   it('CRLF worktree bytes are read, not the index', () => {
     // The whole point of the batch channel reading worktree bytes: under
     // `text=auto eol=lf` a CRLF file's staged blob is LF, so an index-based
@@ -213,6 +232,18 @@ describe('mdlineage check — fixtures', () => {
     assert.equal(runCli(['--help']).status, 0);
     assert.equal(runCli(['--version']).status, 0);
     assert.match(runCli(['--version']).stdout, /mdlineage/);
+  });
+
+  it('--help states which root each command anchors on', () => {
+    // #19: the three "root" semantics are defensible but were undocumented;
+    // a user must be able to learn from --help that `fix` anchors on the CWD
+    // while `init` and `baseline` anchor on the git repository root.
+    const help = runCli(['--help']);
+    assert.equal(help.status, 0);
+    assert.match(help.stdout, /Roots — each command anchors/);
+    assert.match(help.stdout, /check\/fix\s+the CWD/);
+    assert.match(help.stdout, /the git repository root/);
+    assert.match(help.stdout, /walks up from the CWD/);
   });
 
   it('--version reports the cli package.json version', () => {
@@ -1197,6 +1228,41 @@ describe('mdlineage fix', () => {
       assert.equal(readFileSync(outside, 'utf8'), brokenDoc(), 'the outside file is untouched');
     } finally {
       rmSync(outside, { force: true });
+      ws.cleanup();
+    }
+  });
+
+  it('a path inside the repository is accepted from a subdirectory (root = CWD)', () => {
+    // #19: `fix` anchors on the CWD, not the git root, so `../sibling.md` is
+    // outside the CWD and refused even though it is inside the repository.
+    // The help text documents this; the test pins it as a deliberate choice
+    // rather than an oversight a later change might "fix" silently.
+    const ws = scratchWorkspace({ 'a.md': brokenDoc() });
+    mkdirSync(join(ws.root, 'sub'));
+    const sibling = join(ws.root, 'sub', 'a.md');
+    writeFileSync(sibling, brokenDoc());
+    try {
+      const out = runCli(['fix', '../a.md'], join(ws.root, 'sub'));
+      assert.equal(out.status, 1, 'a path resolving outside the CWD is refused');
+      assert.match(out.stderr, /refusing path outside the workspace/);
+      assert.equal(readFileSync(join(ws.root, 'a.md'), 'utf8'), brokenDoc(), 'nothing was written');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('a path inside the CWD subtree is fixed from a subdirectory', () => {
+    // The same CWD anchor accepts a downward path: `fix sub/a.md` from the root
+    // is inside the CWD, so it works and the behavior is pinned both ways.
+    const ws = scratchWorkspace({ 'a.md': brokenDoc() });
+    mkdirSync(join(ws.root, 'sub'));
+    const nested = join(ws.root, 'sub', 'a.md');
+    writeFileSync(nested, brokenDoc());
+    try {
+      const out = runCli(['fix', 'sub/a.md'], ws.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /would fix \d+ issues/);
+    } finally {
       ws.cleanup();
     }
   });

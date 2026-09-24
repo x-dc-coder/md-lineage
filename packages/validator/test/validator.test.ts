@@ -19,6 +19,8 @@ import { fileURLToPath } from 'node:url';
 
 import { validateDocumentSync, defaultConfig, defaultConfigIsValid } from '../src/index.js';
 import { loadConfig } from '../src/config.js';
+import { validateDocumentSemantics, relationOffsetsOf } from '../src/document-validator.js';
+import { buildLineMap } from '../src/source-map.js';
 import type { Diagnostic } from '../src/index.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
@@ -58,6 +60,7 @@ const SINGLE_DOCUMENT_CODES = new Set([
   'MDL104',
   'MDL201',
   'MDL202',
+  'MDL203',
   'MDL601',
   'MDL602',
 ]);
@@ -251,6 +254,193 @@ describe('UTF-16 semantics', () => {
       [],
       `expected a clean document with a Chinese anchor, got [${codes(diagnostics).join(', ')}]`,
     );
+  });
+});
+
+describe('MDL203 — same-page anchors', () => {
+  /** A document whose body links somewhere, same-page or not. */
+  function docWith(body: string): string {
+    return [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: docs.a',
+      '  kind: policy',
+      '  status: active',
+      '---',
+      '',
+      body,
+    ].join('\n');
+  }
+
+  it('a same-page anchor no heading produces reports MDL203', () => {
+    const content = docWith('# Real\n\nSee [missing](#no-such-anchor).\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    const d = diagnostics.find((x) => x.code === 'MDL203');
+    assert.ok(d, `expected MDL203, got [${codes(diagnostics).join(', ')}]`);
+    assert.equal(d!.data?.anchor, 'no-such-anchor');
+    assert.equal(d!.severity, 'warning');
+    assert.equal(d!.layer, 'document-semantic');
+    // The range covers the link's destination, on the line the link is on.
+    assert.equal(d!.range.start.line, 11);
+    assert.ok(
+      content.split('\n')[d!.range.start.line - 1]!.includes('[missing]'),
+      'MDL203 must point at the link line',
+    );
+  });
+
+  it('a same-page anchor a heading produces stays silent', () => {
+    const content = docWith('# Real\n\nSee [fine](#real) and [also](#real).\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(
+      diagnostics.filter((d) => d.code === 'MDL203').length,
+      0,
+      `expected no MDL203, got [${codes(diagnostics).join(', ')}]`,
+    );
+  });
+
+  it('a repeated heading exposes its -1 anchor to a same-page link', () => {
+    const content = docWith('# Notes\n\n## Notes\n\n[second](#notes-1)\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 0, 'the duplicate-suffix anchor resolves');
+  });
+
+  it('slugifies CJK and emoji headings like evidence anchors do', () => {
+    const content = docWith('# 缓存 Key\n\n## Identity & scope: 😀\n\n[a](#缓存-key) [b](#identity--scope-)\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(
+      diagnostics.filter((d) => d.code === 'MDL203').length,
+      0,
+      `CJK/emoji fragments slugify the same way as headings, got [${codes(diagnostics).join(', ')}]`,
+    );
+  });
+
+  it('a missing CJK anchor reports', () => {
+    const content = docWith('# 标题\n\n[错](#别的标题)\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 1);
+  });
+
+  it('anchor comparison is case-sensitive', () => {
+    const content = docWith('# Cache key\n\n[x](#Cache-Key) [y](#cache-key)\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    const hits = diagnostics.filter((d) => d.code === 'MDL203');
+    assert.equal(hits.length, 1, 'GitHub slugs keep case; only the wrong-case link reports');
+    assert.equal(hits[0]!.data?.anchor, 'Cache-Key');
+  });
+
+  it('an empty fragment is not a broken anchor', () => {
+    const content = docWith('# Real\n\n[x](#)\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 0, 'a bare # is a self link, not an anchor');
+  });
+
+  it('a link to another document is not MDL203, even with a fragment', () => {
+    // The path-bearing form is MDL401/MDL402's domain at the workspace layer;
+    // the document layer must not touch it.
+    const content = docWith('# Real\n\n[x](./b.md#nope) [y](https://example.com/a#nope)\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 0);
+  });
+
+  it('a reference-style same-page link is checked through its definition', () => {
+    const content = docWith('# Real\n\nSee [the section][sec].\n\n[sec]: #no-such-anchor\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 1, 'the definition supplies the destination');
+  });
+
+  it('an unresolved reference-style link reports nothing', () => {
+    const content = docWith('# Real\n\nSee [the section][nope].\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 0, 'a dangling reference is a linter concern');
+  });
+
+  it('images are not checked', () => {
+    const content = docWith('# Real\n\n![diagram](#no-such-anchor)\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 0, 'an image is not a document link');
+  });
+
+  it('a document without mdlineage metadata reports nothing', () => {
+    // MDL203 belongs to the document-semantic layer, which runs only when the
+    // metadata object exists; a body that never parses is the same situation.
+    const content = '# Real\n\n[x](#nope)\n';
+    const { diagnostics } = validateDocumentSync({ content, config: { ...defaultConfig(), metadata: { ...defaultConfig().metadata, required: false } } });
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 0);
+  });
+
+  it('a document without front matter is not anchor-checked', () => {
+    // The semantic layer runs only when a mdlineage object exists, so a plain
+    // note with a dangling same-page link stays the linter's business.
+    const content = '# Real\n\nSee [x](#nope).\n';
+    const { diagnostics, tree } = validateDocumentSync({
+      content,
+      config: { ...defaultConfig(), metadata: { ...defaultConfig().metadata, required: false } },
+    });
+    assert.ok(tree, 'the body parses');
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 0, 'no mdlineage object, no semantic layer');
+  });
+
+  it('a body the Markdown parser rejects reports nothing and does not throw', () => {
+    // The anchor walk reads the same tree the pipeline parsed; a null tree has
+    // no anchor set, so the check is silent rather than half-right, and the
+    // unparseable file's own diagnostic already explained the failure. A null
+    // tree is rare in practice (remark is permissive), so the guard is pinned
+    // at the unit boundary instead of through a contrived document.
+    const content = docWith('# Real\n\n[x](#nope)\n');
+    const diagnostics = validateDocumentSemantics(
+      { schema: 1, id: 'docs.a', kind: 'policy', status: 'active' },
+      null,
+      buildLineMap(content),
+      0,
+      relationOffsetsOf(null, 0),
+      defaultConfig(),
+      content.indexOf('# Real'),
+    );
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL203').length, 0, 'a null tree has no anchors to compare');
+    assert.equal(diagnostics.filter((d) => d.code === 'MDL201').length, 0);
+  });
+
+  it('the severity override applies to MDL203', () => {
+    const config = { ...defaultConfig(), diagnostics: { MDL203: 'error' } };
+    const { diagnostics } = validateDocumentSync({
+      content: docWith('# Real\n\n[x](#nope)\n'),
+      config,
+    });
+    const d = diagnostics.find((x) => x.code === 'MDL203');
+    assert.ok(d);
+    assert.equal(d!.severity, 'error');
+  });
+
+  it('an anchor an evidence value also cites reports once per channel', () => {
+    // `#sec` used by BOTH a relation's evidence and a body link: MDL201 owns
+    // the front-matter occurrence, MDL203 the body one, and neither repeats
+    // the other's location.
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: docs.a',
+      '  kind: policy',
+      '  status: active',
+      '  relations:',
+      '    - type: related_to',
+      '      target: docs.b',
+      '      reason: x',
+      '      evidence: "#sec"',
+      '---',
+      '',
+      '# Real',
+      '',
+      '[also](#sec)',
+      '',
+    ].join('\n');
+    const { diagnostics } = validateDocumentSync({ content });
+    const d201 = diagnostics.filter((d) => d.code === 'MDL201');
+    const d203 = diagnostics.filter((d) => d.code === 'MDL203');
+    assert.equal(d201.length, 1, 'the evidence anchor reports MDL201');
+    assert.equal(d203.length, 1, 'the same anchor in a body link reports MDL203');
+    assert.notEqual(d201[0]!.range.start.line, d203[0]!.range.start.line, 'the two point at different places');
   });
 });
 

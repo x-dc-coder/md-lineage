@@ -64,6 +64,16 @@ Usage:
                                     report stats and index-level diagnostics
                                     (nothing is persisted)
 
+Roots — each command anchors "the workspace" differently, by design:
+  check/fix                        the CWD: paths are resolved against it, and
+                                    fix refuses anything outside it
+  baseline                         the git repository root (CWD outside a repo):
+                                    the baseline is a repository-level contract
+  init                             the git repository root (CWD outside a repo):
+                                    it bootstraps the repository, not the folder
+  config search (--config omitted) walks up from the CWD, so a run in a
+                                    subdirectory still finds the root config
+
 Options:
   --format <text|json|sarif>  Output shape (default: text)
   --config <path>             Path to mdlineage.config.yaml (default: searched for)
@@ -85,7 +95,10 @@ Exit codes:
   0  no error-severity diagnostics
   1  at least one error: a diagnostic, an unreadable file, or a bad --config
      (--frail: any diagnostic at all)
-  2  usage error`;
+  2  usage error
+
+Paths are resolved against the CWD unless the command's root note above says
+otherwise; \`fix\` additionally refuses a path it resolves outside the CWD.`;
 
 // Resolved relative to this file: dist/main.js sits beside ../package.json both
 // in the repo and in the published tarball, so no source-tree path is needed.

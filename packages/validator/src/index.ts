@@ -39,7 +39,7 @@ export { scanLineEndings, validateLineEndings } from './line-endings.js';
 export { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
 export { parseMarkdown, parseMarkdownSync } from './parse-markdown.js';
 export { getSchemaValidator, validateAgainstSchema, resolveErrorRange } from './schema-validator.js';
-export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset, collectAnchors, collectHeadingTexts } from './document-validator.js';
+export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset, collectAnchors, collectHeadingTexts, extractSamePageLinks } from './document-validator.js';
 export { Slugger, slugifyHeading } from './slugger.js';
 export type { ValidateInput, ValidateResult } from './index-types.js';
 export type { WorkspaceIndex, DocEntry, DocPath, RelationEntry, LinkEntry, UpdateResult } from './workspace-index.js';
@@ -184,7 +184,7 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
   if (mdlineage !== null && boundary) {
     const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
     const offsets = relationOffsetsOf(parsed.parsed?.doc ?? null, mdlineageRange?.start ?? boundary.rawStart);
-    diagnostics.push(...validateDocumentSemantics(mdlineage, tree, lineMap, boundary.rawStart, offsets, config));
+    diagnostics.push(...validateDocumentSemantics(mdlineage, tree, lineMap, boundary.rawStart, offsets, config, bodyStart));
   }
 
   diagnostics.sort(byOffset);

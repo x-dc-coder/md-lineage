@@ -177,7 +177,7 @@ describe('workspace fixtures (manifest contract)', () => {
   it('workspace fixtures produce zero single-document codes', () => {
     const index = workspaceFixtureIndex();
     const all = validateWorkspace(index, { includeSingleDocument: true });
-    const singleDocCodes = ['MDL001', 'MDL002', 'MDL003', 'MDL101', 'MDL102', 'MDL103', 'MDL104', 'MDL201', 'MDL202'];
+    const singleDocCodes = ['MDL001', 'MDL002', 'MDL003', 'MDL101', 'MDL102', 'MDL103', 'MDL104', 'MDL201', 'MDL202', 'MDL203'];
     const noise = all.filter((d) => singleDocCodes.includes(d.code));
     assert.deepEqual(
       [...new Set(noise.map((d) => `${d.path}:${d.code}`))].sort(),
@@ -496,6 +496,75 @@ describe('MDL402 — link fragments', () => {
     const index = createWorkspaceIndex(files, config);
     const all = validateWorkspace(index, { includeSingleDocument: false });
     assert.equal(byCode(all, 'MDL402')[0]!.severity, 'error');
+  });
+});
+
+describe('MDL203 — same-page anchors in the workspace pass', () => {
+  const body = (links: string) => `${links}\n`;
+
+  // The same document set is validated both ways, so the two channels can be
+  // compared directly: the single-document codes the index computed are the
+  // ones `validateWorkspace` re-emits, and a same-page link must appear once.
+  function both(files: Map<string, string>, config = defaultConfig()) {
+    const index = createWorkspaceIndex(files, config);
+    return {
+      single: validateWorkspace(index, { includeSingleDocument: true }),
+      cross: validateWorkspace(index, { includeSingleDocument: false }),
+    };
+  }
+
+  it('reports a same-page anchor no heading produces, exactly once', () => {
+    const files = new Map<string, string>([['a.md', doc('docs.a', relations(), body('See [x](#nope).'))]]);
+    const { single, cross } = both(files);
+    assert.equal(byCode(single, 'MDL203').length, 1, 'the single-document channel reports it');
+    assert.equal(byCode(cross, 'MDL203').length, 0, 'the link layer leaves it to MDL203 and reports nothing');
+    assert.equal(byCode(cross, 'MDL402').length, 0, 'a same-page anchor is not MDL402 either');
+    assert.equal(byCode(cross, 'MDL401').length, 0);
+  });
+
+  it('a same-page anchor a heading produces stays silent in both channels', () => {
+    const files = new Map<string, string>([
+      ['a.md', doc('docs.a', relations(), body('# Real\n\n[x](#real) [y](./b.md#also-real).'))],
+      ['b.md', doc('docs.b', relations(), '# Also real\n')],
+    ]);
+    const { single, cross } = both(files);
+    assert.equal(byCode(single, 'MDL203').length, 0);
+    assert.equal(byCode(cross, 'MDL402').length, 0, 'the cross-file fragment resolves');
+  });
+
+  it('a cross-file fragment miss is still MDL402, never MDL203', () => {
+    // The two rules partition the anchor space: a destination with a path is
+    // MDL402, one without is MDL203. This pins the boundary.
+    const files = new Map<string, string>([
+      ['a.md', doc('docs.a', relations(), body('# Real\n\n[bad](./b.md#nope) [same-page bad](#also-nope).'))],
+      ['b.md', doc('docs.b', relations(), '# Other\n')],
+    ]);
+    const { single, cross } = both(files);
+    const d203 = byCode(single, 'MDL203');
+    assert.equal(d203.length, 1, 'only the bare-fragment link is MDL203');
+    assert.equal(d203[0]!.data?.anchor, 'also-nope');
+    const d402 = byCode(cross, 'MDL402');
+    assert.equal(d402.length, 1, 'the path-bearing fragment stays MDL402');
+    assert.equal(d402[0]!.data?.anchor, 'nope');
+  });
+
+  it('an evidence anchor and a same-page link to the same missing anchor report separately', () => {
+    const files = new Map<string, string>([
+      [
+        'a.md',
+        doc(
+          'docs.a',
+          relations({ type: 'related_to', target: 'docs.b', reason: 'r', evidence: '#shared' }),
+          body('# Real\n\n[link](#shared).\n'),
+        ),
+      ],
+      ['b.md', doc('docs.b', relations(), '# Target\n')],
+    ]);
+    const { single, cross } = both(files);
+    assert.equal(byCode(single, 'MDL201').length, 1, 'evidence is MDL201 in-document');
+    assert.equal(byCode(single, 'MDL203').length, 1, 'the body link is MDL203');
+    assert.equal(byCode(cross, 'MDL402').length, 1, 'the same evidence is MDL402 against the target');
+    assert.equal(byCode(cross, 'MDL203').length, 0, 'no cross-file duplicate of the body link');
   });
 });
 

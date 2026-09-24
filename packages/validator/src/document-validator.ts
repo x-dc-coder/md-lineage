@@ -9,12 +9,17 @@
  *   - MDL202: the same (type, target) pair — with evidence distinguishing one
  *             declaration from another — is declared more than once in one
  *             document.
+ *   - MDL203: a same-page Markdown link (`[x](#sec)`) points at no heading of
+ *             the document. The link layer refuses same-page destinations
+ *             (MDL401 owns the path, MDL402 the fragment of ANOTHER document),
+ *             so the in-page fragment reaches the document layer, which is the
+ *             only place the target headings exist.
  *
  * Heading anchors follow GFM slug semantics; `Slugger` implements GitHub's
  * algorithm including the `-n` duplicate suffix.
  */
 
-import type { Root, Heading } from 'mdast';
+import type { Root, Heading, Link, Definition } from 'mdast';
 import type { Config } from './config.js';
 import type { Diagnostic } from './diagnostic.js';
 import { severityOf } from './diagnostic.js';
@@ -35,7 +40,9 @@ interface RelationLike {
  *
  * `mdlineage` is the parsed metadata object; `tree` is the mdast tree (null
  * when Markdown failed to parse, in which case anchor checks are skipped — the
- * parse failure already has its own diagnostic).
+ * parse failure already has its own diagnostic). `bodyStart` is the document
+ * offset of the body slice the tree was parsed from, so link diagnostics land
+ * on the link instead of `bodyStart` code units early.
  */
 export function validateDocumentSemantics(
   mdlineage: Record<string, unknown> | null,
@@ -44,6 +51,7 @@ export function validateDocumentSemantics(
   rawStart: number,
   relationOffsets: RelationOffsets,
   config: Config,
+  bodyStart = 0,
 ): Diagnostic[] {
   const out: Diagnostic[] = [];
   if (!mdlineage) return out;
@@ -82,6 +90,17 @@ export function validateDocumentSemantics(
     }
     const where = relationOffsets.relationStart(i) ?? relationOffsets.mdlineageStart;
     out.push(mdl202(rel, where, lineMap, rawStart, config));
+  }
+
+  // MDL203: same-page links. The predicate is the document's own anchor set,
+  // so it is decidable here and nowhere else: the link layer splits a
+  // destination into path and fragment, and a `#sec` destination has an empty
+  // path, which takes it out of both MDL401 and MDL402 by construction.
+  if (tree && anchors !== null) {
+    for (const link of extractSamePageLinks(tree)) {
+      if (anchors.has(link.anchor)) continue;
+      out.push(mdl203(link, bodyStart, lineMap, config));
+    }
   }
 
   return out;
@@ -153,6 +172,80 @@ function collectText(node: unknown, push: (text: string) => void): void {
   // the anchor, per github-slugger.
   if ((n.type === 'code' || n.type === 'inlineCode') && typeof n.value === 'string') push(n.value);
   if (Array.isArray(n.children)) for (const child of n.children) collectText(child, push);
+}
+
+/**
+ * Same-page links of a document body: destinations that are a bare fragment.
+ *
+ * A destination is only same-page when the fragment is the WHOLE url; a
+ * `./b.md#sec` link has a path, so its fragment is the target document's
+ * concern (MDL402) and never appears here. Images are excluded, as in the
+ * workspace link scan: an image is not a document link.
+ *
+ * `linkReference` nodes carry no url of their own: the destination comes from
+ * the matching `definition`, which CommonMark allows to appear later in the
+ * document, so definitions are gathered first.
+ */
+export function extractSamePageLinks(tree: Root): SamePageLink[] {
+  const definitions = new Map<string, string>();
+  visitTree(tree, (node) => {
+    if (node.type !== 'definition') return;
+    const def = node as Definition;
+    const key = def.identifier ?? def.label;
+    if (typeof key === 'string' && typeof def.url === 'string') {
+      definitions.set(normalizeLabel(key), def.url);
+    }
+  });
+
+  const out: SamePageLink[] = [];
+  visitTree(tree, (node) => {
+    if (node.type !== 'link' && node.type !== 'linkReference') return;
+    const link = node as Link & { identifier?: string };
+    const url = typeof link.url === 'string' ? link.url : '';
+    let destination = url;
+    if (!destination) {
+      // A reference-style link resolves through its definition; an unresolved
+      // one has no destination for any layer to check (a Markdown linter owns
+      // that).
+      const ref = typeof link.identifier === 'string' ? definitions.get(normalizeLabel(link.identifier)) : undefined;
+      if (typeof ref !== 'string') return;
+      destination = ref;
+    }
+    // Only a bare fragment is a same-page anchor: `#`, `#sec`, `#a-b`. An empty
+    // fragment (`[x](#)`) is a link to the document itself and not a broken
+    // heading reference, so it is skipped like MDL402 skips it.
+    if (!destination.startsWith('#')) return;
+    const anchor = destination.slice(1);
+    if (anchor === '') return;
+    out.push({ url: destination, anchor, offset: link.position?.start?.offset ?? 0 });
+  });
+  return out;
+}
+
+/** A same-page link with the anchor it names, body-relative offset included. */
+export interface SamePageLink {
+  readonly url: string;
+  readonly anchor: string;
+  /** Offset of the link's opening bracket, relative to the body slice. */
+  readonly offset: number;
+}
+
+/** GFM reference-label matching is case-insensitive and collapses whitespace. */
+function normalizeLabel(label: string): string {
+  return label.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+/** Assemble an MDL203 diagnostic positioned on the offending link. */
+function mdl203(link: SamePageLink, bodyStart: number, lineMap: LineMap, config: Config): Diagnostic {
+  const start = bodyStart + link.offset;
+  return {
+    code: 'MDL203',
+    severity: severityOf('MDL203', config.diagnostics as Record<string, 'error' | 'warning' | 'information' | 'hint'>),
+    message: `Same-page anchor does not exist: ${link.url}`,
+    range: rangeAt(lineMap, start, start + link.url.length),
+    layer: 'document-semantic',
+    data: { anchor: link.anchor },
+  };
 }
 
 function mdl201(anchor: string, where: number, lineMap: LineMap, rawStart: number, config: Config): Diagnostic {

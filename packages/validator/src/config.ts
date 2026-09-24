@@ -652,6 +652,7 @@ const DEFAULT_SEVERITIES: Readonly<Record<string, 'error' | 'warning' | 'informa
   MDL104: 'error',
   MDL201: 'warning',
   MDL202: 'warning',
+  MDL203: 'warning',
   MDL301: 'error',
   MDL302: 'error',
   MDL303: 'error',

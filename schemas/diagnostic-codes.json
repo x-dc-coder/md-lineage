@@ -70,6 +70,13 @@
       "description": "The same (type, target) pair is declared more than once in one document. Duplicate declarations are a safe auto-fix candidate (deletion of the redundant entry)."
     },
     {
+      "code": "MDL203",
+      "layer": "document-semantic",
+      "severity": "warning",
+      "message": "Same-page anchor does not exist",
+      "description": "A same-page Markdown link (`[x](#sec)`) names a fragment no heading of the document produces. The link layer splits a destination into path and fragment; a bare fragment has an empty path, so it is outside MDL401 (the path) and MDL402 (a fragment of ANOTHER document), and the check lives at the document layer, where the target headings exist. Empty fragments (`[x](#)`) are not checked."
+    },
+    {
       "code": "MDL301",
       "layer": "workspace-semantic",
       "severity": "error",
