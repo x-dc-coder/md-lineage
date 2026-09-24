@@ -64,6 +64,7 @@ import {
   indexPathOfUri,
   toAbsolutePath,
   toRootDirectory,
+  listKnownNonMarkdownPaths,
   MAX_DOCUMENT_BYTES,
 } from './workspace.js';
 import { relative } from 'node:path';
@@ -84,6 +85,7 @@ export {
   indexPathOfUri,
   toAbsolutePath,
   toRootDirectory,
+  listKnownNonMarkdownPaths,
 } from './workspace.js';
 
 /** §13: the settling window before a burst of edits triggers a validation. */
@@ -555,7 +557,7 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
     // responsive and a large tree's cost lands after `initialize` answers.
     scanPromise = new Promise<void>((fulfill) => {
       setImmediate(() => {
-        index = createWorkspaceIndex(new Map(), config);
+        index = createWorkspaceIndex(new Map(), config, listKnownNonMarkdownPaths(root, config));
         for (const [path, content] of scanWorkspace(root, config)) {
           if (documents.get(pathToUri(path, root)) !== undefined) continue;
           // §13's degradation applies to the scan too, not just to

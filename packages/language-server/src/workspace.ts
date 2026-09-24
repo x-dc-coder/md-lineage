@@ -185,6 +185,48 @@ export function scanWorkspace(root: string, config: Config): Map<string, string>
   return files;
 }
 
+/**
+ * Non-Markdown files under `root`, root-relative and POSIX-spelled: the
+ * known-path set MDL401 resolves against.
+ *
+ * The index's own vocabulary is the spelling these paths must carry
+ * (`toIndexPath`), or the set silently matches nothing. Directories are
+ * excluded (`nodir`), so a link to a real directory still reports MDL401.
+ * Markdown files are excluded too — a missing document must stay MDL401 even
+ * when the scan's own scope would have missed it. Equivalent to the CLI's
+ * `knownNonMarkdownPaths` (packages/cli/src/paths.ts); reimplemented here
+ * because the CLI depends on this package, not the other way round.
+ */
+export function listKnownNonMarkdownPaths(root: string, config: Config): string[] {
+  const exclude = Array.isArray(config.files.exclude) ? config.files.exclude : [];
+  const out: string[] = [];
+  const queue = [resolve(root)];
+  while (queue.length > 0) {
+    const dir = queue.pop() as string;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (isExcludedDir(path, root, exclude)) continue;
+        queue.push(path);
+        continue;
+      }
+      if (isMarkdownUri(path)) continue;
+      const key = toIndexPath(root, path);
+      // `toIndexPath` keeps an out-of-root path absolute, and an absolute key
+      // is not a spelling a root-relative link ever normalizes to.
+      if (key.startsWith('/')) continue;
+      out.push(key);
+    }
+  }
+  return out.sort();
+}
+
 /** A directory the config or the defaults say to walk past. */
 function isExcludedDir(path: string, root: string, exclude: readonly string[]): boolean {
   const normalized = relative(root, path).split(sep).join('/');

@@ -596,7 +596,7 @@ function registerValidateRepository(server: McpServer, context: McpServerContext
         if (scope && !scope.has(path)) continue;
         indexFiles.set(path, content);
       }
-      const index = createWorkspaceIndex(indexFiles, context.config);
+      const index = createWorkspaceIndex(indexFiles, context.config, listKnownNonMarkdownPaths(context.root, context.config));
 
       // The baseline is applied by matching (code, path) pairs, so the count of
       // what it covers needs the un-suppressed set too: compute both, report the
@@ -673,7 +673,7 @@ function registerListDocumentIds(server: McpServer, context: McpServerContext): 
     },
     ({ query, kind, status }) => {
       const files = scanWorkspaceFiles(context.root, context.config);
-      const index = createWorkspaceIndex(files, context.config);
+      const index = createWorkspaceIndex(files, context.config, listKnownNonMarkdownPaths(context.root, context.config));
       const needle = query?.toLowerCase();
       const out: Array<{ id: string; path: string; kind: string | null; status: string | null }> = [];
       for (const path of index.paths()) {
@@ -716,7 +716,7 @@ function registerResolveRelationTarget(server: McpServer, context: McpServerCont
     },
     ({ id }) => {
       const files = scanWorkspaceFiles(context.root, context.config);
-      const index = createWorkspaceIndex(files, context.config);
+      const index = createWorkspaceIndex(files, context.config, listKnownNonMarkdownPaths(context.root, context.config));
       const paths = index.idToPaths(id);
       return asJson({
         id,
@@ -1102,6 +1102,46 @@ function scanWorkspaceFiles(root: string, config: Config): Map<DocPath, string> 
   }
 
   return files;
+}
+
+/**
+ * Non-Markdown files under `root`, root-relative and POSIX-spelled: the
+ * known-path set MDL401 resolves against.
+ *
+ * The keys are spelled exactly as `scanWorkspaceFiles` spells documents
+ * (`relative(root, …)`), which is also the index's vocabulary, or the set
+ * would silently match nothing. Directories are skipped, so a link to a real
+ * directory still reports MDL401, and Markdown files are excluded so a missing
+ * document stays MDL401. Equivalent to the CLI's `knownNonMarkdownPaths`
+ * (packages/cli/src/paths.ts); reimplemented here because the CLI depends on
+ * this package, not the other way round.
+ */
+function listKnownNonMarkdownPaths(root: string, config: Config): string[] {
+  const exclude = Array.isArray(config.files.exclude) ? config.files.exclude : [];
+  const out: string[] = [];
+  const queue: string[] = [resolve(root)];
+  while (queue.length > 0) {
+    const dir = queue.pop() as string;
+    let entries: import('node:fs').Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (isExcludedDir(path, root, exclude)) continue;
+        queue.push(path);
+        continue;
+      }
+      if (path.toLowerCase().endsWith('.md')) continue;
+      const rel = relative(root, path).split(sep).join('/');
+      if (rel === '' || rel.startsWith('..')) continue;
+      out.push(rel);
+    }
+  }
+  return out.sort();
 }
 
 /** A directory the config or the defaults say to walk past (same rule as the LSP). */

@@ -851,6 +851,43 @@ describe('initial scan', () => {
       h.close();
     }
   });
+
+  it('does not report MDL401 for a link to a non-Markdown file the scan found', async () => {
+    const h = harness();
+    try {
+      mkdirSync(resolve(h.root, 'schemas'), { recursive: true });
+      writeFileSync(resolve(h.root, 'schemas/x.json'), '{"version": 1}\n');
+      writeFileSync(resolve(h.root, 'LICENSE'), 'MIT\n');
+      writeFileSync(
+        resolve(h.root, 'docs/a.md'),
+        `${doc({ id: 'docs.a' })}\n` +
+          '- [schema](../schemas/x.json)\n' +
+          '- [license](../LICENSE)\n' +
+          '- [nope](../missing.json)\n',
+      );
+      await initialize(h);
+      const u = uri(h, 'docs/a.md');
+      didOpen(h, u, 1, readFileSync(resolve(h.root, 'docs/a.md'), 'utf8'));
+      await waitForDiagnosticsSet(h, u);
+      const codes = diagnosticsFor(h, u)
+        .filter((d) => d.code === 'MDL401')
+        .map((d) => d.message);
+      assert.ok(
+        !codes.some((m) => m.endsWith('../schemas/x.json')),
+        'a link to a schema that exists is not MDL401',
+      );
+      assert.ok(
+        !codes.some((m) => m.endsWith('../LICENSE')),
+        'a link to the license file is not MDL401',
+      );
+      assert.ok(
+        codes.some((m) => m.endsWith('../missing.json')),
+        'a link to a file the workspace does not hold stays MDL401',
+      );
+    } finally {
+      h.close();
+    }
+  });
 });
 
 /** A two-document workspace: a referrer and its target, both clean. */

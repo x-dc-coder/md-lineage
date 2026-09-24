@@ -351,7 +351,45 @@ describe('MCP server — validate_repository', () => {
       rmSync(root, { recursive: true, force: true });
     }
   });
+
+  it('does not report MDL401 for a link to a non-Markdown file that exists (known-path set)', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-known-'));
+    mkdirSync(resolve(root, 'docs'), { recursive: true });
+    mkdirSync(resolve(root, 'schemas'), { recursive: true });
+    writeFileSync(resolve(root, 'schemas', 'x.json'), '{"version": 1}\n');
+    writeFileSync(resolve(root, 'LICENSE'), 'MIT\n');
+    writeFileSync(resolve(root, 'docs', 'a.md'), DOC_LINKING_NON_MARKDOWN);
+    try {
+      const h = await harness(root);
+      try {
+        const { payload } = await callTool(h, 'validate_repository', {});
+        const answer = payload as { diagnostics: Array<{ code: string; path: string; message: string }> };
+        const messages = answer.diagnostics.filter((d) => d.code === 'MDL401').map((d) => d.message);
+        assert.ok(
+          !messages.some((m) => m.endsWith('../schemas/x.json')),
+          'a link to a schema that exists is not MDL401',
+        );
+        assert.ok(
+          !messages.some((m) => m.endsWith('../LICENSE')),
+          'a link to the license file is not MDL401',
+        );
+        assert.ok(
+          messages.some((m) => m.endsWith('../missing.json')),
+          'a link to a file the workspace does not hold stays MDL401',
+        );
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
+
+/** A clean document that links to non-Markdown targets, existing and not. */
+const DOC_LINKING_NON_MARKDOWN =
+  '---\nmdlineage:\n  schema: 1\n  id: docs.a\n  kind: policy\n  status: active\n---\n\n# A\n\n' +
+  '- [schema](../schemas/x.json)\n- [license](../LICENSE)\n- [nope](../missing.json)\n';
 
 describe('MCP server — get_schema and resources', () => {
   it('returns the checked-in v1 schema', async () => {
