@@ -27,7 +27,7 @@
   },
   "scripts": {
     "build": "tsc -b",
-    "test": "node --import tsx --test \"test/*.test.ts\""
+    "test": "node ../../scripts/run-tests.mjs ."
   },
   "dependencies": {
     "@mdlineage/validator": "*",

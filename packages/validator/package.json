@@ -29,7 +29,7 @@
   "scripts": {
     "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
     "prepack": "node ../../scripts/copy-schemas.mjs",
-    "test": "node --import tsx --test \"test/*.test.ts\""
+    "test": "node ../../scripts/run-tests.mjs ."
   },
   "dependencies": {
     "ajv": "^8.17.1",

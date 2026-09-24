@@ -30,7 +30,7 @@
   },
   "scripts": {
     "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
-    "test": "node --import tsx --test \"test/*.test.ts\"",
+    "test": "node ../../scripts/run-tests.mjs .",
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
