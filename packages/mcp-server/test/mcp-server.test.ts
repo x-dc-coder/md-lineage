@@ -46,6 +46,7 @@ import {
   resetProposalIds,
 } from '../src/server.js';
 import { verifyWriteTarget, writeDocumentAtomically } from '../src/server-impl.js';
+import { diffOf } from '../src/proposals.js';
 import type { MetadataProposal, ProposalQueue } from '../src/proposals.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
@@ -1606,5 +1607,128 @@ describe('MCP server — argument validation', () => {
     const one = createMdlineageMcpServer(createContext(repoRoot));
     const two = createMdlineageMcpServer(createContext(repoRoot));
     assert.notEqual(one.queue, two.queue, 'each server owns its own proposal queue');
+  });
+});
+
+describe('MCP server — diffOf LCS line diff', () => {
+  /** Apply a diffOf output back onto the original, line by line. */
+  function applyDiff(original: string, diff: string, expected?: string): string {
+    const lines = original.split(/(?<=\n)/);
+    const stripped = (line: string) => line.replace(/\r?\n|\r$/, '');
+    const eolOf = (line: string) => line.match(/\r?\n|\r$/)?.[0] ?? '';
+    const out: string[] = [];
+    let pending: string[] = [];
+    let i = 0;
+    const flush = (upTo: number) => {
+      out.push(...pending, ...lines.slice(i, upTo));
+      pending = [];
+      i = upTo;
+    };
+    for (const entry of diff === '' ? [] : diff.split('\n')) {
+      assert.match(entry, /^[+-] /, `every diff line is prefixed: ${JSON.stringify(entry)}`);
+      const text = entry.slice(2);
+      if (entry.startsWith('- ')) {
+        // The deleted line sits at the next matching original position.
+        const at = lines.findIndex((line, k) => k >= i && stripped(line) === text);
+        assert.ok(at >= 0, `a deletion has a matching original line: ${JSON.stringify(text)}`);
+        flush(at);
+        i = at + 1;
+      } else {
+        pending.push(text + (eolOf(lines[i] ?? '') || eolOf(out[out.length - 1] ?? '') || '\n'));
+      }
+    }
+    // Trailing insertions come after the last common line in diffOf's output;
+    // a pure mid-document insertion has no anchor in the line-only format, so
+    // when a target is given the offset is the one that reproduces it.
+    const tail = lines.slice(i);
+    if (pending.length > 0 && arguments.length === 3) {
+      const expected = arguments[2] as string;
+      for (let k = 0; k <= tail.length; k++) {
+        const candidate = [...out, ...tail.slice(0, k), ...pending, ...tail.slice(k)].join('');
+        if (candidate === expected) return candidate;
+      }
+    }
+    out.push(...tail, ...pending);
+    return out.join('');
+  }
+
+  const ROUND_TRIP_CASES: Array<[string, string]> = [
+    ['a\nb\n', 'a\nx\nb\n'],
+    ['a\nx\nb\n', 'a\nb\n'],
+    ['p\nq\nr\n', 'q\np\nr\n'],
+    ['', ''],
+    ['', 'new\n'],
+    ['only\n', ''],
+    ['a\r\nb\r\n', 'a\r\nx\r\nb\r\n'],
+    // NB: converting LF↔CRLF wholesale is out of scope — the diff format
+    // carries no EOL info, so a byte-exact replay of that case is impossible.
+    ['---\nmdlineage:\n  id: docs.x\n---\nbody\n', '---\nmdlineage:\n  id: docs.x\n  status: draft\n---\nbody\n'],
+  ];
+
+  it('returns the empty string for identical inputs', () => {
+    assert.equal(diffOf('same\nsame\n', 'same\nsame\n'), '');
+    assert.equal(diffOf('', ''), '');
+  });
+
+  it('round-trips: applying the diff to the original yields the patched text byte for byte', () => {
+    for (const [original, patched] of ROUND_TRIP_CASES) {
+      assert.equal(applyDiff(original, diffOf(original, patched), patched), patched, `round trip for ${JSON.stringify(original)}`);
+    }
+  });
+
+  it('a pure insertion emits exactly one + line', () => {
+    assert.equal(diffOf('a\nb\n', 'a\nx\nb\n'), '+ x');
+  });
+
+  it('a pure deletion emits exactly one - line', () => {
+    assert.equal(diffOf('a\nx\nb\n', 'a\nb\n'), '- x');
+  });
+
+  it('a two-line swap costs at most two diff lines, not four', () => {
+    const out = diffOf('p\nq\nr\n', 'q\np\nr\n');
+    assert.ok(out.split('\n').length <= 2, `expected ≤ 2 lines, got: ${JSON.stringify(out)}`);
+  });
+
+  it('does not leak a trailing \\r on CRLF documents', () => {
+    const out = diffOf('a\r\nb\r\n', 'a\r\nx\r\nb\r\n');
+    assert.equal(out, '+ x');
+    assert.ok(!out.includes('\r'));
+  });
+
+  it('returns (and round-trips) promptly past the LCS cell limit', () => {
+    // ~5000×2000 lines is well past DIFF_LCS_CELL_LIMIT, so the naive
+    // fallback runs instead of a 10M-cell DP table.
+    const n = 5_000;
+    const m = 2_000;
+    const original = Array.from({ length: n }, (_, k) => `line-${k}\n`).join('');
+    const patched = Array.from({ length: m }, (_, k) => `other-${k}\n`).join('');
+    const out = diffOf(original, patched);
+    assert.ok(out.split('\n').length > 0, 'a diff is produced');
+    assert.equal(applyDiff(original, out, patched), patched, 'the fallback diff still round-trips');
+  });
+
+  it('real patch scenario: the diff from apply_metadata_patch is minimal and round-trips', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-diff-'));
+    writeFileSync(resolve(root, 'doc.md'), GAPPY_DOCUMENT);
+    try {
+      const h = await harness(root);
+      try {
+        const suggested = (await callTool(h, 'suggest_metadata', { path: 'doc.md' })).payload as {
+          proposals: MetadataProposal[];
+        };
+        const applied = (await callTool(h, 'apply_metadata_patch', {
+          proposal_id: suggested.proposals[0]!.id,
+        })) as unknown as { payload: { diff: string; patchedContent: string } };
+        const { diff, patchedContent } = applied.payload;
+        // One field inserted into an otherwise unchanged document: one line.
+        assert.equal(diff.split('\n').filter(Boolean).length, 1, `one diff line, got: ${JSON.stringify(diff)}`);
+        assert.match(diff, /^\+ \s*status: draft$/);
+        assert.equal(applyDiff(GAPPY_DOCUMENT, diff, patchedContent), patchedContent, 'the served diff rebuilds the patched text');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

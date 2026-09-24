@@ -568,35 +568,90 @@ function formatValue(value: unknown): string {
 }
 
 /**
- * A unified diff of the patched document, for review.
+ * A line-level diff of the patched document, for review.
  *
- * Deliberately small: a real diff engine is a dependency this package does not
- * need, and the queue's promise is "the caller sees what would change", which
- * a before/after pair of the touched lines delivers.
+ * Standard LCS (longest common subsequence) over lines, so a block that moved
+ * reads as the few lines that changed, not a delete/add storm. LCS is O(n·m)
+ * in time and memory, so past `DIFF_LCS_CELL_LIMIT` cells (~2000×2000 lines,
+ * the same order as the language server's large-file degradation) it falls
+ * back to the cheap pairwise walk. Lines keep their original terminators for
+ * comparison so CRLF documents diff correctly; the `\r` is stripped from the
+ * printed line.
  */
-export function diffOf(original: string, patched: string): string {
-  const a = original.split('\n');
-  const b = patched.split('\n');
-  const out: string[] = [];
+// 4M Int32 cells ≈ 16 MB — big enough for real documents, small enough to
+// stay far from V8 heap pressure.
+const DIFF_LCS_CELL_LIMIT = 4_000_000;
 
+/** Split into lines, keeping each line's terminator attached. */
+function splitKeepingEol(text: string): string[] {
+  // `''` would otherwise split to one phantom empty line.
+  return text === '' ? [] : text.split(/(?<=\n)/);
+}
+
+/** The line as shown in a diff: no trailing `\r\n` / `\n` / `\r`. */
+function stripEol(line: string): string {
+  return line.replace(/\r?\n|\r$/, '');
+}
+
+/** The pre-LCS pairwise walk: correct output shape, minimal edits not. */
+function naiveLineDiff(a: string[], b: string[]): string[] {
+  const out: string[] = [];
   let i = 0;
   let j = 0;
   while (i < a.length || j < b.length) {
-    const av = a[i];
-    const bv = b[j];
-    if (av === bv) {
+    if (i < a.length && j < b.length && a[i] === b[j]) {
       i++;
       j++;
       continue;
     }
     if (j < b.length) {
-      out.push(`+ ${bv}`);
+      out.push(`+ ${stripEol(b[j]!)}`);
       j++;
     }
     if (i < a.length) {
-      out.push(`- ${av}`);
+      out.push(`- ${stripEol(a[i]!)}`);
       i++;
     }
   }
+  return out;
+}
+
+export function diffOf(original: string, patched: string): string {
+  const a = splitKeepingEol(original);
+  const b = splitKeepingEol(patched);
+  const n = a.length;
+  const m = b.length;
+  if (n * m > DIFF_LCS_CELL_LIMIT) return naiveLineDiff(a, b).join('\n');
+
+  // dp[i*(m+1)+j] = LCS length of a[i..] and b[j..].
+  const w = m + 1;
+  const dp = new Int32Array((n + 1) * w);
+  for (let i = n - 1; i >= 0; i--) {
+    for (let j = m - 1; j >= 0; j--) {
+      const here = i * w + j;
+      dp[here] =
+        a[i] === b[j]
+          ? dp[(i + 1) * w + j + 1]! + 1
+          : Math.max(dp[(i + 1) * w + j]!, dp[i * w + j + 1]!);
+    }
+  }
+
+  const out: string[] = [];
+  let i = 0;
+  let j = 0;
+  while (i < n && j < m) {
+    if (a[i] === b[j]) {
+      i++;
+      j++;
+    } else if (dp[(i + 1) * w + j]! >= dp[i * w + j + 1]!) {
+      out.push(`- ${stripEol(a[i]!)}`);
+      i++;
+    } else {
+      out.push(`+ ${stripEol(b[j]!)}`);
+      j++;
+    }
+  }
+  while (i < n) out.push(`- ${stripEol(a[i++]!)}`);
+  while (j < m) out.push(`+ ${stripEol(b[j++]!)}`);
   return out.join('\n');
 }
