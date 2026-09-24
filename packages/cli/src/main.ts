@@ -171,7 +171,16 @@ function readArgs(argv: string[]): ParsedArgs {
 
 /** Application entry. Returns the exit code the process should use. */
 export async function main(argv: string[]): Promise<number> {
-  const parsed = readArgs(argv);
+  let parsed: ParsedArgs;
+  try {
+    parsed = readArgs(argv);
+  } catch (error) {
+    // parseArgs is strict: an unknown flag throws instead of reaching the
+    // per-command usage checks, and a usage error must exit 2, not crash.
+    const message = error instanceof Error ? error.message : String(error);
+    process.stderr.write(`mdlineage: ${message}\n\n${HELP}\n`);
+    return 2;
+  }
 
   if (parsed.values.help) {
     process.stdout.write(`${HELP}\n`);

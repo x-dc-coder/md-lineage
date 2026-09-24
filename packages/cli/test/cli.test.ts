@@ -1659,3 +1659,23 @@ describe('index rebuild', () => {
     assert.ok(out.stderr.includes('unknown index command'));
   });
 });
+
+describe('mdlineage usage errors — exit 2, no stack', () => {
+  // A strict parseArgs throw used to escape main() as an uncaught exception
+  // (exit 1 with a stack); an unknown flag is a usage error, so exit 2.
+  for (const argv of [['server', '--http'], ['mcp', '--http'], ['check', '--nonsense']]) {
+    it(`rejects unknown flag on '${argv.join(' ')}' with exit 2`, () => {
+      const out = runCli(argv);
+      assert.equal(out.status, 2);
+      assert.ok(out.stderr.includes('Unknown option'), `stderr was: ${out.stderr}`);
+      assert.ok(!/^\s+at /m.test(out.stderr), 'no stack trace on a usage error');
+    });
+  }
+
+  it('server without --stdio still exits 2 with the usage hint', () => {
+    const out = runCli(['server']);
+    assert.equal(out.status, 2);
+    assert.ok(out.stderr.includes("unknown server transport '(none)'"));
+    assert.ok(!/^\s+at /m.test(out.stderr));
+  });
+});
