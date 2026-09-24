@@ -135,6 +135,11 @@ export interface WorkspaceIndex {
   relationsOf(path: DocPath): readonly RelationEntry[];
   /** Config the index was built with. */
   readonly config: Config;
+  /**
+   * True when `path` is an indexed document or a file the caller declared to
+   * exist in the workspace (see `createWorkspaceIndex`).
+   */
+  knowsPath(path: DocPath): boolean;
 }
 
 /** Result of an incremental update: who must be re-validated. */
@@ -159,8 +164,9 @@ const EMPTY_RELATIONS: readonly RelationEntry[] = Object.freeze([]);
 export function createWorkspaceIndex(
   files: Map<DocPath, string> | ReadonlyArray<readonly [DocPath, string]> | Readonly<Record<DocPath, string>>,
   config: Config,
+  knownPaths?: Iterable<DocPath>,
 ): WorkspaceIndex {
-  return new IndexImpl(config, mapEntries(files));
+  return new IndexImpl(config, mapEntries(files), knownPaths);
 }
 
 /**
@@ -215,10 +221,17 @@ class IndexImpl implements WorkspaceIndex {
    * vocabulary the caller's paths use.
    */
   private readonly referrersByPath = new Map<string, Set<DocPath>>();
+  /**
+   * Workspace files the caller scanned but did not index as documents (schemas,
+   * configs, images). Metadata handed in by the scanner — never read off disk
+   * here — so MDL401 can tell "absent from the repository" from "not Markdown".
+   */
+  private readonly known: ReadonlySet<DocPath>;
   readonly config: Config;
 
-  constructor(config: Config, files: Iterable<readonly [DocPath, string]>) {
+  constructor(config: Config, files: Iterable<readonly [DocPath, string]>, knownPaths?: Iterable<DocPath>) {
     this.config = config;
+    this.known = new Set(knownPaths ?? []);
     for (const [path, content] of files) {
       // A document that fails to parse yields diagnostics, never an exception:
       // one unreadable file must not invalidate the repository's index.
@@ -276,6 +289,10 @@ class IndexImpl implements WorkspaceIndex {
 
   relationsOf(path: DocPath): readonly RelationEntry[] {
     return this.entries.get(path)?.relations ?? EMPTY_RELATIONS;
+  }
+
+  knowsPath(path: DocPath): boolean {
+    return this.entries.has(path) || this.known.has(path);
   }
 
   /** Insert or replace one document, repairing every reverse map. */
@@ -668,6 +685,11 @@ export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, linkPa
   const normalized = linkPath.startsWith('/') ? linkPath : normalizeRelative(fromPath, linkPath);
   if (normalized !== linkPath && index.entryOf(normalized)) return [normalized];
   if (index.entryOf(linkPath)) return [linkPath];
+  // Not a document, but the caller may have scanned it as a workspace file
+  // (a schema, a config …): it exists, so MDL401 must not report it. No entry
+  // comes back, which keeps MDL402 from judging fragments of non-Markdown.
+  if (normalized !== linkPath && index.knowsPath(normalized)) return [normalized];
+  if (index.knowsPath(linkPath)) return [linkPath];
   return EMPTY_PATHS;
 }
 

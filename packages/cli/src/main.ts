@@ -278,7 +278,7 @@ interface ChangedRunOptions extends RunOptions {
 
 /** `mdlineage check [paths...]`: expand, read, validate, report. */
 function runPaths(options: RunOptions): number {
-  const { files, missed, excluded } = expandMarkdownPaths(
+  const { files, others, missed, excluded } = expandMarkdownPaths(
     options.paths.length === 0 ? ['.'] : options.paths,
     options.cwd,
     { exclude: options.exclude },
@@ -294,7 +294,7 @@ function runPaths(options: RunOptions): number {
     );
   }
 
-  const result = checkFiles(files, toCheckOptions(options));
+  const result = checkFiles(files, toCheckOptions(options), others);
   return emit(result, options);
 }
 

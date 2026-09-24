@@ -27,6 +27,7 @@ import {
   type WorkspaceDiagnostic,
 } from '@mdlineage/validator';
 import type { ExpandedPath } from './paths.js';
+import { knownNonMarkdownPaths } from './paths.js';
 import { baselineRoot, loadBaseline, type LoadedBaseline } from './baseline.js';
 
 /** A report entry per file: the JSON output unit. */
@@ -153,7 +154,11 @@ export function exitCodeFor(result: CheckResult, options: { frail?: boolean } = 
  * already ran the single-document pipeline per file, so nothing is parsed
  * twice in this mode.
  */
-export function checkFiles(files: readonly ExpandedPath[], options: CheckOptions): CheckResult {
+export function checkFiles(
+  files: readonly ExpandedPath[],
+  options: CheckOptions,
+  others: readonly ExpandedPath[] = [],
+): CheckResult {
   const { config, diagnostics: configDiagnostics, path: configPath } = loadRunConfig(options.configFile, options.cwd);
   const incremental = options.incremental ?? true;
   const reports: FileReport[] = [];
@@ -179,7 +184,12 @@ export function checkFiles(files: readonly ExpandedPath[], options: CheckOptions
   }
 
   if (incremental) {
-    const index = createWorkspaceIndex(indexFiles, config);
+    // Known paths use the same reporting vocabulary as the index keys (`asGiven`):
+    // the scan's non-Markdown files plus the cwd-wide list, so MDL401 judges
+    // existence in the workspace rather than in the run's arguments.
+    const knownPaths = new Set(others.map((file) => file.asGiven));
+    for (const path of knownNonMarkdownPaths(options.cwd, { exclude: options.exclude })) knownPaths.add(path);
+    const index = createWorkspaceIndex(indexFiles, config, knownPaths);
     const baseline = loadRunBaseline(options);
     const all = validateWorkspace(index);
     // The validator owns the suppression predicate; the CLI only counts what it

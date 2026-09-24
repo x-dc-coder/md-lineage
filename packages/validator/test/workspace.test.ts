@@ -432,6 +432,61 @@ describe('MDL401 — markdown link targets', () => {
     assert.equal(byCode(all, 'MDL402').length, 0, 'no duplicate fragment diagnostic for an unresolvable path');
   });
 
+  it('does not report a link to a real non-Markdown file the caller declared', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [schema](../schemas/x.json).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig(), ['schemas/x.json']);
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0, 'the file exists, MDL401 must stay silent');
+  });
+
+  it('still reports a link whose target is nowhere in the workspace', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [nope](../schemas/nope.json).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig(), ['schemas/x.json']);
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    const d401 = byCode(all, 'MDL401');
+    assert.equal(d401.length, 1);
+    assert.equal(d401[0]!.data?.path, '../schemas/nope.json');
+  });
+
+  it('skips the fragment check on a known non-Markdown target', () => {
+    // A non-Markdown file has no heading anchors to check, so `data.json#x`
+    // yields neither MDL401 (the file exists) nor MDL402 (no anchors exist).
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [schema](../schemas/x.json#x).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig(), ['schemas/x.json']);
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0);
+    assert.equal(byCode(all, 'MDL402').length, 0);
+  });
+
+  it('still checks fragments on an indexed Markdown target alongside known paths', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [b](../b.md#missing).'))],
+      ['b.md', doc('docs.b', relations(), '# Heading\n')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig(), ['schemas/x.json']);
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0);
+    assert.equal(byCode(all, 'MDL402').length, 1, 'existing documents keep their fragment checking');
+  });
+
+  it('without known paths the same links still report (single-document / legacy shape)', () => {
+    // The index's default is an empty known set, so callers that cannot know the
+    // worktree (an unsaved buffer) get exactly the pre-existing behavior.
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [schema](../schemas/x.json).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 1);
+    assert.equal(index.knowsPath('schemas/x.json'), false);
+  });
+
   it('resolves ../ parent links from a deeply nested document', () => {
     const files = new Map<string, string>([
       ['docs/sub/a.md', doc('docs.a', relations(), body('Up to [b](../b.md).'))],

@@ -439,7 +439,9 @@ function stronglyConnectedComponents(graph: Map<string, readonly string[]>): str
  * checked here and the fragment by MDL402 below, so one bad link produces at
  * most one diagnostic. The fragment check needs the target's heading anchors,
  * so it only fires when the path resolves to exactly one indexed document —
- * a missing target stays MDL401's alone. A same-page anchor (`path === ''`) is
+ * a missing target stays MDL401's alone, and a target the index only KNOWS to
+ * exist (a scanned non-Markdown file) has no anchors to check and skips it.
+ * A same-page anchor (`path === ''`) is
  * skipped: it belongs to MDL201's in-document domain, never the link layer.
  */
 function mdl401(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
@@ -449,11 +451,14 @@ function mdl401(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
     if (isExternal(link.path)) continue;
     const targets = resolveLinkPath(index, entry.path, link.path);
     if (targets.length > 0) {
-        if (link.anchor !== '' && !index.anchorsOf(targets[0]!).has(link.anchor)) {
+      // Only an indexed document has heading anchors; a known non-Markdown file
+      // resolves for MDL401's sake but its fragments are not judged.
+      const target = targets[0]!;
+      if (link.anchor !== '' && index.entryOf(target) !== null && !index.anchorsOf(target).has(link.anchor)) {
         out.push(
           build(
             'MDL402',
-            `Markdown link fragment does not exist in ${targets[0]!}: #${link.anchor}`,
+            `Markdown link fragment does not exist in ${target}: #${link.anchor}`,
             entry,
             link.offset,
             config,

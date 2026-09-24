@@ -425,6 +425,38 @@ describe('mdlineage check — workspace mode', () => {
     }
   });
 
+  it('a link to a real non-Markdown file is not MDL401', () => {
+    const body = 'See [schema](./data.json) and [nope](./nope.json).\n';
+    const a = ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: policy', '  status: active', '---', '', body].join('\n');
+    const repo = scratchWorkspace({ 'a.md': a, 'data.json': '{"x":1}' });
+    try {
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], repo.root);
+      assert.equal(out.status, 0, 'a warning exits 0 without --frail');
+      const all = reportsOf(out.stdout).flatMap((r) => r.diagnostics);
+      assert.equal(all.length, 1, 'only the missing target is reported');
+      assert.equal(all[0]!.code, 'MDL401');
+      assert.equal(all[0]!.data?.path, './nope.json');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('a link to a non-Markdown file still reports when the file is outside the workspace scope', () => {
+    // A scoped run (check docs) cannot know files outside it exist; the known
+    // set comes from the cwd scan, so a target under an unscanned-but-present
+    // sibling directory still resolves. This asserts the cwd-wide list, not
+    // only the arguments', feeds the index.
+    const body = 'See [schema](../schemas/x.json).\n';
+    const a = ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: policy', '  status: active', '---', '', body].join('\n');
+    const repo = scratchWorkspace({ 'docs/a.md': a, 'schemas/x.json': '{}' });
+    try {
+      const out = runCli(['check', 'docs', '--no-baseline', '--format', 'json'], repo.root);
+      assert.equal(out.status, 0, 'the existing schema file resolves from a scoped run');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
   it('a baseline suppresses the diagnostics it covers', () => {
     const repo = scratchWorkspace({
       'mdlineage.config.yaml': CONFIG_REQUIRED,
