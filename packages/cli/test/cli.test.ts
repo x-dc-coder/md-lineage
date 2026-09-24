@@ -644,6 +644,45 @@ describe('mdlineage baseline', () => {
     }
   });
 
+  it('verify passes when a link targets a real non-Markdown file', () => {
+    const body = 'See [schema](../schemas/x.json).\n';
+    const a = ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: policy', '  status: active', '---', '', body].join('\n');
+    const repo = scratchWorkspace({ 'docs/a.md': a, 'schemas/x.json': '{}' });
+    try {
+      const verify = runCli(['baseline', 'verify'], repo.root);
+      assert.equal(verify.status, 0, 'the existing target is not MDL401');
+      assert.ok(!verify.stdout.includes('MDL401'), `no false positive: ${verify.stdout}`);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('verify still fails when a link targets a missing non-Markdown file', () => {
+    const body = 'See [schema](../schemas/missing.json).\n';
+    const a = ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: policy', '  status: active', '---', '', body].join('\n');
+    const repo = scratchWorkspace({ 'docs/a.md': a });
+    try {
+      const verify = runCli(['baseline', 'verify'], repo.root);
+      assert.equal(verify.status, 1, 'the missing target is a real MDL401');
+      assert.match(verify.stdout, /MDL401/);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('index rebuild does not report a link to a real non-Markdown file', () => {
+    const body = 'See [schema](../schemas/x.json).\n';
+    const a = ['---', 'mdlineage:', '  schema: 1', '  id: docs.a', '  kind: policy', '  status: active', '---', '', body].join('\n');
+    const repo = scratchWorkspace({ 'docs/a.md': a, 'schemas/x.json': '{}' });
+    try {
+      const out = runCli(['index', 'rebuild'], repo.root);
+      assert.equal(out.status, 0);
+      assert.ok(!out.stdout.includes('MDL401'), `no false positive: ${out.stdout}`);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
   it('verify fails on a stale entry, and update --report-only names it', () => {
     const repo = scratchWorkspace({
       'mdlineage.config.yaml': CONFIG_REQUIRED,

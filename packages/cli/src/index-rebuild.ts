@@ -14,7 +14,7 @@ import {
   createWorkspaceIndex,
   validateWorkspace,
 } from '@mdlineage/validator';
-import { expandMarkdownPaths } from './paths.js';
+import { expandMarkdownPaths, knownNonMarkdownPaths } from './paths.js';
 
 export interface IndexRebuildOptions {
   format: 'text' | 'json';
@@ -47,7 +47,10 @@ export function indexRebuild(options: IndexRebuildOptions): number {
     }
   }
 
-  const index = createWorkspaceIndex(entries, loaded.config);
+  // Known paths use the entries' vocabulary (cwd-relative), so a link to a real
+  // non-Markdown file is not misread as MDL401.
+  const knownPaths = new Set(knownNonMarkdownPaths(options.cwd, { exclude: options.exclude }));
+  const index = createWorkspaceIndex(entries, loaded.config, knownPaths);
   const diagnostics = validateWorkspace(index);
 
   let ids = 0;

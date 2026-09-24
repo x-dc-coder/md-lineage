@@ -30,7 +30,7 @@ import {
   type WorkspaceDiagnostic,
 } from '@mdlineage/validator';
 import type { ExpandedPath } from './paths.js';
-import { expandMarkdownPaths } from './paths.js';
+import { expandMarkdownPaths, knownNonMarkdownPaths } from './paths.js';
 import { repositoryRoot } from './git.js';
 
 /**
@@ -88,6 +88,7 @@ function workspaceDiagnostics(
   files: readonly ExpandedPath[],
   configFile: string | undefined,
   root: string,
+  exclude: readonly string[],
 ): { diagnostics: readonly WorkspaceDiagnostic[]; configError: string | null } {
   const { config, diagnostics: configDiagnostics } = loadConfig(configFile, configFile ? undefined : root);
   const indexFiles = new Map<string, string>();
@@ -99,7 +100,10 @@ function workspaceDiagnostics(
       // command reports it, and the baseline only records diagnosable debt.
     }
   }
-  const index = createWorkspaceIndex(indexFiles, config);
+  // Known paths use the index keys' vocabulary (root-relative), so a link to a
+  // real non-Markdown file is not misread as MDL401.
+  const knownPaths = new Set(knownNonMarkdownPaths(root, { exclude }));
+  const index = createWorkspaceIndex(indexFiles, config, knownPaths);
   return {
     diagnostics: validateWorkspace(index),
     configError: configDiagnostics.find((d) => d.severity === 'error')?.message ?? null,
@@ -166,7 +170,7 @@ export function updateBaseline(root: string, options: BaselineOptions = {}): Bas
 } {
   const anchor = baselineRoot(root);
   const files = workspaceFiles(anchor, options.exclude ?? []);
-  const { diagnostics } = workspaceDiagnostics(files, options.configFile, anchor);
+  const { diagnostics } = workspaceDiagnostics(files, options.configFile, anchor, options.exclude ?? []);
   const previous = loadBaseline(anchor);
   let prior: Baseline | null;
   let error: string | null = null;
@@ -347,7 +351,7 @@ export interface VerifyResult {
 export function verifyBaseline(root: string, options: BaselineOptions = {}): VerifyResult {
   const anchor = baselineRoot(root);
   const files = workspaceFiles(anchor, options.exclude ?? []);
-  const { diagnostics, configError } = workspaceDiagnostics(files, options.configFile, anchor);
+  const { diagnostics, configError } = workspaceDiagnostics(files, options.configFile, anchor, options.exclude ?? []);
   if (configError) {
     return { exit: 1, lines: [`mdlineage: ${configError}`] };
   }
