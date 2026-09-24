@@ -1399,3 +1399,117 @@ describe('mdlineage fix', () => {
     }
   });
 });
+
+describe('config validate', () => {
+  it('exits 0 on a valid config and prints the source path', () => {
+    const out = runCli(['config', 'validate'], repoRoot);
+    assert.equal(out.status, 0);
+    assert.ok(out.stdout.includes(`config OK (`), 'the OK line names the config');
+    assert.ok(out.stdout.includes('mdlineage.config.yaml'));
+  });
+
+  it('exits 1 with MDL900 on a config that fails the schema', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': 'files:\n  eol: lf\n  not_a_config_key: true\n',
+      'a.md': doc('docs.a'),
+    });
+    try {
+      const out = runCli(['config', 'validate'], ws.root);
+      assert.equal(out.status, 1);
+      assert.ok(out.stderr.includes('MDL900'), 'the config diagnostic is reported');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('exits 1 with MDL900 on an explicitly named missing config', () => {
+    const ws = scratchWorkspace({ 'a.md': doc('docs.a') });
+    try {
+      const out = runCli(['config', 'validate', '--config', 'nope.yaml'], ws.root);
+      assert.equal(out.status, 1);
+      assert.ok(out.stderr.includes('MDL900'));
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('exits 0 when no config file exists in the tree', () => {
+    const ws = scratchWorkspace({ 'a.md': doc('docs.a') });
+    try {
+      const out = runCli(['config', 'validate'], ws.root);
+      assert.equal(out.status, 0);
+      assert.ok(out.stdout.includes('no config file found'));
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('--format json prints the { source, diagnostics } shape', () => {
+    const out = runCli(['config', 'validate', '--format', 'json'], repoRoot);
+    assert.equal(out.status, 0);
+    const parsed = JSON.parse(out.stdout) as { source: string | null; diagnostics: unknown[] };
+    assert.equal(typeof parsed.source, 'string');
+    assert.ok(Array.isArray(parsed.diagnostics));
+    assert.equal(parsed.diagnostics.length, 0);
+  });
+
+  it('rejects an unknown subcommand with exit 2', () => {
+    const out = runCli(['config', 'nonsense'], repoRoot);
+    assert.equal(out.status, 2);
+    assert.ok(out.stderr.includes('unknown config command'));
+  });
+});
+
+describe('index rebuild', () => {
+  it('exits 0 on a clean tree and prints stats, writing nothing', () => {
+    const ws = scratchWorkspace({
+      'a.md': doc('docs.a', '  relations:\n    - type: related_to\n      target: docs.b\n      reason: r\n'),
+      'b.md': doc('docs.b'),
+    });
+    try {
+      const out = runCli(['index', 'rebuild'], ws.root);
+      assert.equal(out.status, 0);
+      assert.ok(out.stdout.includes('index rebuilt'));
+      assert.ok(out.stdout.includes('2 files'));
+      assert.ok(out.stdout.includes('2 ids'));
+      assert.ok(out.stdout.includes('1 relation'));
+      assert.ok(out.stdout.includes('not persisted'));
+      assert.equal(existsSync(join(ws.root, '.mdlineage')), false, 'no cache directory is created');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('exits 1 and reports MDL301 on a tree with duplicate ids', () => {
+    const ws = scratchWorkspace({ 'a.md': doc('docs.a'), 'b.md': doc('docs.a') });
+    try {
+      const out = runCli(['index', 'rebuild'], ws.root);
+      assert.equal(out.status, 1);
+      assert.ok(out.stdout.includes('MDL301'));
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('--format json prints stats and diagnostics', () => {
+    const ws = scratchWorkspace({ 'a.md': doc('docs.a'), 'b.md': doc('docs.a') });
+    try {
+      const out = runCli(['index', 'rebuild', '--format', 'json'], ws.root);
+      assert.equal(out.status, 1);
+      const parsed = JSON.parse(out.stdout) as {
+        stats: { files: number; ids: number; relations: number; anchors: number };
+        diagnostics: Array<{ code: string }>;
+      };
+      assert.deepEqual(parsed.stats, { files: 2, ids: 1, relations: 0, anchors: 2 });
+      assert.ok(parsed.diagnostics.some((d) => d.code === 'MDL301'));
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('rejects an unknown subcommand with exit 2', () => {
+    const out = runCli(['index', 'nonsense'], repoRoot);
+    assert.equal(out.status, 2);
+    assert.ok(out.stderr.includes('unknown index command'));
+  });
+});

@@ -40,6 +40,8 @@ import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verify
 import { startStdio } from '@mdlineage/language-server';
 import { runInit } from './init.js';
 import { runFix } from './fix.js';
+import { configValidate } from './config-validate.js';
+import { indexRebuild } from './index-rebuild.js';
 import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
@@ -56,6 +58,11 @@ Usage:
   mdlineage suggest <file>          Propose metadata for a document (no writes)
   mdlineage fix [paths...]          Apply safe fixes (missing fields, duplicate
                                     relations, line endings; default: dry run)
+  mdlineage config validate         Check the config file loads and passes the
+                                    schema (no config found: defaults, exit 0)
+  mdlineage index rebuild           Rebuild the workspace index in memory and
+                                    report stats and index-level diagnostics
+                                    (nothing is persisted)
 
 Options:
   --format <text|json|sarif>  Output shape (default: text)
@@ -185,6 +192,12 @@ export async function main(argv: string[]): Promise<number> {
   }
   if (command === 'fix') {
     return runFix(parsed.positionals.slice(1), parsed.values);
+  }
+  if (command === 'config') {
+    return runConfigCommand(parsed.positionals.slice(1), parsed.values);
+  }
+  if (command === 'index') {
+    return runIndexCommand(parsed.positionals.slice(1), parsed.values);
   }
   if (command !== 'check') {
     process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
@@ -349,6 +362,54 @@ function emit(result: CheckResult, options: RunOptions): number {
   if (output.length > 0) process.stdout.write(`${output}\n`);
   return exitCodeFor(result, { frail: options.frail });
 }
+/** `mdlineage config validate`: the config file check (§10.1). */
+function runConfigCommand(args: string[], values: ParsedArgs['values']): number {
+  const sub = args[0];
+  if (values.help) {
+    process.stdout.write(`${HELP}\n`);
+    return 0;
+  }
+  if (sub !== 'validate') {
+    process.stderr.write(`mdlineage: unknown config command '${sub ?? '(none)'}' (expected validate)\n\n${HELP}\n`);
+    return 2;
+  }
+  const format = parseFormat(values.format);
+  if (format === null || format === 'sarif') {
+    process.stderr.write(`mdlineage: config validate --format must be text or json\n`);
+    return 2;
+  }
+  const stray = args.slice(1).filter((arg) => arg.startsWith('-'));
+  if (stray.length > 0) {
+    process.stderr.write(`mdlineage: unknown option: ${stray.join(', ')}\n\n${HELP}\n`);
+    return 2;
+  }
+  return configValidate({ format, configFile: values.config, cwd: processCwd() });
+}
+
+/** `mdlineage index rebuild`: fresh in-memory index plus a report (§10.1). */
+function runIndexCommand(args: string[], values: ParsedArgs['values']): number {
+  const sub = args[0];
+  if (values.help) {
+    process.stdout.write(`${HELP}\n`);
+    return 0;
+  }
+  if (sub !== 'rebuild') {
+    process.stderr.write(`mdlineage: unknown index command '${sub ?? '(none)'}' (expected rebuild)\n\n${HELP}\n`);
+    return 2;
+  }
+  const format = parseFormat(values.format);
+  if (format === null || format === 'sarif') {
+    process.stderr.write(`mdlineage: index rebuild --format must be text or json\n`);
+    return 2;
+  }
+  const stray = args.slice(1).filter((arg) => arg.startsWith('-'));
+  if (stray.length > 0) {
+    process.stderr.write(`mdlineage: unknown option: ${stray.join(', ')}\n\n${HELP}\n`);
+    return 2;
+  }
+  return indexRebuild({ format, configFile: values.config, cwd: processCwd(), exclude: values.exclude ?? [] });
+}
+
 /** `mdlineage server`: the dedicated LSP (§10.1). Only stdio exists in M3-a. */
 function runServer(args: string[], values: ParsedArgs['values']): number {
   if (values.help) {
