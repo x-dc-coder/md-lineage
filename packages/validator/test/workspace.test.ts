@@ -407,6 +407,67 @@ describe('MDL401 — markdown link targets', () => {
     assert.equal(byCode(all, 'MDL401').length, 0);
     assert.equal(index.linkReferrersOf('README.md').length, 1);
   });
+  it('resolves a bare sibling link against the linking document (no ./ prefix)', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [b](b.md) and [dot](./b.md).'))],
+      ['docs/b.md', doc('docs.b')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0, 'bare and ./-prefixed siblings resolve alike');
+    // Referrers are unique documents, so both links collapse to one entry.
+    assert.equal(index.linkReferrersOf('docs/b.md').length, 1);
+  });
+
+  it('still reports a bare sibling link whose target is missing', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [nope](nope.md).'))],
+      ['docs/b.md', doc('docs.b')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    const d401 = byCode(all, 'MDL401');
+    assert.equal(d401.length, 1, 'one bad link yields exactly one diagnostic');
+    assert.equal(d401[0]!.data?.path, 'nope.md');
+    assert.equal(byCode(all, 'MDL402').length, 0, 'no duplicate fragment diagnostic for an unresolvable path');
+  });
+
+  it('resolves ../ parent links from a deeply nested document', () => {
+    const files = new Map<string, string>([
+      ['docs/sub/a.md', doc('docs.a', relations(), body('Up to [b](../b.md).'))],
+      ['docs/b.md', doc('docs.b')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0);
+    assert.equal(index.linkReferrersOf('docs/b.md').length, 1);
+  });
+
+  it('prefers the document-relative target when it collides with a root-relative one', () => {
+    // `docs/a.md` links `docs/b.md`; both `docs/docs/b.md` (relative to the
+    // linking document) and `docs/b.md` (exact key) exist. Document-relative
+    // wins — GitHub and mainstream renderers resolve relative to the document.
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [b](docs/b.md).'))],
+      ['docs/b.md', doc('docs.root-rel')],
+      ['docs/docs/b.md', doc('docs.doc-rel', relations(), '# Doc relative\n')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0);
+    assert.equal(index.linkReferrersOf('docs/docs/b.md').length, 1, 'document-relative target wins');
+    assert.equal(index.linkReferrersOf('docs/b.md').length, 0, 'the root-relative namesake is not picked');
+  });
+
+  it('keeps exact-match behavior for absolute paths', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [x](/docs/b.md).'))],
+      ['docs/b.md', doc('docs.b')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 1, 'absolute paths keep exact-match-only semantics');
+  });
 });
 
 describe('MDL402 — link fragments', () => {

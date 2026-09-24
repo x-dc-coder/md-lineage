@@ -368,14 +368,13 @@ class IndexImpl implements WorkspaceIndex {
   }
 
   /**
-   * Paths a raw link destination RESOLVES to: the normalized form when the
-   * destination is relative (that is the path an editor or a browser would
-   * open), the raw destination otherwise. Used to key the raw destination map.
+   * Paths a raw link destination RESOLVES to — the same resolution MDL401 uses
+   * (`resolveLinkPath`), so the reverse map and the diagnostic agree. Falls
+   * back to the raw destination when nothing resolves, keying the raw map.
    */
   private linkResolvesTo(linkPath: string, from: DocPath): readonly DocPath[] {
-    if (!linkPath.startsWith('.')) return [linkPath];
-    const normalized = normalizeRelative(from, linkPath);
-    return normalized === linkPath ? [linkPath] : [normalized];
+    const resolved = resolveLinkPath(this, from, linkPath);
+    return resolved.length > 0 ? [...resolved] : [linkPath];
   }
 
   /**
@@ -663,10 +662,12 @@ function mapEntries(
  * parent resolves correctly.
  */
 export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, linkPath: string): readonly DocPath[] {
-  if (index.entryOf(linkPath)) return [linkPath];
-  if (!linkPath.startsWith('.')) return EMPTY_PATHS;
-  const normalized = normalizeRelative(fromPath, linkPath);
+  // Priority when both resolve: document-relative wins (GitHub and mainstream
+  // Markdown renderer semantics); exact root-relative match is the fallback.
+  // Absolute paths keep exact-match-only behavior.
+  const normalized = linkPath.startsWith('/') ? linkPath : normalizeRelative(fromPath, linkPath);
   if (normalized !== linkPath && index.entryOf(normalized)) return [normalized];
+  if (index.entryOf(linkPath)) return [linkPath];
   return EMPTY_PATHS;
 }
 
