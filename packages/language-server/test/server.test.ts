@@ -1092,9 +1092,11 @@ describe('references', () => {
         position: at(3, 10),
         context: { includeDeclaration: true },
       });
-      const locations = response.result as Array<{ uri: string; range: { start: { line: number } } }>;
+      const locations = response.result as Array<{ uri: string; range: { start: { line: number; character: number } } }>;
       assert.ok(locations.some((l) => l.uri === uri(h, 'docs/target.md')), 'the declaration is included');
-      assert.ok(locations.some((l) => l.uri === uri(h, 'docs/referrer.md')), 'the referrer is listed');
+      const ref = locations.find((l) => l.uri === uri(h, 'docs/referrer.md'));
+      assert.ok(ref, 'the referrer is listed');
+      assert.equal(ref.range.start.character, 6, 'references land on 1-based column 7 (0-based character 6)');
     } finally {
       h.close();
     }
@@ -1122,6 +1124,7 @@ describe('rename', () => {
       assert.ok(own && own[0]!.newText === 'docs.target2', 'the declaration is rewritten');
       assert.ok(ref && ref[0]!.newText === 'docs.target2', 'the referrer target value is rewritten');
       assert.equal(ref![0]!.range.start.line, 8, 'the edit lands on the target value line');
+      assert.equal(ref![0]!.range.start.character, 6, 'the edit lands on 1-based column 7 (0-based character 6)');
     } finally {
       h.close();
     }
@@ -1681,7 +1684,7 @@ describe('the CLI and the server agree on one tree (§14.4)', () => {
       const cli = (reports.get('docs/anchor.md') ?? []).find((d) => d.code === 'MDL305');
       assert.ok(cli, 'the CLI reports the cycle on its anchor');
       assert.equal(cli!.line, 8, 'the relation declaration is on 1-based line 8');
-      assert.equal(cli!.column, 3);
+      assert.equal(cli!.column, 7);
 
       await initialize(h);
       const u = uri(h, 'docs/anchor.md');
@@ -1690,7 +1693,7 @@ describe('the CLI and the server agree on one tree (§14.4)', () => {
       const cycle = lsp.find((d) => d.code === 'MDL305');
       assert.ok(cycle, 'the server reports the cycle on its anchor');
       // LSP line/character are 0-based, the CLI's line/column 1-based: the same
-      // position is line 7/char 2 here and line 8/col 3 there.
+      // position is line 7/char 6 here and line 8/col 7 there.
       assert.equal(cycle!.range.start.line, cli!.line - 1);
       assert.equal(cycle!.range.start.character, cli!.column - 1);
       assert.equal(cycle!.range.end.line, cli!.endLine - 1);

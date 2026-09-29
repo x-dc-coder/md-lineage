@@ -111,3 +111,35 @@ export function repositoryRoot(cwd: string): string | null {
   if (result.error || result.status !== 0) return null;
   return result.stdout.trim() || null;
 }
+
+/**
+ * Check which paths are ignored by git using `git check-ignore -z --stdin`.
+ * Returns a Set of ignored absolute paths (or exact relative strings as passed).
+ * Degrades gracefully to an empty Set if git fails or cwd is not in a git repository.
+ */
+export function gitCheckIgnored(gitRoot: string, paths: readonly string[]): Set<string> {
+  const ignored = new Set<string>();
+  if (paths.length === 0) return ignored;
+
+  try {
+    const input = paths.join('\0') + '\0';
+    const result = spawnSync('git', ['check-ignore', '-z', '--stdin'], {
+      cwd: gitRoot,
+      input,
+      encoding: 'utf8',
+      windowsHide: true,
+      maxBuffer: 64 * 1024 * 1024,
+    });
+
+    if (result.status === 0 && result.stdout) {
+      const tokens = result.stdout.split('\0');
+      for (const token of tokens) {
+        if (token) ignored.add(token);
+      }
+    }
+  } catch {
+    // Graceful degradation
+  }
+
+  return ignored;
+}

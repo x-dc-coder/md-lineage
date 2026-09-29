@@ -112,6 +112,13 @@
       "description": "Relations of a type configured with cycles: forbidden close a loop in the derived graph."
     },
     {
+      "code": "MDL306",
+      "layer": "workspace-semantic",
+      "severity": "warning",
+      "message": "Active document references deprecated target",
+      "description": "An active document references a deprecated target via a blocking relation. Only covers relation types in lifecycle.blockingRelations (defaults to depends_on, implements, refines; deliberately excludes supersedes)."
+    },
+    {
       "code": "MDL401",
       "layer": "link",
       "severity": "warning",
@@ -126,6 +133,13 @@
       "description": "An evidence anchor or link fragment resolves against another document and does not match a heading there. Cross-file anchor resolution is checked at the workspace layer."
     },
     {
+      "code": "MDL501",
+      "layer": "policy-layout",
+      "severity": "warning",
+      "message": "Layout rule violation",
+      "description": "Document metadata violates repository layout policy (forbidStatus, require.kind, require.authority)."
+    },
+    {
       "code": "MDL601",
       "layer": "eol-scan",
       "severity": "warning",
@@ -138,6 +152,13 @@
       "severity": "warning",
       "message": "Line ending does not match repository policy",
       "description": "The file's line endings differ from the configured policy (default LF). Fix is a safe whole-buffer normalization that preserves AST and front matter semantics."
+    },
+    {
+      "code": "MDL801",
+      "layer": "policy-layout",
+      "severity": "warning",
+      "message": "Document is stale",
+      "description": "Document has not been updated within the configured staleAfterDays threshold. Only active when staleAfterDays is a positive integer. Clock priority: updated_at → created_at → Git batch fallback."
     }
   ],
   "reservedRanges": [
@@ -145,13 +166,19 @@
       "range": "MDL5xx",
       "layer": "policy-layout",
       "severity": null,
-      "description": "RESERVED for repository policy, including directory layout (P4). Codes are not yet assigned: the layout DSL is blocked on the five open questions in docs/dir-conventions.md, which also decides whether layout codes live here or in a dedicated MDL7xx block."
+      "description": "RESERVED for repository policy, including directory layout (P4). MDL501 is assigned for layout rule violations."
     },
     {
       "range": "MDL7xx",
       "layer": "reserved",
       "severity": null,
       "description": "Fallback block for layout codes should MDL5xx crowd out other policy rules (docs/dir-conventions.md open question 6). No codes assigned."
+    },
+    {
+      "range": "MDL8xx",
+      "layer": "policy-layout",
+      "severity": null,
+      "description": "RESERVED for lifecycle and staleness policy. MDL801 is assigned for document staleness."
     },
     {
       "range": "MDL9xx",

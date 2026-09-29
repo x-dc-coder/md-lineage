@@ -24,6 +24,7 @@ export type DiagnosticLayer =
   | 'document-semantic'
   | 'workspace-semantic'
   | 'link'
+  | 'policy-layout'
   | 'config';
 
 export type Severity = 'error' | 'warning' | 'information' | 'hint';
@@ -77,10 +78,13 @@ const DEFAULT_SEVERITIES: Readonly<Record<string, Severity>> = {
   MDL303: 'error',
   MDL304: 'warning',
   MDL305: 'error',
+  MDL306: 'warning',
   MDL401: 'warning',
   MDL402: 'warning',
+  MDL501: 'warning',
   MDL601: 'warning',
   MDL602: 'warning',
+  MDL801: 'warning',
 };
 
 const LAYERS: Readonly<Record<string, DiagnosticLayer>> = {
@@ -99,10 +103,13 @@ const LAYERS: Readonly<Record<string, DiagnosticLayer>> = {
   MDL303: 'workspace-semantic',
   MDL304: 'workspace-semantic',
   MDL305: 'workspace-semantic',
+  MDL306: 'workspace-semantic',
   MDL401: 'link',
   MDL402: 'link',
+  MDL501: 'policy-layout',
   MDL601: 'eol-scan',
   MDL602: 'eol-scan',
+  MDL801: 'policy-layout',
 };
 
 /** Layer of a registered code; undefined for unregistered codes. */

@@ -21,13 +21,14 @@ import {
   loadConfig,
   createWorkspaceIndex,
   validateWorkspace,
+  gitClocksForIndex,
   diffAgainstBaseline,
   type Config,
   type Diagnostic,
   type WorkspaceDiagnostic,
 } from '@mdlineage/validator';
 import type { ExpandedPath } from './paths.js';
-import { knownNonMarkdownPaths } from './paths.js';
+import { knownWorkspacePaths } from './paths.js';
 import { baselineRoot, loadBaseline, type LoadedBaseline } from './baseline.js';
 
 /** A report entry per file: the JSON output unit. */
@@ -104,6 +105,8 @@ export interface CheckResult {
 export interface CheckOptions {
   format?: 'text' | 'json' | 'sarif';
   configFile?: string;
+  /** Preloaded config to avoid duplicate loading. */
+  preloadedConfig?: { config: Config; diagnostics: any[]; path: string | null };
   /** Absolute directory the baseline file is searched from. */
   baselineRoot?: string;
   /** True to ignore a committed baseline and report every diagnostic. */
@@ -154,12 +157,13 @@ export function exitCodeFor(result: CheckResult, options: { frail?: boolean } = 
  * already ran the single-document pipeline per file, so nothing is parsed
  * twice in this mode.
  */
-export function checkFiles(
+export async function checkFiles(
   files: readonly ExpandedPath[],
   options: CheckOptions,
   others: readonly ExpandedPath[] = [],
-): CheckResult {
-  const { config, diagnostics: configDiagnostics, path: configPath } = loadRunConfig(options.configFile, options.cwd);
+): Promise<CheckResult> {
+  const { config, diagnostics: configDiagnostics, path: configPath } =
+    options.preloadedConfig ?? loadRunConfig(options.configFile, options.cwd);
   const incremental = options.incremental ?? true;
   const reports: FileReport[] = [];
   const unreadable: UnreadableFile[] = [];
@@ -187,11 +191,15 @@ export function checkFiles(
     // Known paths use the same reporting vocabulary as the index keys (`asGiven`):
     // the scan's non-Markdown files plus the cwd-wide list, so MDL401 judges
     // existence in the workspace rather than in the run's arguments.
+    // knownWorkspacePaths also includes sibling markdown files and directories.
     const knownPaths = new Set(others.map((file) => file.asGiven));
-    for (const path of knownNonMarkdownPaths(options.cwd, { exclude: options.exclude })) knownPaths.add(path);
+    for (const path of knownWorkspacePaths(options.cwd, { config, exclude: options.exclude })) {
+      knownPaths.add(path);
+    }
     const index = createWorkspaceIndex(indexFiles, config, knownPaths);
+    const gitClocks = await gitClocksForIndex(index, options.cwd);
     const baseline = loadRunBaseline(options);
-    const all = validateWorkspace(index);
+    const all = validateWorkspace(index, { gitClocks });
     // The validator owns the suppression predicate; the CLI only counts what it
     // dropped, so the two cannot drift on what "covered" means. Matching runs in
     // the baseline's own (repo-relative) path vocabulary, then the diagnostics

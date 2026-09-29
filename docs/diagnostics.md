@@ -25,13 +25,13 @@ invisible when you validate one file alone.
 
 | Entry point | Layer | Codes it can report |
 | --- | --- | --- |
-| remark plugin (`remark-lint-mdlineage`) | single document | MDL001–MDL003, MDL101–MDL104, MDL201–MDL203, MDL601, MDL602 |
-| `mdlineage check <file> --no-incremental` | single document | MDL001–MDL003, MDL101–MDL104, MDL201–MDL203, MDL601, MDL602 |
-| MCP `validate_document` | single document | MDL001–MDL003, MDL101–MDL104, MDL201–MDL203, MDL601, MDL602 |
-| `mdlineage check .` (full tree) | workspace | all of the above **plus** MDL301–MDL305, MDL401, MDL402 |
-| `mdlineage index rebuild` | workspace | all of the above plus MDL301–MDL305, MDL401, MDL402 |
-| Language server (LSP) | workspace | all of the above plus MDL301–MDL305, MDL401, MDL402 |
-| MCP `validate_repository` | workspace | all of the above plus MDL301–MDL305, MDL401, MDL402 |
+| remark plugin (`remark-lint-mdlineage`) | single document | MDL001–MDL003, MDL101–MDL104, MDL201–MDL203, MDL501, MDL601, MDL602, MDL801 |
+| `mdlineage check <file> --no-incremental` | single document | MDL001–MDL003, MDL101–MDL104, MDL201–MDL203, MDL501, MDL601, MDL602, MDL801 |
+| MCP `validate_document` | single document | MDL001–MDL003, MDL101–MDL104, MDL201–MDL203, MDL501, MDL601, MDL602, MDL801 |
+| `mdlineage check .` (full tree) | workspace | all of the above **plus** MDL301–MDL306, MDL401, MDL402, MDL801 (Git clock) |
+| `mdlineage index rebuild` | workspace | all of the above plus MDL301–MDL306, MDL401, MDL402, MDL801 (Git clock) |
+| Language server (LSP) | workspace | all of the above plus MDL301–MDL306, MDL401, MDL402, MDL801 (Git clock) |
+| MCP `validate_repository` | workspace | all of the above plus MDL301–MDL306, MDL401, MDL402, MDL801 (Git clock) |
 
 Two caveats verified by running the CLI:
 
@@ -63,10 +63,13 @@ Two caveats verified by running the CLI:
 | MDL303 | error | workspace | — | Ambiguous relation target (reserved; unreachable today) |
 | MDL304 | warning | workspace | no | Reason-required relation has an empty reason |
 | MDL305 | error | workspace | no | Relations of a forbidden-cycle type form a loop |
+| MDL306 | warning | workspace | no | Active document references deprecated target |
 | MDL401 | warning | link | no | Markdown link target path does not exist |
 | MDL402 | warning | link | no | Cross-document anchor does not exist |
+| MDL501 | warning | policy | no | Layout rule violation |
 | MDL601 | warning | EOL scan | yes | Mixed line endings within one file |
 | MDL602 | warning | EOL scan | yes | Line endings do not match repository policy |
+| MDL801 | warning | policy | no | Document has not been updated within staleAfterDays |
 
 ## MDL0xx — front matter structure
 
@@ -210,7 +213,7 @@ A relation target resolves to zero known document ids. Fix the target id —
 `mdlineage fix` will not invent or rewrite ids.
 
 ```text
-docs/a.md:8:3 MDL302 error Relation target does not exist: docs.b
+docs/a.md:8:7 MDL302 error Relation target does not exist: docs.b
 ```
 
 ### MDL303 — Ambiguous relation target (error, reserved)
@@ -230,7 +233,7 @@ reason-required relation with a blank value is this warning. Fix: write the
 reason.
 
 ```text
-docs/b.md:10:3 MDL304 warning Relation contradicts → docs.a has an empty reason
+docs/b.md:10:7 MDL304 warning Relation contradicts → docs.a has an empty reason
 ```
 
 ### MDL305 — Relation forms a forbidden cycle (error)
@@ -242,7 +245,19 @@ component, so a two-document loop produces one diagnostic, not two. Fix:
 remove or redirect one edge in the loop.
 
 ```text
-docs/a.md:8:3 MDL305 error refines cycle among 2 documents: docs.a → docs.b → docs.a
+docs/a.md:8:7 MDL305 error refines cycle among 2 documents: docs.a → docs.b → docs.a
+```
+
+### MDL306 — Active document references deprecated target (warning)
+
+An active document (`status` in `lifecycle.activeStatuses`, default `['active']`)
+references a deprecated target (`status` in `lifecycle.deprecatedStatuses`, default `['deprecated']`)
+via a blocking relation (`lifecycle.blockingRelations`, defaults to `depends_on`, `implements`, `refines`).
+`supersedes` is deliberately excluded by default to allow documenting migrations. Fix: update the
+target document's status, or replace the dependency.
+
+```text
+docs/a.md:8:7 MDL306 warning Active document references deprecated target: depends_on → docs.b (status deprecated)
 ```
 
 ## MDL4xx — links and anchors
@@ -292,20 +307,43 @@ The file's line endings differ from the configured policy (default LF).
 docs/eol.md:1:1 MDL602 warning Line ending does not match repository policy (expected LF)
 ```
 
+## MDL5xx — policy and layout conventions
+
+### MDL501 — Layout rule violation (warning)
+
+Document metadata violates repository layout policy (`forbidStatus`, `require.kind`, `require.authority`).
+Fix: adjust document metadata or update layout configuration rules.
+
+```text
+docs/a.md:1:1 MDL501 warning Layout rule violation: status 'draft' is forbidden for 'docs/**'
+```
+
+## MDL8xx — lifecycle and freshness
+
+### MDL801 — Document is stale (warning)
+
+The document has not been updated within the configured `lifecycle.staleAfterDays`
+threshold (only active when `staleAfterDays > 0`). The validator checks authored
+metadata timestamps first (`updated_at` prioritized over `created_at`); if neither is
+present, the workspace layer falls back to Git commit timestamps via `git log`.
+`reviewed_at` is never used as a clock. Fix: review and update the document, updating
+`updated_at` (or committing changes in git), or configure `lifecycle.exempt` for archived paths.
+
+```text
+docs/a.md:7:15 MDL801 warning Document not updated in over 180 days (updated_at 2020-01-01T00:00:00Z)
+```
+
 ## Reserved ranges
 
-These ranges appear in the registry with no codes assigned. Do not invent
-numbers in them; the lists below are exhaustive as of registry version 1.
+These ranges appear in the registry with codes assigned or reserved:
 
-- **MDL5xx** — repository policy, including directory layout (P4). Codes not
-  assigned: the layout DSL is blocked on the open questions in
-  [dir-conventions.md](dir-conventions.md), which will also decide whether
-  layout codes live here or in a dedicated MDL7xx block.
+- **MDL5xx** — repository policy, including directory layout. MDL501 is assigned for layout rule violations.
 - **MDL6xx (extension)** — extended line-ending hygiene. Encoding checks (BOM,
   non-UTF-8) are a named later addition to this block, with codes still
   pending.
 - **MDL7xx** — fallback block for layout codes should MDL5xx crowd out other
   policy rules. No codes assigned.
+- **MDL8xx** — lifecycle and freshness policy. MDL801 is assigned for document staleness.
 - **MDL9xx** — configuration and internal state: unparseable
   `mdlineage.config.yaml`, a `schemaFile` that does not exist or fails to
   load, or validator-internal errors. Registry says codes are pending with

@@ -27,10 +27,32 @@ import { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
 import { parseMarkdownSync } from './parse-markdown.js';
 import { validateAgainstSchema } from './schema-validator.js';
 import { relationOffsetsOf, validateDocumentSemantics } from './document-validator.js';
+import { layoutDiagnostics, layoutExemptsFrontmatter } from './layout.js';
+import { freshnessDiagnostics } from './freshness.js';
 import type { ValidateInput, ValidateResult } from './index-types.js';
 
-export type { Config, ConfigLoadResult, ConfigDiagnostic, EolPolicy } from './config.js';
-export { defaultConfig, loadConfig, defaultConfigIsValid, resolveSeverity, vocabularyAllows } from './config.js';
+export type { Config, ConfigLoadResult, ConfigDiagnostic, EolPolicy, LayoutRule, LayoutRequire, LifecycleConfig } from './config.js';
+export { defaultConfig, loadConfig, defaultConfigIsValid, filesIncludeSpecified, resolveSeverity, vocabularyAllows } from './config.js';
+export { layoutDiagnostics, layoutExemptsFrontmatter, type LayoutDiagnosticsParams } from './layout.js';
+export {
+  MS_PER_DAY,
+  parseAuthoredInstant,
+  isOlderThan,
+  lifecycleExempts,
+  freshnessDiagnostics,
+  type FreshnessDiagnosticsInput,
+} from './freshness.js';
+export {
+  BUILTIN_EXCLUDE_GLOBS,
+  compileRules,
+  excludedByRules,
+  isPulledBackByNegation,
+  isLiteralPath,
+  normalizeFilterPath,
+  PathFilter,
+  type CompiledRule,
+  type PathFilterOptions,
+} from './path-filter.js';
 export type { Diagnostic, DiagnosticLayer, Severity, Position, Range } from './diagnostic.js';
 export { layerOf, severityOf, sortByRange } from './diagnostic.js';
 export { buildLineMap, positionAt, rangeAt } from './source-map.js';
@@ -51,6 +73,9 @@ export {
   resolveLinkPath,
   evidenceResolves,
 } from './workspace-index.js';
+export { scanWorkspaceUniverse, type WorkspaceUniverse } from './workspace-scan.js';
+export type { GitClock, GitClockOptions, SpawnGitFn, SpawnGitResult } from './git-clock.js';
+export { gitClocksForIndex, clocksFromLog } from './git-clock.js';
 export type { WorkspaceDiagnostic, ValidateWorkspaceOptions } from './workspace-validator.js';
 export { validateWorkspace } from './workspace-validator.js';
 export type { Baseline, BaselineParseResult, BaselineSuppressed } from './baseline.js';
@@ -147,8 +172,10 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
   // 3. Missing-metadata check (suppressed entirely when metadata.required is
   // false, and when MDL001/MDL002 already explained why no metadata could be
   // extracted — one diagnostic per problem, per the registry's stability note).
+  // Also suppressed when layout rule specifies `require.frontmatter: optional`.
   const frontmatterBroken = diagnostics.some((d) => d.code === 'MDL001' || d.code === 'MDL002');
-  if (mdlineage === null && config.metadata.required && !frontmatterBroken) {
+  const layoutExempt = input.path ? layoutExemptsFrontmatter(input.path, config.layout) : false;
+  if (mdlineage === null && config.metadata.required && !frontmatterBroken && !layoutExempt) {
     const where = mdlineageRange ?? { start: 0, end: lineEnd(lineMap, 0) };
     diagnostics.push(
       mdl('MDL003', `Missing mdlineage metadata: no '${metadataKey}' key`, where, lineMap, config),
@@ -183,8 +210,41 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
   // 6. Document semantics.
   if (mdlineage !== null && boundary) {
     const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
-    const offsets = relationOffsetsOf(parsed.parsed?.doc ?? null, mdlineageRange?.start ?? boundary.rawStart);
+    const offsets = relationOffsetsOf(
+      parsed.parsed?.doc ?? null,
+      boundary.rawStart,
+      mdlineageRange?.start ?? boundary.rawStart,
+    );
     diagnostics.push(...validateDocumentSemantics(mdlineage, tree, lineMap, boundary.rawStart, offsets, config, bodyStart));
+  }
+
+  // 7. Layout policy (MDL501).
+  if (input.path && config.layout && config.layout.length > 0) {
+    diagnostics.push(
+      ...layoutDiagnostics({
+        path: input.path,
+        mdlineage,
+        lineMap,
+        range: mdlineageRange ?? { start: 0, end: lineEnd(lineMap, 0) },
+        config,
+      }),
+    );
+  }
+
+  // 8. Lifecycle freshness policy (MDL801 authored clock).
+  if (boundary && mdlineage !== null) {
+    const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
+    diagnostics.push(
+      ...freshnessDiagnostics({
+        path: input.path,
+        mdlineage,
+        doc: parsed.parsed?.doc ?? null,
+        rawStart: boundary.rawStart,
+        lineMap,
+        config,
+        nowMs: input.nowMs,
+      }),
+    );
   }
 
   diagnostics.sort(byOffset);

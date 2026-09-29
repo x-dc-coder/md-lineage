@@ -10,6 +10,8 @@ export interface ValidateInput {
   content: string;
   /** Configuration; the built-in defaults are used when omitted. */
   config?: Config;
+  /** Injected clock for freshness checks. */
+  nowMs?: number;
 }
 
 export interface ValidateResult {

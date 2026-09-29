@@ -87,6 +87,9 @@ export interface DocEntry {
   readonly path: DocPath;
   /** Null when the document has no usable mdlineage id (MDL102 already reports it). */
   readonly id: string | null;
+  readonly status: string | null;
+  readonly updatedAt: string | null;
+  readonly createdAt: string | null;
   readonly relations: readonly RelationEntry[];
   readonly links: readonly LinkEntry[];
   /** Heading anchors of the document (GFM slugs); empty when the body did not parse. */
@@ -102,6 +105,9 @@ export interface DocEntry {
   readonly rawStart: number;
   /** Absolute offset of the `id` value, for MDL301; falls back to `rawStart`. */
   readonly idOffset: number;
+  readonly statusOffset: number;
+  readonly updatedAtOffset: number | null;
+  readonly createdAtOffset: number | null;
   readonly lineMap: ReturnType<typeof buildLineMap>;
   /** Single-document diagnostics, sorted by offset (may be empty). */
   readonly diagnostics: readonly Diagnostic[];
@@ -524,10 +530,29 @@ function parseDocument(path: DocPath, content: string, config: Config): DocEntry
   }
 
   const id = typeof mdlineage?.['id'] === 'string' ? (mdlineage['id'] as string) : null;
+  const status = typeof mdlineage?.['status'] === 'string' ? (mdlineage['status'] as string) : null;
+
+  const ISO_DATE_REGEX = /^\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})?)?$/;
+  const rawUpdated = mdlineage?.['updated_at'];
+  const updatedAt = typeof rawUpdated === 'string' && ISO_DATE_REGEX.test(rawUpdated) ? rawUpdated : null;
+  const rawCreated = mdlineage?.['created_at'];
+  const createdAt = typeof rawCreated === 'string' && ISO_DATE_REGEX.test(rawCreated) ? rawCreated : null;
+
+  const statusAt = mdlineageFieldOffset(doc, 'status');
+  const statusOffset = statusAt === null ? rawStart : rawStart + statusAt;
+
+  const updatedAtAt = mdlineageFieldOffset(doc, 'updated_at');
+  const updatedAtOffset = updatedAtAt === null ? null : rawStart + updatedAtAt;
+
+  const createdAtAt = mdlineageFieldOffset(doc, 'created_at');
+  const createdAtOffset = createdAtAt === null ? null : rawStart + createdAtAt;
 
   return {
     path,
     id,
+    status,
+    updatedAt,
+    createdAt,
     relations: extractRelations(mdlineage),
     links: extractLinks(result.tree, result.bodyStart),
     rawStart,
@@ -535,6 +560,9 @@ function parseDocument(path: DocPath, content: string, config: Config): DocEntry
     headings: result.tree ? collectHeadingTexts(result.tree) : EMPTY_HEADINGS,
     offsets,
     idOffset: idFieldOffset(doc, config.metadata.key, rawStart),
+    statusOffset,
+    updatedAtOffset,
+    createdAtOffset,
     lineMap,
     diagnostics: result.diagnostics,
   };
@@ -621,16 +649,25 @@ function extractLinks(tree: Root | null, bodyStart: number): LinkEntry[] {
   return out;
 }
 
+function decodeLinkPath(path: string): string {
+  if (!path.includes('%')) return path;
+  try {
+    return decodeURI(path);
+  } catch {
+    return path;
+  }
+}
+
 /** Split `a.md#anchor` into its two independent parts. */
 function splitLink(url: string, offset: number): LinkEntry {
   const hash = url.indexOf('#');
-  if (hash < 0) return { url, offset, path: url, anchor: '' };
+  if (hash < 0) return { url, offset, path: decodeLinkPath(url), anchor: '' };
   if (hash === 0) {
     // A same-page anchor: the link layer's domain is the link PATH, and an
     // in-page anchor is MDL201's concern, so it is kept out of MDL401's set.
     return { url, offset, path: '', anchor: url.slice(1) };
   }
-  return { url, offset, path: url.slice(0, hash), anchor: url.slice(hash + 1) };
+  return { url, offset, path: decodeLinkPath(url.slice(0, hash)), anchor: url.slice(hash + 1) };
 }
 
 /** GFM reference-label matching is case-insensitive and collapses whitespace. */
@@ -667,13 +704,6 @@ function mapEntries(
 /**
  * Resolve a link destination against the index.
  *
- * Exact match first (the common case). A `./`- or `../`-relative destination
- * is normalized against the linking document so a tree that points at a
- * sibling or a parent stays correct.
- */
-/**
- * Resolve a link destination against the index.
- *
  * Exact match first (the common case). A `./`- or `../`-relative destination is
  * normalized against the linking document, so a tree pointing at a sibling or a
  * parent resolves correctly.
@@ -682,14 +712,20 @@ export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, linkPa
   // Priority when both resolve: document-relative wins (GitHub and mainstream
   // Markdown renderer semantics); exact root-relative match is the fallback.
   // Absolute paths keep exact-match-only behavior.
-  const normalized = linkPath.startsWith('/') ? linkPath : normalizeRelative(fromPath, linkPath);
-  if (normalized !== linkPath && index.entryOf(normalized)) return [normalized];
-  if (index.entryOf(linkPath)) return [linkPath];
+  const trimmed = linkPath.endsWith('/') && linkPath.length > 1 ? linkPath.slice(0, -1) : linkPath;
+  const normalized = trimmed.startsWith('/') ? trimmed : normalizeRelative(fromPath, trimmed);
+  if (normalized !== trimmed && index.entryOf(normalized)) return [normalized];
+  if (index.entryOf(trimmed)) return [trimmed];
   // Not a document, but the caller may have scanned it as a workspace file
   // (a schema, a config …): it exists, so MDL401 must not report it. No entry
   // comes back, which keeps MDL402 from judging fragments of non-Markdown.
-  if (normalized !== linkPath && index.knowsPath(normalized)) return [normalized];
-  if (index.knowsPath(linkPath)) return [linkPath];
+  if (normalized !== trimmed && index.knowsPath(normalized)) return [normalized];
+  if (index.knowsPath(trimmed)) return [trimmed];
+  if (linkPath !== trimmed) {
+    const normalizedRaw = linkPath.startsWith('/') ? linkPath : normalizeRelative(fromPath, linkPath);
+    if (normalizedRaw !== linkPath && index.knowsPath(normalizedRaw)) return [normalizedRaw];
+    if (index.knowsPath(linkPath)) return [linkPath];
+  }
   return EMPTY_PATHS;
 }
 

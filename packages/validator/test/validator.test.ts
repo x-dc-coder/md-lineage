@@ -17,7 +17,14 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { validateDocumentSync, defaultConfig, defaultConfigIsValid } from '../src/index.js';
+import {
+  validateDocumentSync,
+  defaultConfig,
+  defaultConfigIsValid,
+  parseAuthoredInstant,
+  isOlderThan,
+  MS_PER_DAY,
+} from '../src/index.js';
 import { loadConfig } from '../src/config.js';
 import { validateDocumentSemantics, relationOffsetsOf } from '../src/document-validator.js';
 import { buildLineMap } from '../src/source-map.js';
@@ -701,5 +708,466 @@ describe('config extends', () => {
     const r = loadConfigFrom(cfg);
     assert.deepEqual(r.diagnostics, []);
     assert.equal(r.config.metadata.required, true, 'the whole chain must be assembled');
+  });
+});
+
+describe('Phase 2 — schema temporal metadata, layout, schemaFile, files.exclude', () => {
+  let dir: string;
+  beforeEach(() => {
+    dir = mkdtempSync(resolve(tmpdir(), 'mdlineage-phase2-'));
+  });
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const write = (name: string, text: string) => {
+    writeFileSync(resolve(dir, name), text);
+    return resolve(dir, name);
+  };
+
+  it('files.exclude merges user exclude rules after builtin exclude globs', () => {
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nfiles:\n  exclude:\n    - custom/**\n');
+    const r = loadConfigFrom(cfg);
+    assert.deepEqual(r.diagnostics, []);
+    assert.equal(r.config.files.exclude.includes('custom/**'), true);
+    assert.equal(r.config.files.exclude.includes('**/node_modules/**'), true);
+    assert.equal(r.config.files.exclude.indexOf('**/node_modules/**') < r.config.files.exclude.indexOf('custom/**'), true);
+  });
+
+  it('created_at, updated_at, reviewed_at accept valid ISO/RFC timestamps and dates', () => {
+    const validTimestamps = [
+      '2026-09-29',
+      '2026-09-29T12:30:00Z',
+      '2026-09-29 12:30:00+08:00',
+      '2026-09-29T12:30:00.123456Z',
+    ];
+    for (const ts of validTimestamps) {
+      const content = [
+        '---',
+        'mdlineage:',
+        '  schema: 1',
+        '  id: test.doc',
+        '  kind: policy',
+        '  status: active',
+        `  created_at: "${ts}"`,
+        `  updated_at: "${ts}"`,
+        `  reviewed_at: "${ts}"`,
+        '---',
+        '# Heading',
+      ].join('\n');
+      const r = validateDocumentSync({ content });
+      assert.equal(r.diagnostics.some((d) => d.code === 'MDL103'), false, `valid timestamp ${ts} should not report MDL103`);
+    }
+  });
+
+  it('created_at, updated_at, reviewed_at reject invalid timestamps with MDL103', () => {
+    const invalidTimestamps = ['2026/09/29', 'yesterday', 'invalid-date'];
+    for (const ts of invalidTimestamps) {
+      const content = [
+        '---',
+        'mdlineage:',
+        '  schema: 1',
+        '  id: test.doc',
+        '  kind: policy',
+        '  status: active',
+        `  created_at: "${ts}"`,
+        '---',
+        '# Heading',
+      ].join('\n');
+      const r = validateDocumentSync({ content });
+      assert.equal(r.diagnostics.some((d) => d.code === 'MDL103'), true, `invalid timestamp ${ts} must report MDL103`);
+    }
+  });
+
+  it('layout: require.frontmatter: optional exempts MDL003 on matching documents', () => {
+    const config = {
+      ...defaultConfig(),
+      layout: [
+        {
+          match: 'notes/**',
+          require: { frontmatter: 'optional' as const },
+        },
+      ],
+    };
+    const r1 = validateDocumentSync({ content: '# Note\n', path: 'notes/meeting.md', config });
+    assert.equal(r1.diagnostics.some((d) => d.code === 'MDL003'), false, 'frontmatter: optional exempts MDL003');
+
+    const r2 = validateDocumentSync({ content: '# Other\n', path: 'docs/arch.md', config });
+    assert.equal(r2.diagnostics.some((d) => d.code === 'MDL003'), true, 'unexempted path reports MDL003');
+  });
+
+  it('layout: forbidStatus triggers MDL501 when document status is forbidden', () => {
+    const config = {
+      ...defaultConfig(),
+      layout: [
+        {
+          match: 'rfc/**',
+          forbidStatus: ['deprecated', 'draft'],
+        },
+      ],
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: rfc.auth',
+      '  kind: policy',
+      '  status: deprecated',
+      '---',
+      '# RFC Auth',
+    ].join('\n');
+    const r = validateDocumentSync({ content, path: 'rfc/auth.md', config });
+    const d = r.diagnostics.find((x) => x.code === 'MDL501');
+    assert.ok(d, 'forbidStatus must produce MDL501');
+    assert.equal(d.layer, 'policy-layout');
+    assert.equal(d.severity, 'warning');
+    assert.match(d.message, /Layout rule violation: status 'deprecated' is forbidden/);
+  });
+
+  it('layout: require.kind and require.authority trigger MDL501 on mismatch', () => {
+    const config = {
+      ...defaultConfig(),
+      layout: [
+        {
+          match: 'specs/**',
+          require: {
+            kind: ['architecture', 'policy'],
+            authority: 'canonical',
+          },
+        },
+      ],
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: specs.api',
+      '  kind: guide',
+      '  status: active',
+      '  authority: supporting',
+      '---',
+      '# API Spec',
+    ].join('\n');
+    const r = validateDocumentSync({ content, path: 'specs/api.md', config });
+    const mdl501s = r.diagnostics.filter((d) => d.code === 'MDL501');
+    assert.equal(mdl501s.length, 2, 'both kind mismatch and authority mismatch report MDL501');
+  });
+
+  it('schemaFile: dynamically loads custom schema and allows custom fields without MDL104', () => {
+    const customSchemaPath = write('custom-schema.json', JSON.stringify({
+      properties: {
+        owner: { type: 'string' },
+      },
+    }));
+    const config = {
+      ...defaultConfig(),
+      schemaFile: customSchemaPath,
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: team.service',
+      '  kind: policy',
+      '  status: active',
+      '  owner: infra-team',
+      '---',
+      '# Service',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config });
+    assert.equal(r.diagnostics.some((d) => d.code === 'MDL104'), false, 'custom property allowed by schemaFile');
+  });
+
+  it('schemaFile: reports MDL102 when custom schema required field is missing', () => {
+    const customSchemaPath = write('custom-schema-req.json', JSON.stringify({
+      properties: {
+        owner: { type: 'string' },
+      },
+      required: ['owner'],
+    }));
+    const config = {
+      ...defaultConfig(),
+      schemaFile: customSchemaPath,
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: team.service',
+      '  kind: policy',
+      '  status: active',
+      '---',
+      '# Service',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config });
+    const missingOwner = r.diagnostics.find((d) => d.code === 'MDL102' && d.message.includes('owner'));
+    assert.ok(missingOwner, 'missing required field owner must report MDL102');
+  });
+
+  it('schemaFile: missing or invalid schema file reports MDL900 error diagnostic', () => {
+    const configMissing = {
+      ...defaultConfig(),
+      schemaFile: resolve(dir, 'nonexistent-schema.json'),
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: team.service',
+      '  kind: policy',
+      '  status: active',
+      '---',
+      '# Service',
+    ].join('\n');
+    const r1 = validateDocumentSync({ content, config: configMissing });
+    assert.ok(r1.diagnostics.some((d) => d.code === 'MDL900' && d.severity === 'error'));
+
+    const badSchemaPath = write('broken.json', '{ bad json');
+    const configBroken = {
+      ...defaultConfig(),
+      schemaFile: badSchemaPath,
+    };
+    const r2 = validateDocumentSync({ content, config: configBroken });
+    assert.ok(r2.diagnostics.some((d) => d.code === 'MDL900' && d.severity === 'error'));
+  });
+});
+
+describe('MDL801 — authored clock matrix', () => {
+  const baseNow = parseAuthoredInstant('2026-09-30T00:00:00Z')!;
+
+  it('staleAfterDays: 0 disables MDL801', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        ...defaultConfig().lifecycle,
+        staleAfterDays: 0,
+      },
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: doc.old',
+      '  kind: policy',
+      '  status: active',
+      '  updated_at: "2000-01-01"',
+      '---',
+      '# Old',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config, nowMs: baseNow });
+    assert.equal(r.diagnostics.some((d) => d.code === 'MDL801'), false);
+  });
+
+  it('staleAfterDays: 180 triggers MDL801 with source === "updated_at"', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        ...defaultConfig().lifecycle,
+        staleAfterDays: 180,
+      },
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: doc.stale',
+      '  kind: policy',
+      '  status: active',
+      '  updated_at: "2026-01-01T00:00:00Z"',
+      '---',
+      '# Stale',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config, nowMs: baseNow });
+    const d801 = r.diagnostics.find((d) => d.code === 'MDL801');
+    assert.ok(d801, 'expected MDL801 diagnostic');
+    assert.equal(d801.severity, 'warning');
+    assert.equal(d801.layer, 'policy-layout');
+    assert.equal(d801.data?.source, 'updated_at');
+    assert.equal(d801.data?.staleAfterDays, 180);
+    assert.match(d801.message, /Document not updated in over 180 days \(updated_at 2026-01-01T00:00:00Z\)/);
+  });
+
+  it('updated_at takes priority over created_at', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        ...defaultConfig().lifecycle,
+        staleAfterDays: 180,
+      },
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: doc.stale',
+      '  kind: policy',
+      '  status: active',
+      '  created_at: "2020-01-01"',
+      '  updated_at: "2025-01-01T00:00:00Z"',
+      '---',
+      '# Stale',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config, nowMs: baseNow });
+    const d801 = r.diagnostics.find((d) => d.code === 'MDL801');
+    assert.ok(d801);
+    assert.equal(d801.data?.source, 'updated_at');
+    assert.match(d801.message, /updated_at 2025-01-01T00:00:00Z/);
+  });
+
+  it('only created_at triggers MDL801 with source === "created_at"', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        ...defaultConfig().lifecycle,
+        staleAfterDays: 180,
+      },
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: doc.stale',
+      '  kind: policy',
+      '  status: active',
+      '  created_at: "2020-01-01"',
+      '---',
+      '# Stale',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config, nowMs: baseNow });
+    const d801 = r.diagnostics.find((d) => d.code === 'MDL801');
+    assert.ok(d801);
+    assert.equal(d801.data?.source, 'created_at');
+    assert.match(d801.message, /created_at 2020-01-01/);
+  });
+
+  it('invalid updated_at + valid created_at falls back to created_at and reports exactly one MDL801', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        ...defaultConfig().lifecycle,
+        staleAfterDays: 180,
+      },
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: doc.stale',
+      '  kind: policy',
+      '  status: active',
+      '  created_at: "2020-01-01"',
+      '  updated_at: "invalid-timestamp"',
+      '---',
+      '# Stale',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config, nowMs: baseNow });
+    const d801List = r.diagnostics.filter((d) => d.code === 'MDL801');
+    assert.equal(d801List.length, 1, 'must emit exactly one MDL801');
+    assert.equal(d801List[0]!.data?.source, 'created_at');
+    assert.ok(r.diagnostics.some((d) => d.code === 'MDL103'), 'invalid updated_at still reports MDL103');
+  });
+
+  it('reviewed_at is never a clock', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        ...defaultConfig().lifecycle,
+        staleAfterDays: 180,
+      },
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: doc.reviewed',
+      '  kind: policy',
+      '  status: active',
+      '  reviewed_at: "2020-01-01"',
+      '---',
+      '# Reviewed',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config, nowMs: baseNow });
+    assert.equal(r.diagnostics.some((d) => d.code === 'MDL801'), false, 'reviewed_at alone produces no MDL801');
+  });
+
+  it('status filtering: non-staleStatuses do not report MDL801', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        ...defaultConfig().lifecycle,
+        staleAfterDays: 180,
+        staleStatuses: ['active'],
+      },
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: doc.draft',
+      '  kind: policy',
+      '  status: draft',
+      '  updated_at: "2020-01-01"',
+      '---',
+      '# Draft',
+    ].join('\n');
+    const r = validateDocumentSync({ content, config, nowMs: baseNow });
+    assert.equal(r.diagnostics.some((d) => d.code === 'MDL801'), false);
+  });
+
+  it('exempt: exempts archive paths but unexempted docs still report', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        ...defaultConfig().lifecycle,
+        staleAfterDays: 180,
+        exempt: ['archive/**', 'docs/archive/**'],
+      },
+    };
+    const content = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  id: doc.old',
+      '  kind: policy',
+      '  status: active',
+      '  updated_at: "2020-01-01"',
+      '---',
+      '# Old',
+    ].join('\n');
+
+    const rArchived = validateDocumentSync({ content, path: 'archive/rfc.md', config, nowMs: baseNow });
+    assert.equal(rArchived.diagnostics.some((d) => d.code === 'MDL801'), false, 'archive/rfc.md should be exempt');
+
+    const rDocs = validateDocumentSync({ content, path: 'docs/rfc.md', config, nowMs: baseNow });
+    assert.equal(rDocs.diagnostics.some((d) => d.code === 'MDL801'), true, 'docs/rfc.md should report MDL801');
+  });
+
+  it('isOlderThan strictly greater boundary check', () => {
+    const instant = 1_000_000;
+    const exactly10DaysLater = instant + 10 * MS_PER_DAY;
+    assert.equal(isOlderThan(instant, exactly10DaysLater, 10), false, 'equality is not strictly older');
+    assert.equal(isOlderThan(instant, exactly10DaysLater + 1, 10), true, 'instant + 1ms is older');
+    assert.equal(isOlderThan(instant, exactly10DaysLater - 1, 10), false, 'instant - 1ms is not older');
+  });
+
+  it('timezone conversion assertions independent of process timezone', () => {
+    const utc = parseAuthoredInstant('2026-09-29T12:00:00Z');
+    const plus8 = parseAuthoredInstant('2026-09-29 20:00:00+08:00');
+    const minus5 = parseAuthoredInstant('2026-09-29 07:00:00-05:00');
+    assert.ok(utc !== null && plus8 !== null && minus5 !== null);
+    assert.equal(plus8, utc, '+08:00 must convert to equivalent UTC instant');
+    assert.equal(minus5, utc, '-05:00 must convert to equivalent UTC instant');
+
+    // Calendar roll-over
+    const leapDay = parseAuthoredInstant('2024-02-29');
+    const feb28 = parseAuthoredInstant('2024-02-28');
+    assert.equal(leapDay! - feb28!, MS_PER_DAY);
+  });
+
+  it('D6: calendar rollover locking test — 2020-02-30 parses to same millisecond instant as 2020-03-01', () => {
+    const rolled = parseAuthoredInstant('2020-02-30');
+    const marchFirst = parseAuthoredInstant('2020-03-01');
+    assert.ok(rolled !== null && marchFirst !== null);
+    assert.equal(rolled, marchFirst, '2020-02-30 rolls over to 2020-03-01 in setUTCFullYear');
   });
 });

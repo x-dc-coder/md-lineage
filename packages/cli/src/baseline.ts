@@ -20,6 +20,7 @@ import {
   loadConfig,
   createWorkspaceIndex,
   validateWorkspace,
+  gitClocksForIndex,
   parseBaseline,
   writeBaseline,
   pruneBaseline,
@@ -30,7 +31,8 @@ import {
   type WorkspaceDiagnostic,
 } from '@mdlineage/validator';
 import type { ExpandedPath } from './paths.js';
-import { expandMarkdownPaths, knownNonMarkdownPaths } from './paths.js';
+import { expandMarkdownPaths, knownWorkspacePaths } from './paths.js';
+import type { Config } from '@mdlineage/validator';
 import { repositoryRoot } from './git.js';
 
 /**
@@ -84,13 +86,15 @@ export function loadBaseline(root: string): LoadedBaseline | null {
 }
 
 /** Diagnostics for the whole workspace, with the index that produced them. */
-function workspaceDiagnostics(
+async function workspaceDiagnostics(
   files: readonly ExpandedPath[],
   configFile: string | undefined,
   root: string,
   exclude: readonly string[],
-): { diagnostics: readonly WorkspaceDiagnostic[]; configError: string | null } {
-  const { config, diagnostics: configDiagnostics } = loadConfig(configFile, configFile ? undefined : root);
+  preloadedConfig?: Config,
+): Promise<{ diagnostics: readonly WorkspaceDiagnostic[]; configError: string | null }> {
+  const loaded = preloadedConfig ? { config: preloadedConfig, diagnostics: [] } : loadConfig(configFile, configFile ? undefined : root);
+  const { config, diagnostics: configDiagnostics } = loaded;
   const indexFiles = new Map<string, string>();
   for (const file of files) {
     try {
@@ -101,18 +105,19 @@ function workspaceDiagnostics(
     }
   }
   // Known paths use the index keys' vocabulary (root-relative), so a link to a
-  // real non-Markdown file is not misread as MDL401.
-  const knownPaths = new Set(knownNonMarkdownPaths(root, { exclude }));
+  // real non-Markdown file or directory is not misread as MDL401.
+  const knownPaths = new Set(knownWorkspacePaths(root, { config, exclude }));
   const index = createWorkspaceIndex(indexFiles, config, knownPaths);
+  const gitClocks = await gitClocksForIndex(index, root);
   return {
-    diagnostics: validateWorkspace(index),
+    diagnostics: validateWorkspace(index, { gitClocks }),
     configError: configDiagnostics.find((d) => d.severity === 'error')?.message ?? null,
   };
 }
 
 /** Expand the workspace for a baseline action: everything Markdown under root. */
-function workspaceFiles(root: string, exclude: readonly string[]): ExpandedPath[] {
-  return expandMarkdownPaths([root], root, { exclude }).files;
+function workspaceFiles(root: string, exclude: readonly string[], config?: Config): ExpandedPath[] {
+  return expandMarkdownPaths([root], root, { config, exclude }).files;
 }
 
 export interface BaselineOptions {
@@ -165,12 +170,13 @@ export interface BaselineChangeSet {
  * would drop every accepted entry the file carried, so the run reports it and
  * refuses unless `--force` says the loss is intended.
  */
-export function updateBaseline(root: string, options: BaselineOptions = {}): BaselineChangeSet & {
+export async function updateBaseline(root: string, options: BaselineOptions = {}): Promise<BaselineChangeSet & {
   error: string | null;
-} {
+}> {
   const anchor = baselineRoot(root);
-  const files = workspaceFiles(anchor, options.exclude ?? []);
-  const { diagnostics } = workspaceDiagnostics(files, options.configFile, anchor, options.exclude ?? []);
+  const { config } = loadConfig(options.configFile, options.configFile ? undefined : anchor);
+  const files = workspaceFiles(anchor, options.exclude ?? [], config);
+  const { diagnostics } = await workspaceDiagnostics(files, options.configFile, anchor, options.exclude ?? [], config);
   const previous = loadBaseline(anchor);
   let prior: Baseline | null;
   let error: string | null = null;
@@ -319,7 +325,10 @@ export function showBaseline(root: string): { lines: string[]; error: string | n
     ...(loaded.baseline.generatedAt ? [`generated at ${loaded.baseline.generatedAt}`] : []),
     ...(codes.length === 0
       ? ['no accepted violations']
-      : [...codes.map(([code, paths]) => `  ${code} ${paths.length}`), `total ${total} accepted violation${total === 1 ? '' : 's'}`]),
+      : [
+          ...codes.map(([code, paths]) => `  ${code} ${paths.length}`),
+          `total ${total} accepted violation${total === 1 ? '' : 's'} (${total} (code, path) rules)`,
+        ]),
   ];
   return { lines, error: null };
 }
@@ -348,10 +357,11 @@ export interface VerifyResult {
   lines: string[];
 }
 
-export function verifyBaseline(root: string, options: BaselineOptions = {}): VerifyResult {
+export async function verifyBaseline(root: string, options: BaselineOptions = {}): Promise<VerifyResult> {
   const anchor = baselineRoot(root);
-  const files = workspaceFiles(anchor, options.exclude ?? []);
-  const { diagnostics, configError } = workspaceDiagnostics(files, options.configFile, anchor, options.exclude ?? []);
+  const { config } = loadConfig(options.configFile, options.configFile ? undefined : anchor);
+  const files = workspaceFiles(anchor, options.exclude ?? [], config);
+  const { diagnostics, configError } = await workspaceDiagnostics(files, options.configFile, anchor, options.exclude ?? [], config);
   if (configError) {
     return { exit: 1, lines: [`mdlineage: ${configError}`] };
   }
@@ -375,9 +385,12 @@ export function verifyBaseline(root: string, options: BaselineOptions = {}): Ver
   const baseline = loaded.baseline;
   const { reported, suppressed } = diffAgainstBaseline(diagnostics, baseline);
   const stale = staleEntries(baseline, diagnostics);
+  const ruleCount = countEntries(baseline);
 
   if (reported.length === 0 && stale.length === 0) {
-    const lines = [`mdlineage: baseline verified, ${suppressed.length} accepted violation${suppressed.length === 1 ? '' : 's'}`];
+    const lines = [
+      `mdlineage: baseline verified, ${suppressed.length} accepted violation${suppressed.length === 1 ? '' : 's'} (${ruleCount} (code, path) rules, ${suppressed.length} occurrences)`,
+    ];
     return { exit: 0, lines };
   }
 

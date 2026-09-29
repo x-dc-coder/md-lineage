@@ -59,11 +59,12 @@ are read from `schemas/mdlineage-config.schema.json` and from `defaultConfig()` 
 | `metadata` | object | see below | Front matter extraction behaviour | MDL003, MDL104 |
 | `vocabulary` | object | see below | Legal `kind` / `status` / `authority` values | MDL103 |
 | `relations` | object | see below | Per-relation-type strictness | MDL103, MDL304, MDL305 |
+| `lifecycle` | object | see below | Deprecated reference blocking and staleness | MDL306, MDL801 |
 | `diagnostics` | object | see below | Severity override per code | every overridable code |
 | `eolPolicy` | `lf` \| `crlf` \| `cr` | `lf` | Line-ending policy | MDL601, MDL602 |
-| `schemaFile` | string | unset | Path to a repository-specific metadata schema | intended MDL103/MDL104; **not yet wired** |
+| `schemaFile` | string | unset | Path to a repository-specific metadata schema | MDL102, MDL104, MDL900 |
 | `extends` | array of strings | unset | Organization presets to inherit | MDL900 |
-| `layout` | array | unset | Reserved for directory conventions | none (not implemented) |
+| `layout` | array | unset | Directory layout conventions | MDL501 |
 | `policies` | object | unset | Reserved for repository policy rules | none (not implemented) |
 
 Unknown top-level keys are rejected: the config schema sets
@@ -77,12 +78,10 @@ config error rather than a silently ignored block.
 | `include` | array of globs | `['**/*.md']` | Candidate files for the workspace scan |
 | `exclude` | array of globs | `['node_modules/**', 'dist/**', 'vendor/**']` | Directories and paths to skip |
 
-The language server and the MCP server consult `files.exclude` as a directory
-prefix check when they scan the workspace. The **CLI does not read this key**: it
-always skips `node_modules/**` and `**/dist/**` and takes extra patterns from the
-repeatable `--exclude <pattern>` flag. Verified: a config with `exclude: []` still
-had its `vendor/` Markdown checked by `mdlineage check`. Treat the CLI flag as the
-reliable per-run exclusion and `files.exclude` as the server-side default.
+The CLI, the language server and the MCP server all respect `files.exclude`.
+The built-in exclusions (`node_modules/**`, `dist/**`, `vendor/**`) are always
+prepended; setting `exclude: []` does not remove built-in exclusions. The CLI's
+repeatable `--exclude <pattern>` flag appends further patterns to the exclusion list.
 
 ### `metadata` — Front Matter extraction
 
@@ -171,24 +170,51 @@ yet (verified: promoting `contradicts` to `severity: error` while keeping
 `reasonRequired: true` still reported MDL304 as a warning). Use the
 `diagnostics` block to change severities.
 
+### `lifecycle` — deprecated reference blocking and staleness
+
+Governs whether active documents may reference deprecated documents (MDL306)
+and whether document ages exceed repository thresholds (MDL801).
+
+| Key | Type | Default | Meaning | Diagnostics |
+|---|---|---|---|---|
+| `activeStatuses` | string[] | `['active']` | Statuses considered active; empty array disables MDL306 | MDL306 |
+| `deprecatedStatuses` | string[] | `['deprecated']` | Statuses considered deprecated targets | MDL306 |
+| `blockingRelations` | string[] | `['depends_on', 'implements', 'refines']` | Relation types that trigger MDL306 | MDL306 |
+| `staleAfterDays` | integer | `0` | Max age in days before staleness warning; `0` disables MDL801 | MDL801 |
+| `staleStatuses` | string[] | `['active']` | Document statuses subject to staleness check | MDL801 |
+| `exempt` | string[] | `[]` | Path globs exempt from staleness checks | none |
+
+- **Why `supersedes` is omitted from `blockingRelations` by default**:
+  A new active document replacing a deprecated document naturally points at it
+  via `supersedes`. Blocking `supersedes` would prevent documenting migrations.
+- **Two-tier clock for MDL801**:
+  When `staleAfterDays > 0`, the validator first inspects authored metadata
+  timestamps: `updated_at` takes precedence, followed by `created_at`. If both
+  are absent, the workspace layer falls back to Git commit timestamps batched via
+  `git log`. `reviewed_at` is never used as a clock.
+- **Exemptions**:
+  Paths matching `exempt` globs (for example `exempt: ['archive/**', 'docs/archive/**']`)
+  are never reported as stale.
+
 ### `diagnostics` — severity overrides
 
 Keys are diagnostic codes, values are `error`, `warning`, `information` or
-`hint`. Only the 19 codes registered in
+`hint`. Only the 22 codes registered in
 [`../schemas/diagnostic-codes.json`](../schemas/diagnostic-codes.json) may carry
 an override:
 
 ```text
 MDL001  MDL002  MDL003  MDL101  MDL102  MDL103  MDL104
 MDL201  MDL202  MDL203  MDL301  MDL302  MDL303  MDL304
-MDL305  MDL401  MDL402  MDL601  MDL602
+MDL305  MDL306  MDL401  MDL402  MDL501  MDL601  MDL602
+MDL801
 ```
 
-An unknown code such as `MDL999`, or a code from a reserved range (MDL5xx,
-MDL7xx, MDL9xx), is rejected with MDL900. Built-in defaults are the registry
+An unknown code such as `MDL999`, or a code from a reserved range (MDL7xx,
+MDL9xx), is rejected with MDL900. Built-in defaults are the registry
 defaults — errors for parse, schema, duplicate-id, unresolved-target and
-forbidden-relation failures; warnings for missing reasons, anchors and line
-endings.
+forbidden-relation failures; warnings for missing reasons, anchors, deprecated
+references, staleness, layout violations, and line endings.
 
 Escalating a warning to an error changes the exit code of `mdlineage check`
 (0 → 1) without touching any document. Verified end to end in a scratch
@@ -233,18 +259,14 @@ The policy also decides MDL601 (mixed endings inside one file) and MDL602
 See [line-ending-management.md](line-ending-management.md) for the incident
 behind this feature.
 
-### `schemaFile` — declared, not yet wired
+### `schemaFile` — custom repository schema
 
-`schemaFile` names a copy of `mdlineage-v1.schema.json` extended with
-repository-specific fields, which is the supported way to change the `id` /
-`target` / `evidence` patterns (there is deliberately no `identity.pattern` key).
-The key is schema-validated (it must be a string; `schemaFile: 42` is an MDL900),
-but the document validator always compiles the built-in v1 schema: the loader
-never reads the referenced file. Verified — a config pointing at a non-existent
-path reported `config OK` and exited 0, and a local copy adding an `owner` field
-still produced `MDL104 Unknown mdlineage field: owner`. Treat the key as reserved
-for a later milestone; until then, extra fields inside the `mdlineage` object are
-MDL104 regardless of `schemaFile`.
+`schemaFile` names a custom JSON Schema file extending `mdlineage-v1.schema.json`
+with repository-specific fields. When configured, custom fields declared in the
+schema are allowed without triggering MDL104, and schema constraints (such as
+required fields, format patterns, or enums) are validated, reporting MDL102 or
+MDL103 accordingly. If the referenced file does not exist or fails to compile,
+an MDL900 configuration error is reported.
 
 ### `extends` — organization presets
 
@@ -283,17 +305,17 @@ mdlineage: config OK (.../mdlineage.config.yaml)
 A missing preset is an MDL900 (`Config file not found: ./missing.yaml (extended
 from ...)`) and the run falls back to the defaults.
 
-### `layout` and `policies` — reserved, not implemented
+### `layout` — directory conventions (MDL501)
 
-Both keys exist in the schema and both are **declared only**. `layout` is reserved
-for P4 (directory conventions): the schema carries the skeleton (`match` glob,
-`require.kind` / `require.authority` / `require.frontmatter`, `forbidStatus`), but
-no layout check is implemented, no diagnostic is produced, and the final shape is
-blocked on the open questions in [dir-conventions.md](dir-conventions.md) — the
-codes will land in the reserved MDL5xx block. `policies` is reserved for P4/M4 and
-is intentionally an empty object, because its DSL is still design-in-progress and
-must not be validated prematurely. Writing either key today has no effect on
-validation.
+`layout` defines path-based structural policies. Each rule specifies a `match`
+glob and constraints:
+
+- `forbidStatus`: list of status values forbidden under matching paths.
+- `require.kind`: required kind(s) for matching documents.
+- `require.authority`: required authority value(s).
+- `require.frontmatter`: `required` (default) or `optional` (exempts MDL003).
+
+Violations produce `MDL501` warnings. `policies` remains reserved for future DSL extensions.
 
 ## Front Matter reference
 
@@ -365,8 +387,9 @@ replace-not-merge rule and re-declare every switch the type should keep.
 
 ### Skip a directory
 
-`check` does not read `files.exclude`, so use the repeatable CLI flag; the config
-key is what the language server and MCP workspace scans consult:
+`files.exclude` in `mdlineage.config.yaml` is respected by `mdlineage check`,
+the language server, and the MCP server. The repeatable `--exclude` CLI flag can be
+used to add per-run exclusions:
 
 ```bash
 mdlineage check . --exclude 'generated/**'
@@ -375,7 +398,7 @@ mdlineage check . --exclude 'generated/**'
 ```yaml
 configVersion: 1
 files:
-  exclude: ['node_modules/**', 'dist/**', 'vendor/**', 'generated/**']
+  exclude: ['generated/**']
 ```
 
 ### Adopt an organization preset

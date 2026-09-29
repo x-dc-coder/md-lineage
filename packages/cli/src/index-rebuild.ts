@@ -13,8 +13,9 @@ import {
   loadConfig,
   createWorkspaceIndex,
   validateWorkspace,
+  gitClocksForIndex,
 } from '@mdlineage/validator';
-import { expandMarkdownPaths, knownNonMarkdownPaths } from './paths.js';
+import { expandMarkdownPaths, knownWorkspacePaths } from './paths.js';
 
 export interface IndexRebuildOptions {
   format: 'text' | 'json';
@@ -24,13 +25,16 @@ export interface IndexRebuildOptions {
 }
 
 /** Build the index fresh and report; 0 clean, 1 on error-severity diagnostics. */
-export function indexRebuild(options: IndexRebuildOptions): number {
+export async function indexRebuild(options: IndexRebuildOptions): Promise<number> {
   const loaded = loadConfig(options.configFile, options.configFile ? undefined : options.cwd);
   for (const diag of loaded.diagnostics) {
     process.stderr.write(`mdlineage: ${diag.code} ${diag.severity} ${diag.message}\n`);
   }
 
-  const { files, missed } = expandMarkdownPaths(['.'], options.cwd, { exclude: options.exclude });
+  const { files, missed } = expandMarkdownPaths(['.'], options.cwd, {
+    config: loaded.config,
+    exclude: options.exclude,
+  });
   if (missed.length > 0) {
     for (const path of missed) process.stderr.write(`mdlineage: no such file or pattern: ${path}\n`);
     return 2;
@@ -48,10 +52,11 @@ export function indexRebuild(options: IndexRebuildOptions): number {
   }
 
   // Known paths use the entries' vocabulary (cwd-relative), so a link to a real
-  // non-Markdown file is not misread as MDL401.
-  const knownPaths = new Set(knownNonMarkdownPaths(options.cwd, { exclude: options.exclude }));
+  // non-Markdown file or directory is not misread as MDL401.
+  const knownPaths = new Set(knownWorkspacePaths(options.cwd, { config: loaded.config, exclude: options.exclude }));
   const index = createWorkspaceIndex(entries, loaded.config, knownPaths);
-  const diagnostics = validateWorkspace(index);
+  const gitClocks = await gitClocksForIndex(index, options.cwd);
+  const diagnostics = validateWorkspace(index, { gitClocks });
 
   let ids = 0;
   for (const _ of index.ids()) ids++;

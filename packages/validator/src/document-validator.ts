@@ -48,7 +48,7 @@ export function validateDocumentSemantics(
   mdlineage: Record<string, unknown> | null,
   tree: Root | null,
   lineMap: LineMap,
-  rawStart: number,
+  _rawStart: number,
   relationOffsets: RelationOffsets,
   config: Config,
   bodyStart = 0,
@@ -72,7 +72,7 @@ export function validateDocumentSemantics(
     const anchor = rel.evidence.slice(1);
     if (anchors !== null && !anchors.has(anchor)) {
       const where = relationOffsets.relationField(i, 'evidence') ?? relationOffsets.relationStart(i) ?? relationOffsets.mdlineageStart;
-      out.push(mdl201(anchor, where, lineMap, rawStart, config));
+      out.push(mdl201(anchor, where, lineMap, config));
     }
   }
 
@@ -89,7 +89,7 @@ export function validateDocumentSemantics(
       continue;
     }
     const where = relationOffsets.relationStart(i) ?? relationOffsets.mdlineageStart;
-    out.push(mdl202(rel, where, lineMap, rawStart, config));
+    out.push(mdl202(rel, where, lineMap, config));
   }
 
   // MDL203: same-page links. The predicate is the document's own anchor set,
@@ -248,12 +248,12 @@ function mdl203(link: SamePageLink, bodyStart: number, lineMap: LineMap, config:
   };
 }
 
-function mdl201(anchor: string, where: number, lineMap: LineMap, rawStart: number, config: Config): Diagnostic {
+function mdl201(anchor: string, where: number, lineMap: LineMap, config: Config): Diagnostic {
   return {
     code: 'MDL201',
     severity: severityOf('MDL201', config.diagnostics as Record<string, 'error' | 'warning' | 'information' | 'hint'>),
     message: `Evidence anchor does not exist: #${anchor}`,
-    range: rangeAt(lineMap, rawStart + where, rawStart + where + Math.max(1, anchor.length + 1)),
+    range: rangeAt(lineMap, where, where + Math.max(1, anchor.length + 1)),
     layer: 'document-semantic',
     data: { anchor },
   };
@@ -263,26 +263,25 @@ function mdl202(
   rel: RelationLike,
   where: number,
   lineMap: LineMap,
-  rawStart: number,
   config: Config,
 ): Diagnostic {
   return {
     code: 'MDL202',
     severity: severityOf('MDL202', config.diagnostics as Record<string, 'error' | 'warning' | 'information' | 'hint'>),
     message: `Duplicate relation: ${rel.type} → ${rel.target}`,
-    range: rangeAt(lineMap, rawStart + where, rawStart + where + 1),
+    range: rangeAt(lineMap, where, where + 1),
     layer: 'document-semantic',
     data: { type: rel.type, target: rel.target, evidence: rel.evidence },
   };
 }
 
 /**
- * Source offsets of relation fields inside the front matter slice, so semantic
- * diagnostics can point at the offending declaration instead of at line 1.
+ * Source absolute offsets of relation fields, so semantic diagnostics can point
+ * at the offending declaration instead of at line 1.
  *
  * The implementation is deliberately defensive: a YAML document whose structure
  * the schema layer already rejected still reaches this code, and every lookup
- * falls back to the `mdlineage` key's start.
+ * falls back to the anchor offset.
  */
 export interface RelationOffsets {
   relationStart(index: number): number | undefined;
@@ -290,17 +289,18 @@ export interface RelationOffsets {
   readonly mdlineageStart: number;
 }
 
-/** Build a RelationOffsets view over a parsed YAML CST document. */
-export function relationOffsetsOf(doc: unknown, mdlineageStart: number): RelationOffsets {
+/** Build a RelationOffsets view over a parsed YAML CST document returning absolute offsets. */
+export function relationOffsetsOf(doc: unknown, rawStart: number, anchor = rawStart): RelationOffsets {
   const relations = doc === null || typeof doc !== 'object' ? null : relationsNode(doc);
   const items = relations && Array.isArray(relations.items) ? relations.items : [];
 
   return {
-    mdlineageStart,
+    mdlineageStart: anchor,
     relationStart(index: number): number | undefined {
       const item = items[index];
       if (!item) return undefined;
-      return rangeStart(item) ?? rangeStart((item as { node?: unknown }).node) ?? mdlineageStart;
+      const start = rangeStart(item) ?? rangeStart((item as { node?: unknown }).node);
+      return start !== undefined ? rawStart + start : anchor;
     },
     relationField(index: number, field: string): number | undefined {
       const item = items[index];
@@ -308,7 +308,8 @@ export function relationOffsetsOf(doc: unknown, mdlineageStart: number): Relatio
       if (!map) return undefined;
       const pair = map.items.find((p) => keyValue(p) === field);
       if (!pair) return undefined;
-      return rangeStart((pair as { key?: unknown }).key) ?? rangeStart(pair) ?? mdlineageStart;
+      const start = rangeStart((pair as { key?: unknown }).key) ?? rangeStart(pair);
+      return start !== undefined ? rawStart + start : anchor;
     },
   };
 }
@@ -353,8 +354,9 @@ function rangeStart(node: unknown): number | undefined {
  * the front matter slice, or null when the field or its source is absent.
  *
  * The workspace layer uses this for MDL301, which must point at the duplicate
- * id rather than at line 1. The value is relative to `raw`, exactly like the
- * `RelationOffsets` accessors, so the caller adds `rawStart`.
+ * id rather than at line 1. The value is relative to `raw` (only this offset
+ * remains relative to raw; callers like idOffset, statusOffset, and freshness
+ * add rawStart themselves).
  */
 export function mdlineageFieldOffset(doc: unknown, field: string): number | null {
   const value = mdlineageValueOf(doc);

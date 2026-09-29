@@ -46,7 +46,7 @@ import {
   resetProposalIds,
 } from '../src/server.js';
 import { verifyWriteTarget, writeDocumentAtomically } from '../src/server-impl.js';
-import { diffOf } from '../src/proposals.js';
+import { diffOf, proposeDocumentId } from '../src/proposals.js';
 import type { MetadataProposal, ProposalQueue } from '../src/proposals.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
@@ -1765,6 +1765,85 @@ describe('MCP server — diffOf LCS line diff', () => {
         assert.equal(diff.split('\n').filter(Boolean).length, 1, `one diff line, got: ${JSON.stringify(diff)}`);
         assert.match(diff, /^\+ \s*status: draft$/);
         assert.equal(applyDiff(GAPPY_DOCUMENT, diff, patchedContent), patchedContent, 'the served diff rebuilds the patched text');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('Phase 2 — proposeDocumentId and MDL003 Front Matter generation', () => {
+  it('proposeDocumentId generates clean slugs and falls back on invalid/long names', () => {
+    assert.equal(proposeDocumentId('docs/architecture.md'), 'docs.architecture');
+    assert.equal(proposeDocumentId('README.md'), 'readme');
+    assert.equal(proposeDocumentId('src/sub_dir/user-profile.md'), 'src.sub-dir.user-profile');
+    assert.equal(proposeDocumentId('docs/使用手册.md'), 'docs');
+    const fallbackId = proposeDocumentId('使用手册.md');
+    assert.match(fallbackId, /^doc\.[0-9a-f]{10}$/);
+    const longPath = 'a/'.repeat(70) + 'test.md';
+    const longId = proposeDocumentId(longPath);
+    assert.match(longId, /^doc\.[0-9a-f]{10}$/);
+  });
+
+  it('suggest_metadata and apply_metadata_patch generate full frontmatter for bare document', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-bare-'));
+    const docPath = resolve(root, 'guide.md');
+    writeFileSync(docPath, '# Guide Title\n\nGuide content.\n');
+    try {
+      const h = await harness(root);
+      try {
+        const suggested = (await callTool(h, 'suggest_metadata', { path: 'guide.md' })).payload as {
+          proposals: MetadataProposal[];
+          diagnostics: string[];
+        };
+        assert.ok(suggested.diagnostics.includes('MDL003'));
+        assert.equal(suggested.proposals.length, 1);
+        const prop = suggested.proposals[0]!;
+        assert.equal(prop.operations[0]!.jsonPointer, '');
+        assert.equal((prop.operations[0]!.value as { id: string }).id, 'guide');
+
+        const applied = (await callTool(h, 'apply_metadata_patch', {
+          proposal_id: prop.id,
+          write: true,
+        })).payload as { applied: boolean; written: boolean; patchedContent: string };
+
+        assert.equal(applied.applied, true);
+        assert.equal(applied.written, true);
+
+        const onDisk = readFileSync(docPath, 'utf8');
+        assert.match(onDisk, /^---\nmdlineage:\n  schema: 1\n  id: guide\n/);
+        assert.match(onDisk, /---\n\n# Guide Title/);
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('suggest_metadata and apply_metadata_patch insert mdlineage into document with existing frontmatter', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-hasfm-'));
+    const docPath = resolve(root, 'post.md');
+    writeFileSync(docPath, '---\ntitle: My Post\n---\n\n# Post\n');
+    try {
+      const h = await harness(root);
+      try {
+        const suggested = (await callTool(h, 'suggest_metadata', { path: 'post.md' })).payload as {
+          proposals: MetadataProposal[];
+        };
+        const prop = suggested.proposals[0]!;
+        const applied = (await callTool(h, 'apply_metadata_patch', {
+          proposal_id: prop.id,
+          write: true,
+        })).payload as { applied: boolean; written: boolean; patchedContent: string };
+
+        assert.equal(applied.applied, true);
+        assert.equal(applied.written, true);
+
+        const onDisk = readFileSync(docPath, 'utf8');
+        assert.match(onDisk, /title: My Post\nmdlineage:\n  schema: 1\n  id: post\n/);
       } finally {
         await h.close();
       }

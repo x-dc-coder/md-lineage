@@ -9,15 +9,31 @@
 
 import { globSync } from 'glob';
 import { statSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { resolve, sep, relative, parse } from 'node:path';
+import {
+  PathFilter,
+  type Config,
+} from '@mdlineage/validator';
+import { gitCheckIgnored, repositoryRoot } from './git.js';
 
-/** Patterns excluded unless the caller overrides them with a negative glob. */
-const DEFAULT_EXCLUDE = ['node_modules/**', '**/dist/**'];
+export class UsageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'UsageError';
+  }
+}
 
-export interface ExpandOptions {
+export interface DiscoveryOptions {
+  /** Config loaded for this run. */
+  config?: Config;
   /** Extra glob patterns to ignore, in `.gitignore` syntax. */
   exclude?: readonly string[];
+  /** When true, ignore `.gitignore` rules (do not filter out git-ignored files). */
+  noIgnore?: boolean;
 }
+
+/** Backward compatibility alias for ExpandOptions. */
+export type ExpandOptions = DiscoveryOptions;
 
 export interface ExpandedPath {
   /** Absolute path of the file. */
@@ -27,26 +43,72 @@ export interface ExpandedPath {
 }
 
 /**
+ * Known workspace paths for link resolution (MDL401/402).
+ *
+ * Performs a workspace-wide retrieval (`dot: false, mark: true, nodir: false`).
+ * Filters out items excluded by PathFilter (unless pulled back).
+ * For directories, retains BOTH no-slash and with-slash forms (e.g. `docs/architecture`
+ * and `docs/architecture/`).
+ * Retains all `.md` files (does NOT skip them!), so cross-file relative references
+ * in single-file checks resolve correctly without MDL401 false positives.
+ */
+export function knownWorkspacePaths(cwd: string, options: DiscoveryOptions = {}): string[] {
+  const filter = new PathFilter({ config: options.config, extraExclude: options.exclude });
+  const hardPrune = filter.hardPrunePatterns();
+
+  const hits = globSync(['**/*'], {
+    cwd,
+    ignore: hardPrune,
+    nodir: false,
+    mark: true,
+    dot: false,
+  });
+
+  const out = new Set<string>();
+
+  for (const hit of hits) {
+    const posix = hit.split(sep).join('/');
+    const isDir = posix.endsWith('/');
+    const clean = isDir && posix.length > 1 ? posix.slice(0, -1) : posix;
+
+    if (!filter.inUniverse(clean)) {
+      continue;
+    }
+
+    if (isDir) {
+      out.add(clean);
+      out.add(clean + '/');
+    } else {
+      out.add(clean);
+    }
+  }
+
+  return [...out].sort();
+}
+
+/**
+ * Backward compatibility: non-Markdown workspace files.
+ */
+export function knownNonMarkdownPaths(cwd: string, options: DiscoveryOptions = {}): string[] {
+  return knownWorkspacePaths(cwd, options).filter((p) => !p.toLowerCase().endsWith('.md'));
+}
+
+/**
  * Turn command-line arguments into a de-duplicated, sorted list of Markdown
  * files. A path that does not exist and matches no glob is reported back, so
  * the caller can fail loudly instead of silently validating nothing.
  *
- * `others` carries the non-Markdown files the scan met (schemas, configs,
- * images): the caller hands their paths to the workspace index as a known-path
- * set, so a link to a real non-Markdown file is not misread as MDL401.
- *
- * `excluded` names the arguments the caller asked for explicitly that the
- * default ignore rules swallowed whole (an argument naming only `node_modules`
- * or `dist` files): `missed` cannot carry those, because the files DO exist —
- * reporting them as missing would be wrong, and validating them would be
- * surprising, so the caller explains on stderr instead.
+ * `others` carries the non-Markdown files the scan met.
+ * `excluded` names arguments whose matches were filtered out.
  */
 export function expandMarkdownPaths(
   args: readonly string[],
   cwd: string,
-  options: ExpandOptions = {},
+  options: DiscoveryOptions = {},
 ): { files: ExpandedPath[]; others: ExpandedPath[]; missed: string[]; excluded: string[] } {
-  const ignore = [...DEFAULT_EXCLUDE, ...(options.exclude ?? [])];
+  const filter = new PathFilter({ config: options.config, extraExclude: options.exclude });
+  const hardPrune = filter.hardPrunePatterns();
+
   const found = new Map<string, ExpandedPath>();
   const others = new Map<string, ExpandedPath>();
   const missed: string[] = [];
@@ -54,50 +116,94 @@ export function expandMarkdownPaths(
 
   for (const arg of args) {
     const absolute = resolve(cwd, arg);
+    if (parse(absolute).root === absolute) {
+      throw new UsageError(`refusing to scan filesystem root: ${arg}`);
+    }
     let stats: ReturnType<typeof statSync>;
     try {
       stats = statSync(absolute);
     } catch {
       // Not a filesystem object: treat it as a glob pattern.
-      const matched = globSync([arg], { cwd, ignore, nodir: true, mark: true });
+      const matched = globSync([arg], { cwd, ignore: hardPrune, nodir: true, mark: true });
       if (matched.length === 0) {
-        // A pattern that matched nothing because it named only ignored paths is
-        // worth explaining: the files exist, the ignore rules are why they are
-        // absent, and `missed` would say something untrue about them.
         const unfiltered = globSync([arg], { cwd, nodir: true, mark: true });
         if (unfiltered.length > 0) excluded.push(arg);
         else missed.push(arg);
         continue;
       }
-      for (const hit of matched) add(found, others, resolve(cwd, hit), arg, cwd);
+      for (const hit of matched) {
+        const full = resolve(cwd, hit);
+        const rel = relativeForReport(full, cwd, hit);
+        if (filter.inReportSet(rel)) {
+          add(found, others, full, arg, cwd);
+        }
+      }
       continue;
     }
 
     if (stats.isDirectory()) {
-      // A directory means "everything Markdown under it".
-      const pattern = `${absolute.split(sep).join('/')}/**/*.md`;
-      const matched = globSync([pattern], { cwd, ignore, nodir: true, mark: true });
-      for (const hit of matched) add(found, others, resolve(cwd, hit), arg, cwd);
-      // Non-Markdown files under the directory are not validated, but their
-      // existence matters to the workspace index's known-path set.
-      const allPattern = `${absolute.split(sep).join('/')}/**`;
-      for (const hit of globSync([allPattern], { cwd, ignore, nodir: true, mark: true })) {
-        add(found, others, resolve(cwd, hit), arg, cwd);
+      const relDir = posixRelative(cwd, absolute);
+      const escapes = relDir === '..' || relDir.startsWith('../');
+      const globCwd = escapes ? absolute : cwd;
+      const mdPattern = escapes ? '**/*.md' : `${relDir === '' ? '.' : relDir}/**/*.md`;
+      const allPattern = escapes ? '**' : `${relDir === '' ? '.' : relDir}/**`;
+      const ignore = escapes ? hardPrune.filter((p) => p.startsWith('**/')) : hardPrune;
+
+      let addedAny = false;
+      for (const hit of globSync([mdPattern], { cwd: globCwd, ignore, nodir: true, mark: true })) {
+        const full = resolve(globCwd, hit);
+        const rel = posixRelative(cwd, full);
+        if (!filter.inReportSet(rel)) continue;
+        add(found, others, full, rel, cwd);
+        addedAny = true;
       }
-      // An empty directory is not an error; it simply has nothing to check. A
-      // directory whose Markdown is entirely ignored is the same situation with
-      // a different explanation, so it is reported rather than passing silently.
-      if (matched.length === 0) {
-        const unfiltered = globSync([pattern], { cwd, nodir: true, mark: true });
+      for (const hit of globSync([allPattern], { cwd: globCwd, ignore, nodir: true, mark: true })) {
+        const full = resolve(globCwd, hit);
+        const rel = posixRelative(cwd, full);
+        if (rel.toLowerCase().endsWith('.md')) continue;
+        if (!filter.inUniverse(rel)) continue;
+        add(found, others, full, rel, cwd);
+      }
+      if (!addedAny) {
+        const unfiltered = globSync([mdPattern], { cwd: globCwd, nodir: true, mark: true });
         if (unfiltered.length > 0) excluded.push(arg);
       }
       continue;
     }
 
-    // An explicitly named file bypasses the ignore list the way `--exclude`
-    // patterns do not: naming a path is an override. (A file INSIDE an ignored
-    // directory is still excluded, which the directory branch above reports.)
+    const rel = relativeForReport(absolute, cwd, arg);
+    const isMd = absolute.toLowerCase().endsWith('.md');
+    if (isMd ? !filter.inReportSet(rel) : !filter.inUniverse(rel)) {
+      if (isMd) excluded.push(arg);
+      continue;
+    }
     add(found, others, absolute, arg, cwd);
+  }
+
+  // Filter git ignored files from found markdown files (report set) if git repo and !noIgnore
+  if (!options.noIgnore) {
+    const gitRoot = repositoryRoot(cwd);
+    if (gitRoot) {
+      const allFoundPaths = [...found.values()].map((f) => f.path);
+      const ignoredSet = gitCheckIgnored(gitRoot, allFoundPaths);
+      if (ignoredSet.size > 0) {
+        for (const [key, val] of found.entries()) {
+          // git check-ignore might return gitRoot-relative path or absolute path
+          const relFromGitRoot = relative(gitRoot, val.path).split(sep).join('/');
+          if (ignoredSet.has(val.path) || ignoredSet.has(relFromGitRoot)) {
+            // But if user explicitly configured it as literal include or explicitly named it directly in args,
+            // check if it was explicitly passed in args
+            const explicitlyNamed = args.some((arg) => resolve(cwd, arg) === val.path);
+            const reportPath = relativeForReport(val.path, cwd, val.asGiven);
+            const isLit = filter.isLiteralInclude(reportPath);
+            const isNegated = filter.isPulledBackByNegation(reportPath) || filter.isPulledBackByNegation(relFromGitRoot);
+            if (!explicitlyNamed && !isLit && !isNegated) {
+              found.delete(key);
+            }
+          }
+        }
+      }
+    }
   }
 
   const files = [...found.values()].sort((a, b) => a.path.localeCompare(b.path));
@@ -119,29 +225,15 @@ function add(
   target.set(key, { path: key, asGiven: relativeForReport(key, cwd, asGiven) });
 }
 
-/** Prefer the caller's spelling for reporting; fall back to the absolute path. */
+function posixRelative(from: string, to: string): string {
+  const rel = relative(resolve(from), resolve(to));
+  return rel === '' ? '.' : rel.split(sep).join('/');
+}
+
 function relativeForReport(absolute: string, cwd: string, asGiven: string): string {
   const root = resolve(cwd);
   if (absolute === root) return asGiven;
-  if (absolute.startsWith(root + sep)) return absolute.slice(root.length + 1);
-  return asGiven;
-}
-
-/**
- * Non-Markdown workspace files, cwd-relative: the known-path set MDL401
- * resolves against. "Does this target exist in the workspace?" is not scoped to
- * the validation arguments, so the whole tree is listed even when only a
- * subtree is checked. Markdown files are deliberately absent — a missing
- * document must stay MDL401 even when the run's scope excludes it.
- */
-export function knownNonMarkdownPaths(cwd: string, options: ExpandOptions = {}): string[] {
-  const ignore = [...DEFAULT_EXCLUDE, ...(options.exclude ?? [])];
-  const hits = globSync(['**/*'], { cwd, ignore, nodir: true, mark: true });
-  const out: string[] = [];
-  for (const hit of hits) {
-    const posix = hit.split(sep).join('/');
-    if (posix.toLowerCase().endsWith('.md')) continue;
-    out.push(posix);
-  }
-  return out.sort();
+  if (absolute.startsWith(root + sep)) return absolute.slice(root.length + 1).split(sep).join('/');
+  if (resolve(root, asGiven) === absolute) return asGiven.split(sep).join('/');
+  return posixRelative(root, absolute);
 }

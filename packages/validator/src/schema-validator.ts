@@ -103,6 +103,131 @@ export function getSchemaValidator(_config?: unknown): SchemaValidator {
 export function resetSchemaValidatorCache(): void {
   cachedValidator = null;
   cachedSchemaKey = null;
+  customSchemaCache.clear();
+}
+
+interface CustomSchemaResult {
+  validator?: SchemaValidator;
+  requiredFields: readonly string[];
+  error?: Diagnostic;
+}
+
+const customSchemaCache = new Map<string, CustomSchemaResult>();
+
+function toErrorString(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function loadCustomSchema(ctx: SchemaContext): CustomSchemaResult {
+  const schemaFile = ctx.config.schemaFile;
+  if (!schemaFile) {
+    return { validator: getSchemaValidator(), requiredFields: ROOT_REQUIRED_FIELDS };
+  }
+
+  const filePath = ctx.config.source
+    ? resolve(dirname(ctx.config.source), schemaFile)
+    : resolve(schemaFile);
+
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, 'utf8');
+  } catch (err) {
+    return {
+      requiredFields: ROOT_REQUIRED_FIELDS,
+      error: {
+        code: 'MDL900',
+        severity: 'error',
+        message: `Schema file '${schemaFile}' could not be read: ${toErrorString(err)}`,
+        range: rangeAt(ctx.lineMap, 0, 0),
+        layer: 'config',
+      },
+    };
+  }
+
+  const cacheKey = `${filePath}:${raw}`;
+  const cached = customSchemaCache.get(cacheKey);
+  if (cached) return cached;
+
+  let customJson: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+      throw new Error('Schema root must be a JSON object');
+    }
+    customJson = parsed as Record<string, unknown>;
+  } catch (err) {
+    const res: CustomSchemaResult = {
+      requiredFields: ROOT_REQUIRED_FIELDS,
+      error: {
+        code: 'MDL900',
+        severity: 'error',
+        message: `Schema file '${schemaFile}' is not valid JSON: ${toErrorString(err)}`,
+        range: rangeAt(ctx.lineMap, 0, 0),
+        layer: 'config',
+      },
+    };
+    customSchemaCache.set(cacheKey, res);
+    return res;
+  }
+
+  const builtin = readSchema();
+  const mergedProperties = {
+    ...(builtin.properties as Record<string, unknown> | undefined),
+    ...(customJson.properties as Record<string, unknown> | undefined),
+  };
+  const mergedDefs = {
+    ...(builtin.$defs as Record<string, unknown> | undefined),
+    ...((customJson.$defs || customJson.definitions) as Record<string, unknown> | undefined),
+  };
+  const customRequired = Array.isArray(customJson.required)
+    ? (customJson.required as string[]).filter((f) => typeof f === 'string')
+    : [];
+  const builtinRequired = Array.isArray(builtin.required) ? (builtin.required as string[]) : [];
+  const mergedRequired = [...new Set([...builtinRequired, ...customRequired])];
+
+  const mergedSchema: Record<string, unknown> = {
+    ...builtin,
+    ...customJson,
+    properties: mergedProperties,
+    $defs: mergedDefs,
+    required: mergedRequired,
+    additionalProperties: false,
+  };
+
+  const ajv = new Ajv2020({
+    strict: false,
+    allErrors: true,
+    strictRequired: false,
+  });
+
+  try {
+    const validate = ajv.compile(mergedSchema) as CompiledValidate;
+    const res: CustomSchemaResult = {
+      validator: {
+        validate(data: unknown): ErrorObject[] {
+          const ok = validate(data);
+          if (ok) return [];
+          return validate.errors ?? [];
+        },
+      },
+      requiredFields: mergedRequired,
+    };
+    customSchemaCache.set(cacheKey, res);
+    return res;
+  } catch (err) {
+    const res: CustomSchemaResult = {
+      requiredFields: ROOT_REQUIRED_FIELDS,
+      error: {
+        code: 'MDL900',
+        severity: 'error',
+        message: `Schema file '${schemaFile}' failed to compile: ${toErrorString(err)}`,
+        range: rangeAt(ctx.lineMap, 0, 0),
+        layer: 'config',
+      },
+    };
+    customSchemaCache.set(cacheKey, res);
+    return res;
+  }
 }
 
 export interface SchemaContext {
@@ -122,10 +247,25 @@ export interface SchemaContext {
 
 /** Validate `data` (the mdlineage object) and convert errors to diagnostics. */
 export function validateAgainstSchema(data: unknown, ctx: SchemaContext): Diagnostic[] {
-  const validator = getSchemaValidator();
+  const out: Diagnostic[] = [];
+  let validator: SchemaValidator;
+  let requiredFields: readonly string[] = ROOT_REQUIRED_FIELDS;
+
+  if (ctx.config?.schemaFile) {
+    const custom = loadCustomSchema(ctx);
+    if (custom.error) {
+      out.push(custom.error);
+      validator = getSchemaValidator();
+    } else {
+      validator = custom.validator!;
+      requiredFields = custom.requiredFields;
+    }
+  } else {
+    validator = getSchemaValidator();
+  }
+
   const errors = validator.validate(data);
   const seen = new Set<string>();
-  const out: Diagnostic[] = [];
 
   // ajv reports one `required` error for the whole root object even when many
   // required fields are absent; the M0 contract (test/fixtures/manifest.json,
@@ -133,7 +273,7 @@ export function validateAgainstSchema(data: unknown, ctx: SchemaContext): Diagno
   // root-level `required` list is expanded here before ajv's own error is
   // dropped. Only the root expansion is contract-relevant; nested `required`
   // (relation entries) keep ajv's per-entry reporting.
-  const requiredDiagnostics = expandRootRequired(data, ctx);
+  const requiredDiagnostics = expandRootRequired(data, ctx, requiredFields);
   for (const d of requiredDiagnostics) seen.add(`${d.code}:${d.range.start}:${d.range.end}:/`);
   out.push(...requiredDiagnostics);
 
@@ -217,11 +357,11 @@ function configSeverityOverrides(config: Config): Record<string, 'error' | 'warn
  */
 const ROOT_REQUIRED_FIELDS = ['schema', 'id', 'kind', 'status'] as const;
 
-function expandRootRequired(data: unknown, ctx: SchemaContext): Diagnostic[] {
+function expandRootRequired(data: unknown, ctx: SchemaContext, requiredFields: readonly string[] = ROOT_REQUIRED_FIELDS): Diagnostic[] {
   if (typeof data !== 'object' || data === null) return [];
   const obj = data as Record<string, unknown>;
   const out: Diagnostic[] = [];
-  for (const field of ROOT_REQUIRED_FIELDS) {
+  for (const field of requiredFields) {
     if (obj[field] !== undefined) continue;
     const node = lookupPointer(ctx.doc, `/${field}`, ctx.metadataKey);
     const located = node ? nodeRange(node) : null;

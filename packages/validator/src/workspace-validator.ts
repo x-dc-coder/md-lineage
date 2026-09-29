@@ -67,6 +67,10 @@ export interface ValidateWorkspaceOptions {
   readonly paths?: ReadonlyArray<DocPath>;
   /** False to drop the single-document diagnostics the index already computed. */
   readonly includeSingleDocument?: boolean;
+  /** Git fallback clocks for documents without authored timestamps. */
+  readonly gitClocks?: ReadonlyMap<DocPath, { readonly provenStale: boolean; readonly seconds: number | null }>;
+  /** Injected clock for freshness checks. */
+  readonly nowMs?: number;
 }
 
 /**
@@ -92,8 +96,20 @@ export function validateWorkspace(
     if (options.includeSingleDocument !== false) {
       for (const diag of entry.diagnostics) out.push({ ...diag, path });
     }
-    out.push(...mdl301(entry, index, config), ...mdl302(entry, index, config), ...mdlSelfReference(entry, index, config));
+    out.push(
+      ...mdl301(entry, index, config),
+      ...mdl302(entry, index, config),
+      ...mdl306(entry, index, config),
+      ...mdlSelfReference(entry, index, config),
+    );
     out.push(...mdl304(entry, config), ...mdl401(entry, index, config), ...mdl402(entry, index, config));
+
+    // MDL801 Git fallback clock for documents without authored timestamps
+    const hasAuthoredMDL801 = entry.diagnostics.some((d) => d.code === 'MDL801');
+    const hasAuthoredClock = hasAuthoredMDL801 || entry.updatedAt !== null || entry.createdAt !== null;
+    if (!hasAuthoredClock) {
+      out.push(...mdl801Git(entry, options.gitClocks, config));
+    }
   }
 
   // MDL305 is a property of the graph: restricting it to the affected subset
@@ -168,6 +184,54 @@ function mdl302(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
         index: i,
       }),
     );
+  }
+  return out;
+}
+
+/**
+ * MDL306 — active document references a deprecated target via a blocking relation.
+ *
+ * Reported at the relation's declaration in the source document.
+ */
+function mdl306(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
+  if (entry.status === null || !config.lifecycle.activeStatuses.includes(entry.status)) {
+    return [];
+  }
+  const out: WorkspaceDiagnostic[] = [];
+  for (let i = 0; i < entry.relations.length; i++) {
+    const rel = entry.relations[i]!;
+    if (!config.lifecycle.blockingRelations.includes(rel.type)) continue;
+    const targetPaths = index.idToPaths(rel.target);
+    if (targetPaths.length === 0) continue;
+
+    for (const targetPath of targetPaths) {
+      const targetEntry = index.entryOf(targetPath);
+      if (
+        targetEntry &&
+        targetEntry.status !== null &&
+        config.lifecycle.deprecatedStatuses.includes(targetEntry.status)
+      ) {
+        const where = entry.offsets.relationStart(i) ?? entry.offsets.mdlineageStart;
+        out.push(
+          build(
+            'MDL306',
+            `Active document references deprecated target: ${rel.type} → ${rel.target} (status ${targetEntry.status})`,
+            entry,
+            where,
+            config,
+            {
+              type: rel.type,
+              target: rel.target,
+              index: i,
+              sourceStatus: entry.status,
+              targetStatus: targetEntry.status,
+              targetPath,
+            },
+          ),
+        );
+        break;
+      }
+    }
   }
   return out;
 }
@@ -519,6 +583,28 @@ function mdl402(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
     );
   }
   return out;
+}
+
+/**
+ * MDL801 — Git-backed fallback freshness check for documents without authored timestamps.
+ */
+function mdl801Git(
+  entry: DocEntry,
+  gitClocks: ReadonlyMap<DocPath, { readonly provenStale: boolean; readonly seconds: number | null }> | undefined,
+  config: Config,
+): WorkspaceDiagnostic[] {
+  if (!gitClocks) return [];
+  const clock = gitClocks.get(entry.path);
+  if (clock?.provenStale !== true) return [];
+
+  const days = config.lifecycle.staleAfterDays;
+  const message = `Document not updated in over ${days} days (git; no authored updated_at or created_at)`;
+  return [
+    build('MDL801', message, entry, entry.statusOffset, config, {
+      staleAfterDays: days,
+      source: 'git',
+    }),
+  ];
 }
 
 /** Assemble a WorkspaceDiagnostic positioned inside `entry`'s document. */

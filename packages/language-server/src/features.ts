@@ -468,7 +468,7 @@ function enclosingRelation(
   entry.relations.forEach((rel, index) => {
     const where = entry.offsets.relationStart(index);
     if (where === undefined) return;
-    if (entry.rawStart + where > at) return;
+    if (where > at) return;
     found = rel;
   });
   return found;
@@ -733,7 +733,7 @@ function relationLocations(context: ServerContext, referrer: DocPath, id: string
   entry.relations.forEach((rel, index) => {
     if (rel.target !== id) return;
     const where = entry.offsets.relationStart(index) ?? entry.offsets.mdlineageStart;
-    const at = positionAt(lineMap, entry.rawStart + where);
+    const at = positionAt(lineMap, where);
     out.push(locationOf(context, referrer, at.line, at.column));
   });
   return out;
@@ -818,7 +818,7 @@ function rename(context: ServerContext, params: RenameParams): WorkspaceEdit | n
     referrerEntry.relations.forEach((rel, index) => {
       if (rel.target !== oldId) return;
       const where = referrerEntry.offsets.relationField(index, 'target') ?? referrerEntry.offsets.relationStart(index) ?? referrerEntry.offsets.mdlineageStart;
-      const at = positionAt(lineMap, referrerEntry.rawStart + where);
+      const at = positionAt(lineMap, where);
       const lineText = refLines[at.line - 1] ?? '';
       const start = characterOf(lineText, at.column);
       addEdit(referrer, TextEdit.replace(

@@ -14,8 +14,9 @@ import { readFileSync, mkdtempSync, writeFileSync, rmSync, mkdirSync, existsSync
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { scanBoundary, parseFrontmatter, buildLineMap } from '@mdlineage/validator';
+import { scanBoundary, parseFrontmatter, buildLineMap, defaultConfig } from '@mdlineage/validator';
 import { attrPolicyLine } from '../src/init.js';
+import { expandMarkdownPaths } from '../src/paths.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const fixtureRoot = resolve(repoRoot, 'test', 'fixtures');
@@ -1677,5 +1678,361 @@ describe('mdlineage usage errors — exit 2, no stack', () => {
     assert.equal(out.status, 2);
     assert.ok(out.stderr.includes("unknown server transport '(none)'"));
     assert.ok(!/^\s+at /m.test(out.stderr));
+  });
+});
+
+describe('Phase 1 (P0) — path filter, directory links, gitignore', () => {
+  it('single file check a.md linking to existing sibling b.md does not report MDL401', () => {
+    const ws = scratchWorkspace({
+      'a.md': doc('docs.a', '', 'See [b](b.md).\n'),
+      'b.md': doc('docs.b', '', '# B\n'),
+    });
+    try {
+      const out = runCli(['check', 'a.md', '--format', 'json'], ws.root);
+      assert.equal(out.status, 0);
+      assert.equal(countOf(out.stdout, 'MDL401'), 0, 'sibling markdown file is in known workspace paths');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('config files.exclude: [skip/**] is respected in check .', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': [
+        'configVersion: 1',
+        'files:',
+        '  exclude:',
+        '    - skip/**',
+      ].join('\n'),
+      'a.md': doc('docs.a'),
+      'skip/b.md': '# invalid doc with no front matter\n',
+    });
+    try {
+      const out = runCli(['check', '.', '--format', 'json'], ws.root);
+      assert.equal(out.status, 0);
+      const parsed = parseJson(out.stdout);
+      assert.equal(parsed.reports.some((r) => r.path.includes('skip')), false, 'skip/b.md was excluded');
+      assert.equal(countOf(out.stdout, 'MDL003'), 0);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('negation rule --exclude !archive/important.md includes the file back', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': [
+        'configVersion: 1',
+        'files:',
+        '  exclude:',
+        '    - archive/**',
+      ].join('\n'),
+      'a.md': doc('docs.a'),
+      'archive/important.md': doc('docs.important'),
+      'archive/other.md': '# invalid doc\n',
+    });
+    try {
+      const out = runCli(['check', '.', '--exclude', '!archive/important.md', '--format', 'json'], ws.root);
+      assert.equal(out.status, 0);
+      const parsed = parseJson(out.stdout);
+      assert.equal(parsed.reports.some((r) => r.path === 'archive/important.md'), true, 'archive/important.md included');
+      assert.equal(parsed.reports.some((r) => r.path === 'archive/other.md'), false, 'archive/other.md remains excluded');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('.gitignore filtering and --no-ignore flag behave correctly', () => {
+    const repo = scratchGitRepoWithBaseline();
+    try {
+      writeFileSync(join(repo.root, '.gitignore'), 'ignored/\n');
+      mkdirSync(join(repo.root, 'ignored'));
+      writeFileSync(join(repo.root, 'ignored', 'secret.md'), '# no front matter\n');
+
+      // Without --no-ignore: ignored/secret.md is skipped by git check-ignore
+      const normal = runCli(['check', '.'], repo.root);
+      assert.equal(normal.status, 0);
+      assert.equal(normal.stdout.includes('MDL003'), false, 'git-ignored file is skipped');
+
+      // With --no-ignore: ignored/secret.md is checked and reports MDL003
+      const noIgnore = runCli(['check', '.', '--no-ignore'], repo.root);
+      assert.equal(noIgnore.status, 1);
+      assert.equal(noIgnore.stdout.includes('MDL003'), true, '--no-ignore validates git-ignored file');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('directory relative link does not report MDL401 in CLI check', () => {
+    const ws = scratchWorkspace({
+      'docs/guide.md': doc('docs.guide', '', 'See [architecture](./architecture/).\n'),
+      'docs/architecture/overview.md': doc('docs.arch-overview', '', '# Overview\n'),
+    });
+    try {
+      const out = runCli(['check', 'docs/guide.md', '--format', 'json'], ws.root);
+      assert.equal(out.status, 0);
+      assert.equal(countOf(out.stdout, 'MDL401'), 0, 'directory relative link is resolved against known workspace paths');
+    } finally {
+      ws.cleanup();
+    }
+  });
+});
+
+describe('Phase 2 & Phase 1 RCA regressions', () => {
+  it('check / is intercepted with exit code 2 and stderr message', () => {
+    const out = runCli(['check', '/']);
+    assert.equal(out.status, 2);
+    assert.match(out.stderr, /refusing to scan filesystem root: \//);
+  });
+
+  it("files.include: ['docs/**'] in check . narrows correctly and does not flow back root .md", () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': [
+        'configVersion: 1',
+        'files:',
+        '  include:',
+        '    - docs/**',
+      ].join('\n'),
+      'README.md': '# Root README with no frontmatter\n',
+      'docs/a.md': doc('docs.a'),
+    });
+    try {
+      const out = runCli(['check', '.', '--format', 'json'], ws.root);
+      assert.equal(out.status, 0);
+      const parsed = parseJson(out.stdout);
+      assert.equal(parsed.reports.some((r) => r.path === 'README.md'), false, 'README.md must not be checked');
+      assert.equal(countOf(out.stdout, 'MDL003'), 0);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('! negation rule pull-back successfully penetrates .gitignore', () => {
+    const repo = scratchGitRepoWithBaseline();
+    try {
+      writeFileSync(join(repo.root, '.gitignore'), 'ignored/\n');
+      mkdirSync(join(repo.root, 'ignored'));
+      writeFileSync(join(repo.root, 'ignored', 'secret.md'), '# secret without metadata\n');
+      const out = runCli(['check', '.', '--exclude', '!ignored/secret.md'], repo.root);
+      assert.equal(out.status, 1);
+      assert.ok(out.stdout.includes('MDL003'), 'secret.md pulled back by negation must be checked');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('suggest and fix on document without frontmatter generates and writes complete --- block clearing MDL003', () => {
+    const ws = scratchWorkspace({
+      'my-doc.md': '# Title\n\nSome body content.\n',
+    });
+    try {
+      const suggestOut = runCli(['suggest', 'my-doc.md'], ws.root);
+      assert.equal(suggestOut.status, 0);
+      const proposal = JSON.parse(suggestOut.stdout);
+      assert.ok(proposal.addresses.includes('MDL003'));
+      assert.equal(proposal.operations[0].jsonPointer, '');
+      assert.equal(proposal.operations[0].value.id, 'my-doc');
+      assert.equal(proposal.operations[0].value.schema, 1);
+
+      const fixOut = runCli(['fix', 'my-doc.md', '--write'], ws.root);
+      assert.equal(fixOut.status, 0);
+      assert.match(fixOut.stdout, /mdlineage fix: 1 fix in 1 file/);
+
+      const fixedContent = readFileSync(join(ws.root, 'my-doc.md'), 'utf8');
+      assert.match(fixedContent, /^---\nmdlineage:\n  schema: 1\n  id: my-doc\n/);
+      assert.match(fixedContent, /---\n\n# Title/);
+
+      const checkOut = runCli(['check', 'my-doc.md'], ws.root);
+      assert.equal(checkOut.status, 0);
+      assert.ok(!checkOut.stdout.includes('MDL003'));
+    } finally {
+      ws.cleanup();
+    }
+  });
+});
+
+describe('Phase 3 (P2) — M1 path expansion & MDL801 CLI integration', () => {
+  it('M1: expandMarkdownPaths with ../other_repo yields 4 docs with distinct asGiven starting with ../other_repo/, excluding node_modules and vendor', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'mdlineage-m1-'));
+    try {
+      const repo = join(parent, 'repo');
+      const otherRepo = join(parent, 'other_repo');
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(join(otherRepo, 'docs'), { recursive: true });
+      mkdirSync(join(otherRepo, 'guide'), { recursive: true });
+      mkdirSync(join(otherRepo, 'node_modules', 'pkg'), { recursive: true });
+      mkdirSync(join(otherRepo, 'vendor'), { recursive: true });
+
+      writeFileSync(join(otherRepo, 'docs', 'a.md'), '# A\n');
+      writeFileSync(join(otherRepo, 'docs', 'b.md'), '# B\n');
+      writeFileSync(join(otherRepo, 'guide', 'c.md'), '# C\n');
+      writeFileSync(join(otherRepo, 'README.md'), '# Readme\n');
+      writeFileSync(join(otherRepo, 'node_modules', 'pkg', 'a.md'), '# Node\n');
+      writeFileSync(join(otherRepo, 'vendor', 'v.md'), '# Vendor\n');
+
+      const res = expandMarkdownPaths(['../other_repo'], repo, { config: defaultConfig() });
+      assert.equal(res.files.length, 4, `expected 4 markdown files, got ${res.files.length}`);
+      const asGivens = res.files.map((f) => f.asGiven.replace(/\\/g, '/'));
+      assert.equal(new Set(asGivens).size, 4, 'all 4 asGiven paths must be distinct');
+      for (const g of asGivens) {
+        assert.ok(g.startsWith('../other_repo/'), `asGiven must start with ../other_repo/, got ${g}`);
+      }
+      assert.ok(!asGivens.some((g) => g.includes('node_modules')), 'node_modules must not appear');
+      assert.ok(!asGivens.some((g) => g.includes('vendor')), 'vendor must not appear');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('M1: check ../other_repo --format json reports 4 docs in ../other_repo/... form, not directory itself', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'mdlineage-m1-cli-'));
+    try {
+      const repo = join(parent, 'repo');
+      const otherRepo = join(parent, 'other_repo');
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(join(otherRepo, 'docs'), { recursive: true });
+      mkdirSync(join(otherRepo, 'guide'), { recursive: true });
+      mkdirSync(join(otherRepo, 'node_modules', 'pkg'), { recursive: true });
+      mkdirSync(join(otherRepo, 'vendor'), { recursive: true });
+
+      const frontmatter = (id: string) =>
+        `---\nmdlineage:\n  schema: 1\n  id: ${id}\n  kind: guide\n  status: draft\n---\n# ${id}\n`;
+
+      writeFileSync(join(otherRepo, 'docs', 'a.md'), frontmatter('docs.a'));
+      writeFileSync(join(otherRepo, 'docs', 'b.md'), frontmatter('docs.b'));
+      writeFileSync(join(otherRepo, 'guide', 'c.md'), frontmatter('docs.c'));
+      writeFileSync(join(otherRepo, 'README.md'), frontmatter('docs.readme'));
+      writeFileSync(join(otherRepo, 'node_modules', 'pkg', 'n.md'), frontmatter('docs.n'));
+      writeFileSync(join(otherRepo, 'vendor', 'v.md'), frontmatter('docs.v'));
+
+      const out = runCli(['check', '../other_repo', '--format', 'json'], repo);
+      assert.equal(out.status, 0, `check failed with stderr: ${out.stderr}`);
+      const json: JsonOutput = JSON.parse(out.stdout);
+      assert.equal(json.reports.length, 4, `expected 4 reports, got ${json.reports.length}`);
+      for (const r of json.reports) {
+        const normPath = r.path.replace(/\\/g, '/');
+        assert.ok(normPath.startsWith('../other_repo/'), `report path must start with ../other_repo/, got ${normPath}`);
+        assert.notEqual(normPath, '../other_repo', 'must not report directory itself');
+      }
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('M1: explicitly naming ../other_repo/node_modules/pkg/n.md results in empty files and excluded entry', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'mdlineage-m1-excl-'));
+    try {
+      const repo = join(parent, 'repo');
+      const otherRepo = join(parent, 'other_repo');
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(join(otherRepo, 'node_modules', 'pkg'), { recursive: true });
+      writeFileSync(join(otherRepo, 'node_modules', 'pkg', 'n.md'), '# Excluded\n');
+
+      const target = '../other_repo/node_modules/pkg/n.md';
+      const res = expandMarkdownPaths([target], repo, { config: defaultConfig() });
+      assert.equal(res.files.length, 0, 'files must be empty for excluded explicit file');
+      assert.ok(res.excluded.includes(target), 'excluded list must include target');
+
+      const out = runCli(['check', target], repo);
+      assert.ok(out.stderr.includes('matches the default exclude list'), 'stderr must mention exclusion');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('M1: files.include: [docs/**] excludes ../other_repo/docs/a.md but includes ../docs/a.md', () => {
+    const parent = mkdtempSync(join(tmpdir(), 'mdlineage-m1-inc-'));
+    try {
+      const repo = join(parent, 'repo');
+      const otherRepo = join(parent, 'other_repo');
+      mkdirSync(join(repo), { recursive: true });
+      mkdirSync(join(parent, 'docs'), { recursive: true });
+      mkdirSync(join(otherRepo, 'docs'), { recursive: true });
+
+      writeFileSync(join(parent, 'docs', 'a.md'), '# Parent Doc\n');
+      writeFileSync(join(otherRepo, 'docs', 'a.md'), '# Other Repo Doc\n');
+
+      const config = {
+        ...defaultConfig(),
+        files: {
+          ...defaultConfig().files,
+          include: ['docs/**'],
+        },
+      };
+
+      const res = expandMarkdownPaths(['../other_repo/docs/a.md', '../docs/a.md'], repo, { config });
+      const asGivens = res.files.map((f) => f.asGiven.replace(/\\/g, '/'));
+      assert.ok(!asGivens.some((p) => p.includes('other_repo/docs/a.md')), '../other_repo/docs/a.md must not be in files');
+      assert.ok(asGivens.some((p) => p.includes('../docs/a.md')), '../docs/a.md must be in files');
+      assert.ok(res.excluded.includes('../other_repo/docs/a.md'), '../other_repo/docs/a.md must be in excluded');
+    } finally {
+      rmSync(parent, { recursive: true, force: true });
+    }
+  });
+
+  it('MDL801: detects stale document via git commit timestamp, cleared after new commit', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mdlineage-git-clock-'));
+    const git = (args: string[], envExtra: Record<string, string> = {}) =>
+      spawnSync('git', args, {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, ...envExtra },
+      });
+
+    try {
+      git(['init', '-q']);
+      git(['config', 'user.email', 'test@example.com']);
+      git(['config', 'user.name', 'mdlineage test']);
+
+      const configYaml = [
+        'configVersion: 1',
+        'lifecycle:',
+        '  staleAfterDays: 30',
+        '  staleStatuses: ["active"]',
+      ].join('\n');
+      writeFileSync(join(root, 'mdlineage.config.yaml'), configYaml);
+
+      const docContent = [
+        '---',
+        'mdlineage:',
+        '  schema: 1',
+        '  id: doc.ancient',
+        '  kind: policy',
+        '  status: active',
+        '---',
+        '# Ancient Doc',
+      ].join('\n');
+      writeFileSync(join(root, 'ancient.md'), docContent);
+
+      git(['add', '.']);
+      git(['commit', '-q', '-m', 'ancient commit'], {
+        GIT_AUTHOR_DATE: '2020-01-01T00:00:00Z',
+        GIT_COMMITTER_DATE: '2020-01-01T00:00:00Z',
+      });
+
+      // Run check . --format json
+      const res1 = runCli(['check', '.', '--format', 'json'], root);
+      assert.equal(res1.status, 0, 'warning exits 0 unless --frail');
+      const parsed1 = JSON.parse(res1.stdout);
+      const reports1 = parsed1.reports ?? [];
+      const allDiags1 = reports1.flatMap((r: any) => r.diagnostics);
+      const d801 = allDiags1.find((d: any) => d.code === 'MDL801');
+      assert.ok(d801, 'ancient commit must trigger MDL801');
+      assert.match(d801.message, /\(git; no authored updated_at or created_at\)/);
+
+      // Commit a new change to ancient.md with recent date
+      writeFileSync(join(root, 'ancient.md'), docContent + '\nUpdated recently.\n');
+      git(['add', '.']);
+      git(['commit', '-q', '-m', 'recent update']);
+
+      // Run check . --format json again
+      const res2 = runCli(['check', '.', '--format', 'json'], root);
+      const parsed2 = JSON.parse(res2.stdout);
+      const reports2 = parsed2.reports ?? [];
+      const allDiags2 = reports2.flatMap((r: any) => r.diagnostics);
+      const d801After = allDiags2.find((d: any) => d.code === 'MDL801');
+      assert.equal(d801After, undefined, 'recent commit must clear MDL801');
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

@@ -19,7 +19,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { defaultConfig } from '../src/index.js';
+import { defaultConfig, validateDocumentSync } from '../src/index.js';
 import { parseMarkdownSync } from '../src/index.js';
 import { collectHeadingTexts } from '../src/document-validator.js';
 import { createWorkspaceIndex, updateFile, removeFile, updateFiles } from '../src/workspace-index.js';
@@ -143,6 +143,10 @@ describe('workspace fixtures (manifest contract)', () => {
     // is one component, so one diagnostic, anchored on the smallest path.
     assert.equal(d305.length, 1, `expected one MDL305 for the SCC, got ${d305.length}`);
     assert.equal(d305[0]!.path, 'cycle-a.md', 'the lexicographically smaller member anchors it');
+    assert.equal(d305[0]!.range.start.line, 8);
+    assert.equal(d305[0]!.range.start.column, 7);
+    const cycleLines = readWorkspaceFixture('cycle-a.md').split('\n');
+    assert.equal(cycleLines[7]![6], 't', 'column 7 should point at "t" of type');
     assert.deepEqual(d305[0]!.data, {
       type: 'supersedes',
       cycle: ['docs.cycle-a', 'docs.cycle-b'],
@@ -522,6 +526,38 @@ describe('MDL401 — markdown link targets', () => {
     const index = createWorkspaceIndex(files, defaultConfig());
     const all = validateWorkspace(index, { includeSingleDocument: false });
     assert.equal(byCode(all, 'MDL401').length, 1, 'absolute paths keep exact-match-only semantics');
+  });
+
+  it('decodes percent-encoded URL paths (%E4%B8%AD%E6%96%87.md)', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [doc](%E4%B8%AD%E6%96%87.md).'))],
+      ['docs/中文.md', doc('docs.chinese')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0, 'percent-encoded path resolves to decoded file');
+    assert.equal(index.linkReferrersOf('docs/中文.md').length, 1);
+  });
+
+  it('resolves directory relative links (docs/architecture/) without trailing slash mismatch', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [arch](./architecture/).'))],
+    ]);
+    const knownPaths = ['docs/architecture', 'docs/architecture/'];
+    const index = createWorkspaceIndex(files, defaultConfig(), knownPaths);
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0, 'directory link with trailing slash resolves against known paths');
+  });
+
+  it('does not throw or crash on malformed percent encoding (100%.md)', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [100%](100%.md).'))],
+      ['docs/100%.md', doc('docs.pct')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0, 'fallback to raw string on decodeURI error');
+    assert.equal(index.linkReferrersOf('docs/100%.md').length, 1);
   });
 });
 
@@ -1532,6 +1568,167 @@ describe('MDL103 self-reference (selfReference: forbidden)', () => {
     for (const type of ['implements', 'refines', 'supersedes', 'contradicts', 'example_of', 'related_to']) {
       assert.ok(relations[type]?.selfReference === undefined, `${type} has no selfReference switch`);
     }
+  });
+});
+
+describe('MDL306 — active document references deprecated target', () => {
+  function docStatus(id: string, status: string, rels = '', body = ''): string {
+    return [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      `  id: ${id}`,
+      '  kind: policy',
+      `  status: ${status}`,
+      rels,
+      '---',
+      '',
+      body,
+    ].join('\n');
+  }
+
+  it('reports MDL306 for active doc referencing deprecated doc via depends_on, implements, refines with correct severity, layer, and range', () => {
+    for (const relType of ['depends_on', 'implements', 'refines']) {
+      const files = new Map<string, string>([
+        ['a.md', docStatus('docs.a', 'active', relations({ type: relType, target: 'docs.b', reason: 'r' }))],
+        ['b.md', docStatus('docs.b', 'deprecated')],
+      ]);
+      const index = createWorkspaceIndex(files, defaultConfig());
+      const all = validateWorkspace(index, { includeSingleDocument: false });
+      const d306 = byCode(all, 'MDL306');
+      assert.equal(d306.length, 1, `expected 1 MDL306 for ${relType}`);
+      assert.equal(d306[0]!.path, 'a.md');
+      assert.equal(d306[0]!.severity, 'warning');
+      assert.equal(d306[0]!.layer, 'workspace-semantic');
+      assert.equal(d306[0]!.range.start.line, 8);
+      assert.equal(d306[0]!.range.start.column, 7);
+      assert.equal(
+        d306[0]!.message,
+        `Active document references deprecated target: ${relType} → docs.b (status deprecated)`,
+      );
+      assert.deepEqual(d306[0]!.data, {
+        type: relType,
+        target: 'docs.b',
+        index: 0,
+        sourceStatus: 'active',
+        targetStatus: 'deprecated',
+        targetPath: 'b.md',
+      });
+    }
+  });
+
+  it('supersedes, contradicts, example_of, related_to stay silent by default', () => {
+    for (const relType of ['supersedes', 'contradicts', 'example_of', 'related_to']) {
+      const reason = relType === 'example_of' || relType === 'related_to' ? undefined : 'r';
+      const files = new Map<string, string>([
+        ['a.md', docStatus('docs.a', 'active', relations({ type: relType, target: 'docs.b', reason }))],
+        ['b.md', docStatus('docs.b', 'deprecated')],
+      ]);
+      const index = createWorkspaceIndex(files, defaultConfig());
+      const all = validateWorkspace(index, { includeSingleDocument: false });
+      assert.equal(byCode(all, 'MDL306').length, 0, `${relType} should not trigger MDL306 by default`);
+    }
+  });
+
+  it('stays silent when source is draft or deprecated', () => {
+    for (const srcStatus of ['draft', 'deprecated']) {
+      const files = new Map<string, string>([
+        ['a.md', docStatus('docs.a', srcStatus, relations({ type: 'depends_on', target: 'docs.b', reason: 'r' }))],
+        ['b.md', docStatus('docs.b', 'deprecated')],
+      ]);
+      const index = createWorkspaceIndex(files, defaultConfig());
+      const all = validateWorkspace(index, { includeSingleDocument: false });
+      assert.equal(byCode(all, 'MDL306').length, 0);
+    }
+  });
+
+  it('stays silent when target is draft', () => {
+    const files = new Map<string, string>([
+      ['a.md', docStatus('docs.a', 'active', relations({ type: 'depends_on', target: 'docs.b', reason: 'r' }))],
+      ['b.md', docStatus('docs.b', 'draft')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL306').length, 0);
+  });
+
+  it('reports only MDL302 when target id does not exist', () => {
+    const files = new Map<string, string>([
+      ['a.md', docStatus('docs.a', 'active', relations({ type: 'depends_on', target: 'docs.missing', reason: 'r' }))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL306').length, 0);
+    assert.equal(byCode(all, 'MDL302').length, 1);
+  });
+
+  it('custom activeStatuses, deprecatedStatuses, and blockingRelations take effect', () => {
+    const config = {
+      ...defaultConfig(),
+      lifecycle: {
+        activeStatuses: ['published', 'stable'],
+        deprecatedStatuses: ['obsolete', 'legacy'],
+        blockingRelations: ['supersedes', 'related_to'],
+        staleAfterDays: 0,
+        staleStatuses: ['active'],
+        exempt: [],
+      },
+    };
+    const files = new Map<string, string>([
+      ['a.md', docStatus('docs.a', 'published', relations({ type: 'related_to', target: 'docs.b' }))],
+      ['b.md', docStatus('docs.b', 'obsolete')],
+    ]);
+    const index = createWorkspaceIndex(files, config);
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    const d306 = byCode(all, 'MDL306');
+    assert.equal(d306.length, 1);
+    assert.equal(d306[0]!.data?.sourceStatus, 'published');
+    assert.equal(d306[0]!.data?.targetStatus, 'obsolete');
+  });
+
+  it('diagnostics.MDL306 escalates severity to error', () => {
+    const config = {
+      ...defaultConfig(),
+      diagnostics: { ...defaultConfig().diagnostics, MDL306: 'error' as const },
+    };
+    const files = new Map<string, string>([
+      ['a.md', docStatus('docs.a', 'active', relations({ type: 'depends_on', target: 'docs.b', reason: 'r' }))],
+      ['b.md', docStatus('docs.b', 'deprecated')],
+    ]);
+    const index = createWorkspaceIndex(files, config);
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    const d306 = byCode(all, 'MDL306');
+    assert.equal(d306.length, 1);
+    assert.equal(d306[0]!.severity, 'error');
+  });
+
+  it('updateFile changing target status makes MDL306 disappear and reappear', () => {
+    const files = new Map<string, string>([
+      ['a.md', docStatus('docs.a', 'active', relations({ type: 'depends_on', target: 'docs.b', reason: 'r' }))],
+      ['b.md', docStatus('docs.b', 'deprecated')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    let all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL306').length, 1);
+
+    // Update target to active -> MDL306 disappears
+    updateFile(index, 'b.md', docStatus('docs.b', 'active'));
+    all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL306').length, 0);
+
+    // Update target back to deprecated -> MDL306 reappears
+    updateFile(index, 'b.md', docStatus('docs.b', 'deprecated'));
+    all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL306').length, 1);
+  });
+
+  it('D3 regression: e17 MDL201 remains at 11:7', () => {
+    const e17Content = readFileSync(resolve(repoRoot, 'test', 'fixtures', 'invalid', 'e17-evidence-anchor-missing.md'), 'utf8');
+    const { diagnostics } = validateDocumentSync({ path: 'e17.md', content: e17Content });
+    const d201 = diagnostics.filter((d) => d.code === 'MDL201');
+    assert.equal(d201.length, 1);
+    assert.equal(d201[0]!.range.start.line, 11);
+    assert.equal(d201[0]!.range.start.column, 7);
   });
 });
 

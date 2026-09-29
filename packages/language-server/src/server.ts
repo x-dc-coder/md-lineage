@@ -46,17 +46,19 @@ import {
   updateFile,
   removeFile,
   validateWorkspace,
+  gitClocksForIndex,
+  scanWorkspaceUniverse,
   BASELINE_FILE_NAME,
   type Config,
   type Baseline,
   type WorkspaceIndex,
   type DocPath,
+  type GitClock,
 } from '@mdlineage/validator';
 import { toLspDiagnostic } from './diagnostics.js';
 import type { ServerHooks } from './hooks.js';
 import { registerLanguageFeatures } from './features.js';
 import {
-  scanWorkspace,
   readDocument,
   isMarkdownUri,
   uriToPath,
@@ -64,7 +66,6 @@ import {
   indexPathOfUri,
   toAbsolutePath,
   toRootDirectory,
-  listKnownNonMarkdownPaths,
   MAX_DOCUMENT_BYTES,
 } from './workspace.js';
 import { relative } from 'node:path';
@@ -200,6 +201,7 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   // client once it is done instead of blocking the connection's reader for a
   // whole repository.
   let index = createWorkspaceIndex(new Map(), config);
+  let gitClocks: ReadonlyMap<DocPath, GitClock> | undefined;
   let scanPromise: Promise<void> | null = null;
   let scanned = false;
   const counters: ValidationCounters = { validations: 0, diagnosticsPublished: 0 };
@@ -326,7 +328,7 @@ export function createServer(connection: Connection, options: ServerOptions = {}
     const diagnostics =
       text === null || isLarge(text)
         ? []
-        : validateWorkspace(index, { paths: [path], baseline: toBaselineSuppression(path) })
+        : validateWorkspace(index, { paths: [path], baseline: toBaselineSuppression(path), gitClocks })
             // The pass's `paths` scope does not reach MDL305 (workspace-validator:
             // a cycle is a property of the graph, so the rule always walks the
             // whole index), which makes the array carry diagnostics anchored on
@@ -556,9 +558,10 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
     // the notification that started it, so the connection's reader stays
     // responsive and a large tree's cost lands after `initialize` answers.
     scanPromise = new Promise<void>((fulfill) => {
-      setImmediate(() => {
-        index = createWorkspaceIndex(new Map(), config, listKnownNonMarkdownPaths(root, config));
-        for (const [path, content] of scanWorkspace(root, config)) {
+      setImmediate(async () => {
+        const universe = scanWorkspaceUniverse(root, config);
+        index = createWorkspaceIndex(new Map(), config, universe.knownPaths);
+        for (const [path, content] of universe.documents) {
           if (documents.get(pathToUri(path, root)) !== undefined) continue;
           // §13's degradation applies to the scan too, not just to
           // `validateNow`: without this, a repository's startup cost was a
@@ -569,6 +572,7 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
           if (isLarge(content)) degradeLarge(path);
           updateFile(index, path, content);
         }
+        gitClocks = await gitClocksForIndex(index, root);
         scanned = true;
         // The scan itself is silent (no per-file publish during indexing), so
         // once it lands the client gets one workspace-wide pass: without this,

@@ -146,9 +146,11 @@
           "MDL001", "MDL002", "MDL003",
           "MDL101", "MDL102", "MDL103", "MDL104",
           "MDL201", "MDL202", "MDL203",
-          "MDL301", "MDL302", "MDL303", "MDL304", "MDL305",
+          "MDL301", "MDL302", "MDL303", "MDL304", "MDL305", "MDL306",
           "MDL401", "MDL402",
-          "MDL601", "MDL602"
+          "MDL501",
+          "MDL601", "MDL602",
+          "MDL801"
         ],
         "description": "Only codes registered in schemas/diagnostic-codes.json may carry a severity override. An unknown code such as MDL999 is rejected with MDL9xx semantics (the configuration references a diagnostic that does not exist). Reserved ranges (MDL5xx layout, MDL7xx fallback, MDL9xx config) have no assigned codes yet and are therefore not overridable yet."
       },
@@ -240,7 +242,72 @@
           }
         }
       },
-      "description": "RESERVED for P4 (directory conventions). Skeleton only — match/require/forbidStatus. Layout checks are NOT implemented in M0 and produce no diagnostics yet; the final shape is blocked on the five open questions in docs/dir-conventions.md, and the diagnostic codes will land in the reserved MDL5xx block."
+      "description": "Directory layout and structure conventions (MDL501). Enforces match/require/forbidStatus rules against document paths and metadata."
+    },
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "activeStatuses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": ["active"],
+          "description": "Statuses of active documents. Empty array disables MDL306."
+        },
+        "deprecatedStatuses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": ["deprecated"],
+          "description": "Statuses considered deprecated when referenced by active documents."
+        },
+        "blockingRelations": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "depends_on",
+              "implements",
+              "refines",
+              "supersedes",
+              "contradicts",
+              "example_of",
+              "related_to"
+            ]
+          },
+          "default": ["depends_on", "implements", "refines"],
+          "description": "Relation types that block active documents from referencing deprecated targets (MDL306). Deliberately excludes supersedes by default."
+        },
+        "staleAfterDays": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0,
+          "description": "Age threshold in days before a document is flagged as stale (MDL801). 0 disables staleness checks."
+        },
+        "staleStatuses": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": ["active"],
+          "description": "Statuses subject to staleness checks (MDL801)."
+        },
+        "exempt": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "default": [],
+          "description": "Globs of document paths exempt from staleness checks (MDL801)."
+        }
+      },
+      "description": "Document lifecycle, deprecated reference blocking (MDL306), and staleness governance (MDL801)."
     },
     "policies": {
       "type": "object",

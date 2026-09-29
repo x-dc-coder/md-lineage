@@ -24,6 +24,7 @@ import { parseDocument } from 'yaml';
 // `ajv` ships no `exports` map, so the Draft 2020-12 build is imported by path;
 // its default export is the Ajv2020 class.
 import { Ajv2020 } from 'ajv/dist/2020.js';
+import { BUILTIN_EXCLUDE_GLOBS } from './path-filter.js';
 
 /** Line-ending policy for the raw-buffer scan (MDL602). */
 export type EolPolicy = 'lf' | 'crlf' | 'cr';
@@ -40,6 +41,27 @@ export interface RelationSwitch {
   readonly selfReference?: 'allowed' | 'forbidden';
   readonly cycles?: 'allowed' | 'forbidden';
   readonly severity?: 'error' | 'warning' | 'information' | 'hint';
+}
+
+export interface LayoutRequire {
+  readonly kind?: string | readonly string[];
+  readonly authority?: string | readonly string[];
+  readonly frontmatter?: 'required' | 'optional';
+}
+
+export interface LayoutRule {
+  readonly match: string;
+  readonly require?: LayoutRequire;
+  readonly forbidStatus?: readonly string[];
+}
+
+export interface LifecycleConfig {
+  readonly activeStatuses: readonly string[];
+  readonly deprecatedStatuses: readonly string[];
+  readonly blockingRelations: readonly string[];
+  readonly staleAfterDays: number;
+  readonly staleStatuses: readonly string[];
+  readonly exempt: readonly string[];
 }
 
 /**
@@ -62,6 +84,9 @@ export interface Config {
   };
   readonly vocabulary: ConfigVocabulary;
   readonly relations: Readonly<Record<string, RelationSwitch>>;
+  readonly layout: readonly LayoutRule[];
+  readonly lifecycle: LifecycleConfig;
+  readonly schemaFile?: string;
   /** Severity overrides keyed by diagnostic code. */
   readonly diagnostics: Readonly<Record<string, 'error' | 'warning' | 'information' | 'hint'>>;
   /** Line-ending policy (§4.3). Schema key; git's `eol` attribute has no CR form. */
@@ -89,9 +114,19 @@ export function configToSchema(config: Config): Readonly<Record<string, unknown>
     metadata: { ...config.metadata },
     vocabulary: { ...config.vocabulary },
     relations: { ...config.relations },
+    lifecycle: {
+      activeStatuses: [...config.lifecycle.activeStatuses],
+      deprecatedStatuses: [...config.lifecycle.deprecatedStatuses],
+      blockingRelations: [...config.lifecycle.blockingRelations],
+      staleAfterDays: config.lifecycle.staleAfterDays,
+      staleStatuses: [...config.lifecycle.staleStatuses],
+      exempt: [...config.lifecycle.exempt],
+    },
     diagnostics: { ...config.diagnostics },
     eolPolicy: config.eolPolicy,
   };
+  if (config.schemaFile) out.schemaFile = config.schemaFile;
+  if (config.layout && config.layout.length > 0) out.layout = config.layout;
   for (const key of Object.keys(out)) {
     if (out[key] === undefined) delete out[key];
   }
@@ -106,7 +141,7 @@ export function configToSchema(config: Config): Readonly<Record<string, unknown>
 export function defaultConfig(): Config {
   return {
     configVersion: 1,
-    files: { include: ['**/*.md'], exclude: ['node_modules/**', 'dist/**', 'vendor/**'] },
+    files: { include: ['**/*.md'], exclude: [...BUILTIN_EXCLUDE_GLOBS] },
     metadata: {
       key: 'mdlineage',
       required: true,
@@ -126,6 +161,15 @@ export function defaultConfig(): Config {
       contradicts: { severity: 'warning', reasonRequired: true },
       example_of: { impact: false },
       related_to: { impact: false },
+    },
+    layout: [],
+    lifecycle: {
+      activeStatuses: ['active'],
+      deprecatedStatuses: ['deprecated'],
+      blockingRelations: ['depends_on', 'implements', 'refines'],
+      staleAfterDays: 0,
+      staleStatuses: ['active'],
+      exempt: [],
     },
     diagnostics: { MDL301: 'error', MDL304: 'warning' },
     eolPolicy: 'lf',
@@ -540,6 +584,13 @@ export function defaultConfigIsValid(): boolean {
   return configValidator()(configToSchema(defaultConfig()));
 }
 
+/** Check whether user configuration explicitly specified files.include. */
+export function filesIncludeSpecified(config: Config): boolean {
+  if (!config.raw) return false;
+  const rawFiles = config.raw['files'] as Record<string, unknown> | undefined;
+  return Array.isArray(rawFiles?.['include']);
+}
+
 /** Map a validated config document onto the Config the validator consumes. */
 function normalize(raw: Readonly<Record<string, unknown>>, source: string, extendsChain: readonly string[] = []): Config {
   const base = defaultConfig();
@@ -555,7 +606,9 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string, exten
     source,
     files: {
       include: Array.isArray(files.include) ? (files.include as string[]) : base.files.include,
-      exclude: Array.isArray(files.exclude) ? (files.exclude as string[]) : base.files.exclude,
+      exclude: Array.isArray(files.exclude)
+        ? [...BUILTIN_EXCLUDE_GLOBS, ...(files.exclude as string[])]
+        : base.files.exclude,
     },
     metadata: {
       key: typeof metadata.key === 'string' ? metadata.key : base.metadata.key,
@@ -575,6 +628,9 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string, exten
       authorities: Array.isArray(vocabulary.authorities) ? (vocabulary.authorities as string[]) : base.vocabulary.authorities,
     },
     relations: mergeRelationSwitches(relations, base.relations),
+    layout: parseLayout(raw.layout),
+    lifecycle: parseLifecycle(raw.lifecycle, base.lifecycle),
+    schemaFile: typeof raw.schemaFile === 'string' ? raw.schemaFile : undefined,
     diagnostics: mergeDiagnostics(diagnostics, base.diagnostics),
     // The schema enum guarantees validity; the guard keeps the cast honest if
     // a caller ever hands `normalize` an unvalidated document.
@@ -610,6 +666,72 @@ function mergeRelationSwitches(
     out[type] = { ...(overrides as Record<string, unknown>) } as unknown as RelationSwitch;
   }
   return out;
+}
+
+function parseLayout(rawLayout: unknown): LayoutRule[] {
+  if (!Array.isArray(rawLayout)) return [];
+  const rules: LayoutRule[] = [];
+  for (const item of rawLayout) {
+    if (!item || typeof item !== 'object') continue;
+    const obj = item as Record<string, unknown>;
+    if (typeof obj.match !== 'string') continue;
+    const rule: { match: string; require?: LayoutRequire; forbidStatus?: string[] } = {
+      match: obj.match,
+    };
+    if (obj.require && typeof obj.require === 'object') {
+      const reqObj = obj.require as Record<string, unknown>;
+      const req: {
+        kind?: string | string[];
+        authority?: string | string[];
+        frontmatter?: 'required' | 'optional';
+      } = {};
+      if (typeof reqObj.kind === 'string' || Array.isArray(reqObj.kind)) {
+        req.kind = reqObj.kind as string | string[];
+      }
+      if (typeof reqObj.authority === 'string' || Array.isArray(reqObj.authority)) {
+        req.authority = reqObj.authority as string | string[];
+      }
+      if (reqObj.frontmatter === 'required' || reqObj.frontmatter === 'optional') {
+        req.frontmatter = reqObj.frontmatter;
+      }
+      rule.require = req;
+    }
+    if (Array.isArray(obj.forbidStatus)) {
+      rule.forbidStatus = obj.forbidStatus as string[];
+    }
+    rules.push(rule);
+  }
+  return rules;
+}
+
+function parseLifecycle(rawLifecycle: unknown, baseLifecycle: LifecycleConfig): LifecycleConfig {
+  if (!rawLifecycle || typeof rawLifecycle !== 'object' || Array.isArray(rawLifecycle)) {
+    return baseLifecycle;
+  }
+  const obj = rawLifecycle as Record<string, unknown>;
+  const staleAfterDays =
+    typeof obj.staleAfterDays === 'number' && Number.isInteger(obj.staleAfterDays) && obj.staleAfterDays >= 0
+      ? obj.staleAfterDays
+      : baseLifecycle.staleAfterDays;
+
+  return {
+    activeStatuses: Array.isArray(obj.activeStatuses)
+      ? (obj.activeStatuses as string[])
+      : baseLifecycle.activeStatuses,
+    deprecatedStatuses: Array.isArray(obj.deprecatedStatuses)
+      ? (obj.deprecatedStatuses as string[])
+      : baseLifecycle.deprecatedStatuses,
+    blockingRelations: Array.isArray(obj.blockingRelations)
+      ? (obj.blockingRelations as string[])
+      : baseLifecycle.blockingRelations,
+    staleAfterDays,
+    staleStatuses: Array.isArray(obj.staleStatuses)
+      ? (obj.staleStatuses as string[])
+      : baseLifecycle.staleStatuses,
+    exempt: Array.isArray(obj.exempt)
+      ? (obj.exempt as string[])
+      : baseLifecycle.exempt,
+  };
 }
 
 /**
@@ -658,10 +780,13 @@ const DEFAULT_SEVERITIES: Readonly<Record<string, 'error' | 'warning' | 'informa
   MDL303: 'error',
   MDL304: 'warning',
   MDL305: 'error',
+  MDL306: 'warning',
   MDL401: 'warning',
   MDL402: 'warning',
+  MDL501: 'warning',
   MDL601: 'warning',
   MDL602: 'warning',
+  MDL801: 'warning',
 };
 
 function defaultSeverity(code: string): 'error' | 'warning' | 'information' | 'hint' {

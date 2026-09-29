@@ -34,7 +34,7 @@ import {
 } from './check.js';
 import { validateDocumentSync, loadConfig } from '@mdlineage/validator';
 import { renderSarif } from './sarif.js';
-import { expandMarkdownPaths, type ExpandedPath } from './paths.js';
+import { expandMarkdownPaths, UsageError, type ExpandedPath, type DiscoveryOptions } from './paths.js';
 import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from './git.js';
 import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verifyBaseline, baselineRoot, BASELINE_FILE } from './baseline.js';
 import { startStdio } from '@mdlineage/language-server';
@@ -79,6 +79,7 @@ Options:
   --config <path>             Path to mdlineage.config.yaml (default: searched for)
   --changed                   Restrict the run to changed worktree files
   --no-untracked              With --changed: skip files git does not track yet
+  --no-ignore                 Do not ignore files matched by .gitignore
   --exclude <pattern>         Extra ignore pattern (repeatable)
   --no-incremental            Validate each file independently (no workspace pass)
   --no-baseline               Ignore the committed baseline (report accepted debt)
@@ -117,6 +118,8 @@ interface ParsedArgs {
     changed?: boolean;
     untracked?: boolean;
     'no-untracked'?: boolean;
+    ignore?: boolean;
+    'no-ignore'?: boolean;
     exclude?: string[];
     incremental?: boolean;
     'no-incremental'?: boolean;
@@ -147,6 +150,8 @@ function readArgs(argv: string[]): ParsedArgs {
       // into `{ untracked: false }` against this boolean option.
       untracked: { type: 'boolean' },
       'no-untracked': { type: 'boolean' },
+      ignore: { type: 'boolean' },
+      'no-ignore': { type: 'boolean' },
       exclude: { type: 'string', multiple: true },
       // `--no-incremental` arrives as `--incremental=false` the same way.
       incremental: { type: 'boolean' },
@@ -171,97 +176,106 @@ function readArgs(argv: string[]): ParsedArgs {
 
 /** Application entry. Returns the exit code the process should use. */
 export async function main(argv: string[]): Promise<number> {
-  let parsed: ParsedArgs;
   try {
-    parsed = readArgs(argv);
+    let parsed: ParsedArgs;
+    try {
+      parsed = readArgs(argv);
+    } catch (error) {
+      // parseArgs is strict: an unknown flag throws instead of reaching the
+      // per-command usage checks, and a usage error must exit 2, not crash.
+      const message = error instanceof Error ? error.message : String(error);
+      process.stderr.write(`mdlineage: ${message}\n\n${HELP}\n`);
+      return 2;
+    }
+
+    if (parsed.values.help) {
+      process.stdout.write(`${HELP}\n`);
+      return 0;
+    }
+    if (parsed.values.version) {
+      process.stdout.write(`${VERSION}\n`);
+      return 0;
+    }
+
+    const command = parsed.positionals[0];
+    if (command === undefined) {
+      process.stderr.write(`mdlineage: no command given\n\n${HELP}\n`);
+      return 2;
+    }
+
+    if (command === 'baseline') {
+      return await runBaseline(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'server') {
+      return runServer(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'mcp') {
+      return runMcp(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'suggest') {
+      return runSuggest(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'init') {
+      return runInit(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'fix') {
+      return runFix(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'config') {
+      return runConfigCommand(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'index') {
+      return await runIndexCommand(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command !== 'check') {
+      process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
+      return 2;
+    }
+
+    const format = parseFormat(parsed.values.format);
+    if (format === null) {
+      process.stderr.write(
+        `mdlineage: --format must be one of ${FORMATS.join(', ')}, got '${parsed.values.format}'\n`,
+      );
+      return 2;
+    }
+
+    // An argument the options list does not recognise lands in `positionals` as
+    // a path; a leading dash names an option the CLI does not have, which is a
+    // usage error rather than a file to look for.
+    const stray = parsed.positionals.slice(1).filter((arg) => arg.startsWith('-'));
+    if (stray.length > 0) {
+      process.stderr.write(`mdlineage: unknown option: ${stray.join(', ')}\n\n${HELP}\n`);
+      return 2;
+    }
+
+    const cwd = processCwd();
+    const paths = parsed.positionals.slice(1);
+    const exclude = parsed.values.exclude ?? [];
+    const config = parsed.values.config;
+    const frail = parsed.values.frail === true;
+    // `--incremental` is on by default; `--no-incremental` (or
+    // `--incremental=false`) turns the workspace pass off.
+    const incremental = parsed.values['no-incremental'] !== true && parsed.values.incremental !== false;
+    // A committed baseline is part of the repository's contract; `--no-baseline`
+    // is the audit view that reports the debt it accepts.
+    const noBaseline = parsed.values['no-baseline'] === true;
+    const noIgnore = parsed.values['no-ignore'] === true || parsed.values.ignore === false;
+
+    if (parsed.values.changed) {
+      // `--untracked` defaults on; `--no-untracked` (or `--untracked=false`)
+      // turns it off.
+      const untracked = parsed.values['no-untracked'] !== true && parsed.values.untracked !== false;
+      return await runChanged({ format, cwd, paths, exclude, config, untracked, incremental, frail, noBaseline, noIgnore });
+    }
+    return await runPaths({ format, cwd, paths, exclude, config, incremental, frail, noBaseline, noIgnore });
   } catch (error) {
-    // parseArgs is strict: an unknown flag throws instead of reaching the
-    // per-command usage checks, and a usage error must exit 2, not crash.
-    const message = error instanceof Error ? error.message : String(error);
-    process.stderr.write(`mdlineage: ${message}\n\n${HELP}\n`);
-    return 2;
+    if (error instanceof UsageError) {
+      process.stderr.write(`mdlineage: ${error.message}\n`);
+      return 2;
+    }
+    throw error;
   }
-
-  if (parsed.values.help) {
-    process.stdout.write(`${HELP}\n`);
-    return 0;
-  }
-  if (parsed.values.version) {
-    process.stdout.write(`${VERSION}\n`);
-    return 0;
-  }
-
-  const command = parsed.positionals[0];
-  if (command === undefined) {
-    process.stderr.write(`mdlineage: no command given\n\n${HELP}\n`);
-    return 2;
-  }
-
-  if (command === 'baseline') {
-    return runBaseline(parsed.positionals.slice(1), parsed.values);
-  }
-  if (command === 'server') {
-    return runServer(parsed.positionals.slice(1), parsed.values);
-  }
-  if (command === 'mcp') {
-    return runMcp(parsed.positionals.slice(1), parsed.values);
-  }
-  if (command === 'suggest') {
-    return runSuggest(parsed.positionals.slice(1), parsed.values);
-  }
-  if (command === 'init') {
-    return runInit(parsed.positionals.slice(1), parsed.values);
-  }
-  if (command === 'fix') {
-    return runFix(parsed.positionals.slice(1), parsed.values);
-  }
-  if (command === 'config') {
-    return runConfigCommand(parsed.positionals.slice(1), parsed.values);
-  }
-  if (command === 'index') {
-    return runIndexCommand(parsed.positionals.slice(1), parsed.values);
-  }
-  if (command !== 'check') {
-    process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
-    return 2;
-  }
-
-  const format = parseFormat(parsed.values.format);
-  if (format === null) {
-    process.stderr.write(
-      `mdlineage: --format must be one of ${FORMATS.join(', ')}, got '${parsed.values.format}'\n`,
-    );
-    return 2;
-  }
-
-  // An argument the options list does not recognise lands in `positionals` as
-  // a path; a leading dash names an option the CLI does not have, which is a
-  // usage error rather than a file to look for.
-  const stray = parsed.positionals.slice(1).filter((arg) => arg.startsWith('-'));
-  if (stray.length > 0) {
-    process.stderr.write(`mdlineage: unknown option: ${stray.join(', ')}\n\n${HELP}\n`);
-    return 2;
-  }
-
-  const cwd = processCwd();
-  const paths = parsed.positionals.slice(1);
-  const exclude = parsed.values.exclude ?? [];
-  const config = parsed.values.config;
-  const frail = parsed.values.frail === true;
-  // `--incremental` is on by default; `--no-incremental` (or
-  // `--incremental=false`) turns the workspace pass off.
-  const incremental = parsed.values['no-incremental'] !== true && parsed.values.incremental !== false;
-  // A committed baseline is part of the repository's contract; `--no-baseline`
-  // is the audit view that reports the debt it accepts.
-  const noBaseline = parsed.values['no-baseline'] === true;
-
-  if (parsed.values.changed) {
-    // `--untracked` defaults on; `--no-untracked` (or `--untracked=false`)
-    // turns it off.
-    const untracked = parsed.values['no-untracked'] !== true && parsed.values.untracked !== false;
-    return runChanged({ format, cwd, paths, exclude, config, untracked, incremental, frail, noBaseline });
-  }
-  return runPaths({ format, cwd, paths, exclude, config, incremental, frail, noBaseline });
 }
 
 /** Validate a --format argument, returning null when it is not one this CLI has. */
@@ -279,6 +293,7 @@ interface RunOptions {
   incremental: boolean;
   frail: boolean;
   noBaseline: boolean;
+  noIgnore?: boolean;
 }
 
 interface ChangedRunOptions extends RunOptions {
@@ -286,11 +301,28 @@ interface ChangedRunOptions extends RunOptions {
 }
 
 /** `mdlineage check [paths...]`: expand, read, validate, report. */
-function runPaths(options: RunOptions): number {
+async function runPaths(options: RunOptions): Promise<number> {
+  const preloaded = loadConfig(options.config, options.config ? undefined : options.cwd);
+  const preloadedConfig = {
+    config: preloaded.config,
+    path: preloaded.config.source,
+    diagnostics: preloaded.diagnostics.map((d) => ({
+      code: d.code,
+      severity: d.severity,
+      message: d.message,
+    })),
+  };
+
+  const discoveryOptions: DiscoveryOptions = {
+    config: preloaded.config,
+    exclude: options.exclude,
+    noIgnore: options.noIgnore,
+  };
+
   const { files, others, missed, excluded } = expandMarkdownPaths(
     options.paths.length === 0 ? ['.'] : options.paths,
     options.cwd,
-    { exclude: options.exclude },
+    discoveryOptions,
   );
 
   if (missed.length > 0) {
@@ -303,7 +335,11 @@ function runPaths(options: RunOptions): number {
     );
   }
 
-  const result = checkFiles(files, toCheckOptions(options), others);
+  const checkOpts: CheckOptions = {
+    ...toCheckOptions(options),
+    preloadedConfig,
+  };
+  const result = await checkFiles(files, checkOpts, others);
   return emit(result, options);
 }
 
@@ -324,7 +360,7 @@ function toCheckOptions(options: RunOptions): CheckOptions {
 }
 
 /** `mdlineage check --changed`: the worktree-byte channel. */
-function runChanged(options: ChangedRunOptions): number {
+async function runChanged(options: ChangedRunOptions): Promise<number> {
   const root = repositoryRoot(options.cwd);
   if (root === null) {
     process.stderr.write(`mdlineage: --changed needs a git repository (cwd: ${options.cwd})\n`);
@@ -355,7 +391,22 @@ function runChanged(options: ChangedRunOptions): number {
     }
   }
 
-  const result = checkFiles(files, toCheckOptions(options));
+  const preloaded = loadConfig(options.config, options.config ? undefined : options.cwd);
+  const preloadedConfig = {
+    config: preloaded.config,
+    path: preloaded.config.source,
+    diagnostics: preloaded.diagnostics.map((d) => ({
+      code: d.code,
+      severity: d.severity,
+      message: d.message,
+    })),
+  };
+  const checkOpts: CheckOptions = {
+    ...toCheckOptions(options),
+    preloadedConfig,
+  };
+
+  const result = await checkFiles(files, checkOpts);
   return emit(result, options);
 }
 
@@ -409,7 +460,7 @@ function runConfigCommand(args: string[], values: ParsedArgs['values']): number 
 }
 
 /** `mdlineage index rebuild`: fresh in-memory index plus a report (§10.1). */
-function runIndexCommand(args: string[], values: ParsedArgs['values']): number {
+async function runIndexCommand(args: string[], values: ParsedArgs['values']): Promise<number> {
   const sub = args[0];
   if (values.help) {
     process.stdout.write(`${HELP}\n`);
@@ -429,7 +480,7 @@ function runIndexCommand(args: string[], values: ParsedArgs['values']): number {
     process.stderr.write(`mdlineage: unknown option: ${stray.join(', ')}\n\n${HELP}\n`);
     return 2;
   }
-  return indexRebuild({ format, configFile: values.config, cwd: processCwd(), exclude: values.exclude ?? [] });
+  return await indexRebuild({ format, configFile: values.config, cwd: processCwd(), exclude: values.exclude ?? [] });
 }
 
 /** `mdlineage server`: the dedicated LSP (§10.1). Only stdio exists in M3-a. */
@@ -541,7 +592,7 @@ function runSuggest(args: string[], values: ParsedArgs['values']): number {
  * the repository's contract, and a contract written from a subset would
  * silently exempt everything the subset did not visit.
  */
-function runBaseline(args: string[], values: ParsedArgs['values']): number {
+async function runBaseline(args: string[], values: ParsedArgs['values']): Promise<number> {
   const action = args[0];
   // The baseline is a repository-level contract, so every action anchors at the
   // repository root instead of the CWD: `verify` from a subdirectory must check
@@ -556,7 +607,7 @@ function runBaseline(args: string[], values: ParsedArgs['values']): number {
   };
 
   if (action === 'update') {
-    const change = updateBaseline(root, options);
+    const change = await updateBaseline(root, options);
     if (change.error) {
       // A baseline the run could not read is reported, and the file is left
       // alone: overwriting it would discard accepted exemptions with no way back.
@@ -586,7 +637,7 @@ function runBaseline(args: string[], values: ParsedArgs['values']): number {
   }
 
   if (action === 'verify') {
-    const { exit, lines } = verifyBaseline(root, options);
+    const { exit, lines } = await verifyBaseline(root, options);
     for (const line of lines) process.stdout.write(`${line}\n`);
     return exit;
   }

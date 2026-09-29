@@ -9,10 +9,10 @@
  * response.
  */
 
-import { readFileSync, statSync, readdirSync } from 'node:fs';
-import { isAbsolute, join, relative, resolve, sep, dirname } from 'node:path';
+import { readFileSync, statSync } from 'node:fs';
+import { isAbsolute, relative, resolve, sep, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import type { Config } from '@mdlineage/validator';
+import { scanWorkspaceUniverse, type Config } from '@mdlineage/validator';
 
 /**
  * §13's degradation threshold: a document above this is parsed for the cheap
@@ -109,24 +109,6 @@ export function toRootDirectory(path: string): string | null {
   }
 }
 
-/** True when a path is worth indexing: a readable Markdown file under `root`. */
-function isCandidate(path: string, root: string): boolean {
-  if (!isMarkdownUri(path)) return false;
-  const relativePath = relative(root, path);
-  // A path outside the root (the `..` of a symlink escape) is not this
-  // workspace's document.
-  if (relativePath === '' || relativePath.startsWith('..')) return false;
-  // The default excludes mirror the CLI's (packages/cli/src/paths.ts): a
-  // dependency tree and a build output tree are not documents to validate.
-  const normalized = relativePath.split(sep).join('/');
-  for (const pattern of EXCLUDE_PREFIXES) {
-    if (normalized === pattern || normalized.startsWith(`${pattern}/`)) return false;
-  }
-  return true;
-}
-
-const EXCLUDE_PREFIXES = ['node_modules', 'dist', 'vendor'] as const;
-
 /**
  * Read a document's text, or null when it is not readable UTF-8.
  *
@@ -157,89 +139,13 @@ export function readDocument(path: string): string | null {
  * literally, and the config schema's own examples are plain directory names.
  */
 export function scanWorkspace(root: string, config: Config): Map<string, string> {
-  const files = new Map<string, string>();
-  const exclude = Array.isArray(config.files.exclude) ? config.files.exclude : [];
-  const queue = [resolve(root)];
-
-  while (queue.length > 0) {
-    const dir = queue.pop() as string;
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (isExcludedDir(path, root, exclude)) continue;
-        queue.push(path);
-        continue;
-      }
-      if (!isCandidate(path, root)) continue;
-      const text = readDocument(path);
-      if (text !== null) files.set(toIndexPath(root, path), text);
-    }
-  }
-
-  return files;
+  return scanWorkspaceUniverse(root, config).documents;
 }
 
 /**
- * Non-Markdown files under `root`, root-relative and POSIX-spelled: the
+ * Non-Markdown files and directories under `root`, root-relative and POSIX-spelled: the
  * known-path set MDL401 resolves against.
- *
- * The index's own vocabulary is the spelling these paths must carry
- * (`toIndexPath`), or the set silently matches nothing. Directories are
- * excluded (`nodir`), so a link to a real directory still reports MDL401.
- * Markdown files are excluded too — a missing document must stay MDL401 even
- * when the scan's own scope would have missed it. Equivalent to the CLI's
- * `knownNonMarkdownPaths` (packages/cli/src/paths.ts); reimplemented here
- * because the CLI depends on this package, not the other way round.
  */
 export function listKnownNonMarkdownPaths(root: string, config: Config): string[] {
-  const exclude = Array.isArray(config.files.exclude) ? config.files.exclude : [];
-  const out: string[] = [];
-  const queue = [resolve(root)];
-  while (queue.length > 0) {
-    const dir = queue.pop() as string;
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (isExcludedDir(path, root, exclude)) continue;
-        queue.push(path);
-        continue;
-      }
-      if (isMarkdownUri(path)) continue;
-      const key = toIndexPath(root, path);
-      // `toIndexPath` keeps an out-of-root path absolute, and an absolute key
-      // is not a spelling a root-relative link ever normalizes to.
-      if (key.startsWith('/')) continue;
-      out.push(key);
-    }
-  }
-  return out.sort();
-}
-
-/** A directory the config or the defaults say to walk past. */
-function isExcludedDir(path: string, root: string, exclude: readonly string[]): boolean {
-  const normalized = relative(root, path).split(sep).join('/');
-  for (const pattern of EXCLUDE_PREFIXES) {
-    if (normalized === pattern) return true;
-  }
-  for (const pattern of exclude) {
-    const trimmed = pattern.replace(/^\.?\//, '').replace(/\/$/, '');
-    if (trimmed.length === 0) continue;
-    if (normalized === trimmed) return true;
-    // A `**/prefix` or trailing-`/**` shape reduces to the directory name.
-    if (pattern.startsWith('**/') && normalized === pattern.slice(3).replace(/\/\*+$/, '')) return true;
-    if (pattern.endsWith('/**') && normalized === pattern.slice(0, -3)) return true;
-  }
-  return false;
+  return scanWorkspaceUniverse(root, config).knownPaths;
 }

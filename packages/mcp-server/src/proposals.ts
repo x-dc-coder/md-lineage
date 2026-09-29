@@ -20,9 +20,31 @@
  * lives, who owns it) this one does not have.
  */
 
+import { createHash } from 'node:crypto';
 import type { Diagnostic } from '@mdlineage/validator';
 import { scanBoundary, parseFrontmatter, buildLineMap, positionAt, scanLineEndings } from '@mdlineage/validator';
 import type { LineMap } from '@mdlineage/validator';
+
+/**
+ * Propose a document id from a file path.
+ * Cleans path segments, sluggifies to lowercase, collapses dots/dashes,
+ * and falls back to doc.<sha256-first-10> if invalid or > 128 chars.
+ */
+export function proposeDocumentId(path: string): string {
+  const withoutExt = path.replace(/\.[^/.]+$/, '');
+  const slug = withoutExt
+    .toLowerCase()
+    .replace(/[\\/]+/g, '.')
+    .replace(/[^a-z0-9.-]+/g, '-')
+    .replace(/[-.]+/g, (m) => m[0]!)
+    .replace(/^[-.]+|[-.]+$/g, '');
+  const pattern = /^[a-z0-9]+(?:[.-][a-z0-9]+)*$/;
+  if (slug.length > 0 && slug.length <= 128 && pattern.test(slug)) {
+    return slug;
+  }
+  const hash = createHash('sha256').update(path, 'utf8').digest('hex').slice(0, 10);
+  return `doc.${hash}`;
+}
 
 /** One edit to the front matter, addressed the way §8.3 addresses everything. */
 export interface MetadataOperation {
@@ -185,6 +207,34 @@ export function buildProposals(
   const operations: MetadataOperation[] = [];
   const addresses: string[] = [];
 
+  const hasMdl003 = diagnostics.some((d) => d.code === 'MDL003');
+  const hasSyntaxError = diagnostics.some((d) => d.code === 'MDL001' || d.code === 'MDL002');
+  if (hasMdl003 && !hasSyntaxError) {
+    const { kinds, statuses } = options.vocabulary;
+    const derivedId = proposeDocumentId(options.path);
+    const kind = kinds[0] ?? 'policy';
+    const status = statuses[0] ?? 'draft';
+    operations.push({
+      jsonPointer: '',
+      value: {
+        schema: 1,
+        id: derivedId,
+        kind,
+        status,
+      },
+      rationale: "Document lacks mdlineage metadata (MDL003); proposed complete initial mdlineage block.",
+    });
+    addresses.push('MDL003');
+    return {
+      path: options.path,
+      operations,
+      addresses: [...new Set(addresses)],
+      source: 'rules',
+      generator: 'mdlineage/suggest_metadata/rules-v1',
+      contentHash: options.contentHash,
+    };
+  }
+
   const missing = new Map<string, { pointer: string; index?: number }>();
   for (const diag of diagnostics) {
     if (diag.code !== 'MDL102') continue;
@@ -306,6 +356,48 @@ export function applyProposalToContent(
   proposal: MetadataProposal,
   content: string,
 ): { edits: FrontMatterTextEdit[]; patched: string; applied: readonly string[] } | null {
+  const rootOp = proposal.operations.find((op) => op.jsonPointer === '');
+  if (rootOp) {
+    const val = rootOp.value as { schema: number; id: string; kind: string; status: string } | undefined;
+    if (!val) return null;
+    const boundary = scanBoundary(content);
+    const eol = content.includes('\r\n') ? '\r\n' : '\n';
+    const mdlineageBlock = `mdlineage:${eol}  schema: ${val.schema}${eol}  id: ${val.id}${eol}  kind: ${val.kind}${eol}  status: ${val.status}${eol}`;
+
+    if (!boundary || boundary.closeStart === null) {
+      // Document has no frontmatter: insert complete --- block at offset 0
+      const newBlock = `---${eol}${mdlineageBlock}---${eol}${eol}`;
+      const edit: FrontMatterTextEdit = {
+        line: 0,
+        character: 0,
+        newText: newBlock,
+        oldText: '',
+      };
+      return {
+        edits: [edit],
+        patched: newBlock + content,
+        applied: [''],
+      };
+    } else {
+      // Document has frontmatter: insert before closing ---
+      const lineMap = buildLineMap(content);
+      const pos = positionAt(lineMap, boundary.closeStart);
+      const edit: FrontMatterTextEdit = {
+        line: pos.line - 1,
+        character: pos.column - 1,
+        newText: mdlineageBlock,
+        oldText: '',
+      };
+      const before = content.slice(0, boundary.closeStart);
+      const after = content.slice(boundary.closeStart);
+      return {
+        edits: [edit],
+        patched: before + mdlineageBlock + after,
+        applied: [''],
+      };
+    }
+  }
+
   const located = locateInsertions(proposal, content);
   if (!located || located.length === 0) return null;
 

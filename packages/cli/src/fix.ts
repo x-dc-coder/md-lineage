@@ -62,7 +62,9 @@ export function runFix(args: string[], values: FixValues): number {
   }
 
   const paths = args.filter((p) => isInside(root, resolve(cwd, p)));
+  const loaded = loadConfig(values.config, values.config ? undefined : cwd);
   const { files, missed, excluded } = expandMarkdownPaths(paths.length === 0 ? ['.'] : paths, cwd, {
+    config: loaded.config,
     exclude: values.exclude,
   });
   if (missed.length > 0) {
@@ -76,7 +78,6 @@ export function runFix(args: string[], values: FixValues): number {
   }
   if (rejected.length > 0) return 1;
 
-  const loaded = loadConfig(values.config, values.config ? undefined : cwd);
   // A config the run could not use is reported the way `check` reports it and
   // fails the run: a typo in --config must not read as a clean pass.
   for (const diag of loaded.diagnostics) {
@@ -160,6 +161,7 @@ function planFixes(
   path: string,
   config: ReturnType<typeof loadConfig>['config'],
 ): { fixed: string; fixes: PlannedFix[] } | null {
+  if (content.length === 0) return { fixed: content, fixes: [] };
   const fixes: PlannedFix[] = [];
   let text = content;
 
@@ -185,7 +187,7 @@ function planFixes(
         if (!op) continue;
         fixes.push({
           at: String(applied.edits[i]!.line + 1),
-          code: op.jsonPointer.split('/').pop() ?? 'insert',
+          code: op.jsonPointer.split('/').pop() || 'mdlineage',
           detail: op.rationale,
         });
       }

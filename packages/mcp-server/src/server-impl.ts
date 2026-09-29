@@ -22,7 +22,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import {
   readFileSync,
-  readdirSync,
   renameSync,
   rmSync,
   statSync,
@@ -44,8 +43,12 @@ import {
   validateDocumentSync,
   createWorkspaceIndex,
   validateWorkspace,
+  gitClocksForIndex,
   loadConfig,
   parseBaseline,
+  scanWorkspaceUniverse,
+  scanBoundary,
+  parseFrontmatter,
   type Config,
   type Diagnostic,
   type DocPath,
@@ -58,11 +61,12 @@ import {
   applyProposalToContent,
   diffOf,
   resetProposalIds,
+  proposeDocumentId,
   type AcceptedProposal,
   type MetadataProposal,
 } from './proposals.js';
 
-export { resetProposalIds, ProposalQueue, buildProposals, applyProposalToContent, diffOf };
+export { resetProposalIds, ProposalQueue, buildProposals, applyProposalToContent, diffOf, proposeDocumentId };
 
 const SERVER_NAME = 'mdlineage';
 // Resolved relative to this file: dist/ sits beside ../package.json in the repo and the tarball.
@@ -588,22 +592,23 @@ function registerValidateRepository(server: McpServer, context: McpServerContext
       },
       annotations: { readOnlyHint: true },
     },
-    ({ paths }) => {
-      const files = scanWorkspaceFiles(context.root, context.config);
+    async ({ paths }) => {
+      const universe = scanWorkspaceUniverse(context.root, context.config);
       const scope = paths ? new Set(paths.map((p) => resolvePath(p, context.root))) : null;
       const indexFiles = new Map<DocPath, string>();
-      for (const [path, content] of files) {
+      for (const [path, content] of universe.documents) {
         if (scope && !scope.has(path)) continue;
         indexFiles.set(path, content);
       }
-      const index = createWorkspaceIndex(indexFiles, context.config, listKnownNonMarkdownPaths(context.root, context.config));
+      const index = createWorkspaceIndex(indexFiles, context.config, universe.knownPaths);
 
       // The baseline is applied by matching (code, path) pairs, so the count of
       // what it covers needs the un-suppressed set too: compute both, report the
       // reported set, and say how many the baseline took.
-      const all = validateWorkspace(index);
+      const gitClocks = await gitClocksForIndex(index, context.root);
+      const all = validateWorkspace(index, { gitClocks });
       const baseline = loadBaseline(context.root);
-      const reported = baseline ? validateWorkspace(index, { baseline }) : all;
+      const reported = baseline ? validateWorkspace(index, { baseline, gitClocks }) : all;
       const suppressed = baseline ? all.length - reported.length : 0;
 
       return asJson({
@@ -672,14 +677,14 @@ function registerListDocumentIds(server: McpServer, context: McpServerContext): 
       annotations: { readOnlyHint: true },
     },
     ({ query, kind, status }) => {
-      const files = scanWorkspaceFiles(context.root, context.config);
-      const index = createWorkspaceIndex(files, context.config, listKnownNonMarkdownPaths(context.root, context.config));
+      const universe = scanWorkspaceUniverse(context.root, context.config);
+      const index = createWorkspaceIndex(universe.documents, context.config, universe.knownPaths);
       const needle = query?.toLowerCase();
       const out: Array<{ id: string; path: string; kind: string | null; status: string | null }> = [];
       for (const path of index.paths()) {
         const entry = index.entryOf(path);
         if (!entry) continue;
-        const metadata = entryMetadata(entry, files.get(path) ?? '', context.config);
+        const metadata = entryMetadata(entry, universe.documents.get(path) ?? '', context.config);
         if (kind && metadata.kind !== kind) continue;
         if (status && metadata.status !== status) continue;
         if (needle) {
@@ -715,8 +720,8 @@ function registerResolveRelationTarget(server: McpServer, context: McpServerCont
       annotations: { readOnlyHint: true },
     },
     ({ id }) => {
-      const files = scanWorkspaceFiles(context.root, context.config);
-      const index = createWorkspaceIndex(files, context.config, listKnownNonMarkdownPaths(context.root, context.config));
+      const universe = scanWorkspaceUniverse(context.root, context.config);
+      const index = createWorkspaceIndex(universe.documents, context.config, universe.knownPaths);
       const paths = index.idToPaths(id);
       return asJson({
         id,
@@ -1058,110 +1063,6 @@ function entryMetadata(
     status: typeof metadata['status'] === 'string' ? (metadata['status'] as string) : null,
   };
 }
-
-import { scanBoundary, parseFrontmatter } from '@mdlineage/validator';
-
-/**
- * Read the Markdown files under `root` that the config says to include.
- *
- * The prefix form mirrors the language server's scanner: the config schema
- * allows plain directory names, and a glob engine is not this package's
- * dependency to add at startup.
- */
-function scanWorkspaceFiles(root: string, config: Config): Map<DocPath, string> {
-  const files = new Map<DocPath, string>();
-  const exclude = Array.isArray(config.files.exclude) ? config.files.exclude : [];
-  const queue: string[] = [resolve(root)];
-
-  while (queue.length > 0) {
-    const dir = queue.pop() as string;
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (isExcludedDir(path, root, exclude)) continue;
-        queue.push(path);
-        continue;
-      }
-      if (!path.toLowerCase().endsWith('.md')) continue;
-      const rel = relative(root, path).split(sep).join('/');
-      if (rel === '' || rel.startsWith('..')) continue;
-      let text: string;
-      try {
-        text = readFileSync(path, 'utf8');
-      } catch {
-        continue;
-      }
-      files.set(rel, text);
-    }
-  }
-
-  return files;
-}
-
-/**
- * Non-Markdown files under `root`, root-relative and POSIX-spelled: the
- * known-path set MDL401 resolves against.
- *
- * The keys are spelled exactly as `scanWorkspaceFiles` spells documents
- * (`relative(root, …)`), which is also the index's vocabulary, or the set
- * would silently match nothing. Directories are skipped, so a link to a real
- * directory still reports MDL401, and Markdown files are excluded so a missing
- * document stays MDL401. Equivalent to the CLI's `knownNonMarkdownPaths`
- * (packages/cli/src/paths.ts); reimplemented here because the CLI depends on
- * this package, not the other way round.
- */
-function listKnownNonMarkdownPaths(root: string, config: Config): string[] {
-  const exclude = Array.isArray(config.files.exclude) ? config.files.exclude : [];
-  const out: string[] = [];
-  const queue: string[] = [resolve(root)];
-  while (queue.length > 0) {
-    const dir = queue.pop() as string;
-    let entries: import('node:fs').Dirent[];
-    try {
-      entries = readdirSync(dir, { withFileTypes: true });
-    } catch {
-      continue;
-    }
-    for (const entry of entries) {
-      const path = join(dir, entry.name);
-      if (entry.isDirectory()) {
-        if (isExcludedDir(path, root, exclude)) continue;
-        queue.push(path);
-        continue;
-      }
-      if (path.toLowerCase().endsWith('.md')) continue;
-      const rel = relative(root, path).split(sep).join('/');
-      if (rel === '' || rel.startsWith('..')) continue;
-      out.push(rel);
-    }
-  }
-  return out.sort();
-}
-
-/** A directory the config or the defaults say to walk past (same rule as the LSP). */
-function isExcludedDir(path: string, root: string, exclude: readonly string[]): boolean {
-  const normalized = relative(root, path).split(sep).join('/');
-  for (const pattern of DEFAULT_EXCLUDES) {
-    if (normalized === pattern) return true;
-  }
-  for (const pattern of exclude) {
-    const trimmed = pattern.replace(/^\.?\//, '').replace(/\/$/, '');
-    if (trimmed.length === 0) continue;
-    if (normalized === trimmed) return true;
-    // A `**/prefix` or trailing-`/**` shape reduces to the directory name.
-    if (pattern.startsWith('**/') && normalized === trimmed) return true;
-    if (pattern.endsWith('/**') && normalized === pattern.slice(0, -3)) return true;
-  }
-  return false;
-}
-
-const DEFAULT_EXCLUDES = ['node_modules', 'dist', 'vendor'] as const;
 
 /**
  * A committed baseline, when the root has one. Read-only: the tool reports the
