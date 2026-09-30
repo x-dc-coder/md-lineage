@@ -16,3 +16,4 @@ dist/
 packages/*/schemas/
 # local `npm pack` tarballs must never be committed
 packages/**/*.tgz
+*.tgz
