@@ -25,6 +25,8 @@ jobs:
     name: publish (${{ github.event.release.tag_name || inputs.tag }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    env:
+      NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
     steps:
       - name: Checkout (Release ref or dispatched tag)
         uses: actions/checkout@v4
@@ -53,35 +55,35 @@ jobs:
       # a warning, which would let a partially published release pass green.
       # Publishing one package at a time makes that a hard, local failure.
       - name: Publish @mdlineage/validator
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: env.NPM_TOKEN != ''
         run: npm publish --provenance --access public
         working-directory: packages/validator
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mdlineage/remark-lint-mdlineage
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: env.NPM_TOKEN != ''
         run: npm publish --provenance --access public
         working-directory: packages/remark-lint-mdlineage
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mdlineage/cli
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: env.NPM_TOKEN != ''
         run: npm publish --provenance --access public
         working-directory: packages/cli
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mdlineage/language-server
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: env.NPM_TOKEN != ''
         run: npm publish --provenance --access public
         working-directory: packages/language-server
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mdlineage/mcp-server
-        if: ${{ secrets.NPM_TOKEN != '' }}
+        if: env.NPM_TOKEN != ''
         run: npm publish --provenance --access public
         working-directory: packages/mcp-server
         env:
