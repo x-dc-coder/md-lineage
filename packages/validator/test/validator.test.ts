@@ -498,15 +498,26 @@ describe('config defaults', () => {
   });
 
   it('this repository\'s mdlineage.config.yaml validates against the config schema', () => {
-    // Progressive adoption: the shipped config turns metadata off, so the
-    // docs tree's lack of front matter is not an error. It must still be a
-    // schema-valid config file, because an invalid one falls back to the
-    // defaults — which would silently re-enable MDL003 repository-wide.
+    // Adoption pilot (2026-09-30): the docs/ tree carries mdlineage front
+    // matter and must keep carrying it; every other path stays exempt. The
+    // split is the two layout rules — catch-all optional, docs/** required.
+    // The file must stay schema-valid, because an invalid one falls back to
+    // the defaults, which would re-require metadata repository-wide.
     const result = loadConfigFrom(resolve(repoRoot, 'mdlineage.config.yaml'));
     assert.deepEqual(result.diagnostics, [], 'the repository config loads cleanly');
     assert.equal(result.config.configVersion, 1);
-    assert.equal(result.config.metadata.required, false, 'metadata is not required yet');
+    assert.equal(result.config.metadata.required, true, 'the docs/ pilot is enforced');
     assert.equal(result.config.source, resolve(repoRoot, 'mdlineage.config.yaml'));
+    // The exemption split: catch-all first, the docs/** requirement last.
+    assert.equal(result.config.layout.length, 2, 'two layout rules');
+    assert.equal(result.config.layout[0]?.require?.frontmatter, 'optional');
+    assert.equal(result.config.layout[1]?.match, 'docs/**');
+    assert.equal(result.config.layout[1]?.require?.frontmatter, 'required');
+    // The custom vocabulary is a superset of the validator defaults that the
+    // fixtures rely on.
+    for (const kind of ['policy', 'guide', 'architecture', 'reference']) {
+      assert.ok(result.config.vocabulary.kinds.includes(kind), `fixture kind survives: ${kind}`);
+    }
     // The config omits `relations` and `diagnostics`, so the defaults must
     // survive: MDL305 (supersedes cycles) and the MDL301/MDL304 severities
     // are what the workspace layer's fixture contract depends on.

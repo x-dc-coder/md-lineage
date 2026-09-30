@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.reviews.2026-09-21-round1-adjudication
+  kind: report
+  status: active
+---
+
 # Cross-review round 1 — adjudication record
 
 Date: 2026-09-21. Two independent reviewers (Atria-Dawn-Preview, glm-5.3) audited all nine design documents. Raw reports: `atria-dawn-preview.md`, `glm-5.3.md` in this directory.

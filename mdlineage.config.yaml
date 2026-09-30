@@ -1,13 +1,29 @@
 # mdlineage.config.yaml — the authoritative, non-executable configuration
 # (docs/remark-language-server-solution.md §7.1).
 #
-# This repository adopts MDLineage incrementally: the docs tree carries no
-# mdlineage front matter yet, so metadata is not required. Turning
-# `metadata.required` on is a later step, taken file by file; until then
-# MDL003 stays off repository-wide and the baseline records any debt that
-# lands in the meantime.
+# Adoption state (2026-09-30): the docs/ tree is the pilot. Every Markdown
+# file under docs/ must carry mdlineage front matter; everywhere else
+# (README, test fixtures) front matter stays optional until adopted.
+#
+# `metadata.required: true` plus the layout rules below implement the split:
+# the catch-all rule exempts every path, and the docs/** rule re-requires
+# front matter — the last matching rule wins.
 
 configVersion: 1
 
 metadata:
-  required: false
+  required: true
+
+# Repository-defined genres. Keeps the validator defaults (policy, guide,
+# architecture, reference) — the fixtures rely on them — and adds the genres
+# this documentation tree actually uses.
+vocabulary:
+  kinds: [policy, guide, architecture, reference, spec, report, plan, vision]
+
+layout:
+  - match: '**/*.md'
+    require:
+      frontmatter: optional
+  - match: 'docs/**'
+    require:
+      frontmatter: required

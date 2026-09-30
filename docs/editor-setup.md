@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.editor-setup
+  kind: guide
+  status: active
+---
+
 # Editor & agent setup
 
 MDLineage ships three integrations, each aimed at a different consumer:

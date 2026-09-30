@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.usage
+  kind: guide
+  status: active
+---
+
 # CLI usage
 
 **`mdlineage`** validates Markdown repositories: front-matter metadata, cross-file relations, links, anchors, and line-ending hygiene. This page is the operator's manual — read it if you have cloned this repository, or if you want to run MDLineage over your own Markdown. For the metadata model itself, see [frontmatter-spec.md](frontmatter-spec.md); for editor integration, [editor-setup.md](editor-setup.md).
@@ -208,7 +216,7 @@ mdlineage index rebuild [--format text|json]
 Scans the workspace, rebuilds the index in memory, and reports stats and index-level diagnostics. Nothing is persisted: the index is derived data, rebuilt on demand. On this repository:
 
 ```text
-mdlineage: index rebuilt: 45 files, 22 ids, 14 relations, 273 anchors, 23 diagnostics (18 errors), not persisted
+mdlineage: index rebuilt: 46 files, 39 ids, 14 relations, 328 anchors, 23 diagnostics (18 errors), not persisted
 ```
 
 That sample is a clean-checkout run; a live tree that carries uncommitted new files reports more, because those files are part of the scan.
@@ -309,7 +317,7 @@ Run `check .` over the same tree and those reports disappear, because the full s
 ## FAQ
 
 **`check .` says no diagnostics but my documents have no metadata. Is anything happening?**
-Yes. `metadata.required: false` (the generated default, and this repository's own setting) means missing metadata is not an error at all, so MDL003 stays off repository-wide. Turn the flag on once the corpus is on board — see [configuration.md](configuration.md). If the repository carries a baseline, exempted violations are suppressed too; use `--no-baseline` to see them.
+Yes. `metadata.required: false` — the default `init` generates — suppresses MDL003 entirely, so metadata checks stay off until a repository opts in (writing a front matter block activates that file's contract; a layout rule can scope the requirement to a subtree). This repository now runs that opt-in pilot: `metadata.required: true` with a catch-all layout rule (`require.frontmatter: optional`) that exempts everything except `docs/**`, which must carry front matter — see [configuration.md](configuration.md). If the repository carries a baseline, exempted violations are suppressed too; use `--no-baseline` to see them.
 
 **Why is a warning not failing my CI?**
 Only errors produce exit `1` by default. Pass `--frail` when any diagnostic should fail — this repository uses exactly that for its own remark gate (`npm run lint:md`).

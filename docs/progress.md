@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.progress
+  kind: report
+  status: active
+---
+
 # Project progress tracker
 
 Master status table for MDLineage. The product has four pillars (defined in `README.md`): P1 relationship indexing, P2 syntax & metadata validation, P3 line-ending hygiene, P4 directory conventions. Update this file whenever a milestone lands; each row links to its authoritative document section.

@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.reviews.2026-09-21-round1-atria-dawn-preview
+  kind: report
+  status: active
+---
+
 # MDLineage cross-review report (Atria-Dawn-Preview)
 
 Scope: all nine documents, 2026-09-21. External facts checked via MCP retrieval and direct GitHub/npm source fetches where possible; git behavior verified in sandbox repos; web_search/web_fetch unavailable to this reviewer. Unverifiable items marked as such. Files were not modified.

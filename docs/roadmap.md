@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.roadmap
+  kind: plan
+  status: active
+---
+
 # Initial roadmap
 
 Pillars referenced below are the four product pillars defined in `README.md`: relationship indexing (P1), syntax and metadata validation (P2), line-ending hygiene (P3), and directory conventions (P4).

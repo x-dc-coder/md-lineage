@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.vision
+  kind: vision
+  status: active
+---
+
 # Product vision
 
 ## Problem

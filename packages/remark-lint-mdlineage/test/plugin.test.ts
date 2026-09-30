@@ -99,8 +99,9 @@ function lintDocument(content: string, path?: string): VFile {
  * The config this harness runs with, and the option that makes the channel use
  * the same one.
  *
- * The repository ships a mdlineage.config.yaml (progressive adoption:
- * `metadata.required: false`), and the plugin's implicit lookup walks the CWD,
+ * The repository ships a mdlineage.config.yaml (docs/ pilot: `docs/**`
+ * requires front matter, everything else is exempt), and the plugin's
+ * implicit lookup walks the CWD,
  * so a harness that runs from the repo root would otherwise validate against a
  * config the manifest contract does not describe. Pointing both entries at one
  * explicit file keeps the comparison about the channel, not about which config
@@ -127,8 +128,8 @@ describe('remark channel — manifest contract (27 fixtures)', () => {
       // The reference: the validator, on the same bytes and the same config the
       // channel resolves. The harness's config is passed explicitly because the
       // plugin's implicit lookup walks the CWD, which finds this repository's
-      // own mdlineage.config.yaml (metadata.required: false) instead of the
-      // defaults the manifest contract pins.
+      // own mdlineage.config.yaml (the docs/ pilot requirement, not the
+      // validator defaults) instead of the defaults the manifest contract pins.
       const config = harnessConfig();
       const direct = validateDocumentSync({ path: entry.path, content, config });
       const directCodes = direct.diagnostics.map((d) => d.code).filter((c) => SINGLE_DOCUMENT_CODES.has(c));

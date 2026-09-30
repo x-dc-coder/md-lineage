@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.frontmatter-spec
+  kind: spec
+  status: draft
+---
+
 # Front Matter specification draft
 
 This is an initial proposal for document metadata. The schema is intentionally small and may change before the first release.

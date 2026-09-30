@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.dir-conventions
+  kind: spec
+  status: draft
+---
+
 # Directory conventions proposal
 
 Status: draft, design pending. This document frames the fourth MDLineage capability: validating the directory layout that Markdown documents live in. The open questions at the end must be answered before implementation.

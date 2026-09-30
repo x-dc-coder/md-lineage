@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.open-source-landscape
+  kind: reference
+  status: active
+---
+
 # Open-source project landscape
 
 This page records projects that informed the design. They are references for capabilities and patterns; this document does not imply that MDLineage will depend on them or copy their code. Before adopting code or packaging a dependency, review its current license, maintenance status, API, and operational requirements.

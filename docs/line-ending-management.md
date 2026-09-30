@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.line-ending-management
+  kind: spec
+  status: active
+---
+
 # Line-ending management
 
 This document records the CRLF incident that affected this repository, the mechanism behind it, and the plan to make line-ending hygiene a product feature of MDLineage. It is both an incident report and a feature proposal.

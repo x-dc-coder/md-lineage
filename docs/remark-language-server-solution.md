@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.remark-language-server-solution
+  kind: spec
+  status: active
+---
+
 # MDLineage 基于 remark-language-server 的实时校验方案
 
 ## 1. 结论与架构决策

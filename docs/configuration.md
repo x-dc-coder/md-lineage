@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.configuration
+  kind: reference
+  status: active
+---
+
 # Configuration and Front Matter reference
 
 MDLineage reads configuration from two places, and the boundary between them is

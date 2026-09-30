@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.architecture
+  kind: architecture
+  status: active
+---
+
 # Architecture
 
 ## Overview

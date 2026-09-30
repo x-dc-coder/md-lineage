@@ -132,9 +132,10 @@ describe('mdlineage check — fixtures', () => {
     }
     assert.ok(codes.has('MDL601'), 'the EOL scan layer reaches the CLI');
     assert.ok(codes.has('MDL602'), 'the EOL scan layer reaches the CLI');
-    // The workspace layer: MDL003 is absent because this repository's own
-    // mdlineage.config.yaml sets metadata.required: false, which is the
-    // progressive-adoption contract the config documents.
+    // The workspace layer: MDL003 is absent because every docs/ pilot file
+    // carries front matter, and the remaining scanned paths (fixtures,
+    // README) are exempt through the repository config's catch-all layout
+    // rule (require.frontmatter: optional).
     assert.ok(codes.has('MDL301'), 'the duplicate-id pair reaches the CLI');
     assert.ok(codes.has('MDL302'), 'the unresolved target reaches the CLI');
     assert.ok(codes.has('MDL305'), 'the forbidden cycle reaches the CLI');

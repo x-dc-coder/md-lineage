@@ -1,3 +1,11 @@
+---
+mdlineage:
+  schema: 1
+  id: docs.diagnostics
+  kind: reference
+  status: active
+---
+
 # Diagnostic code reference
 
 Every problem MDLineage reports carries a stable `MDLxxx` code. Codes and
@@ -98,9 +106,11 @@ docs/t2.md:3:7 MDL002 error Front matter YAML could not be parsed: Map keys must
 ### MDL003 — Missing mdlineage metadata (error)
 
 The document has no `mdlineage` key (or no front matter at all) while
-`metadata.required` is enabled. With `metadata.required: false` (the default in
-this repository) the code is suppressed entirely; adoption debt can also be
-recorded via the baseline or per-file adoption instead of tripping this error.
+`metadata.required` is enabled. With `metadata.required: false` the code is
+suppressed entirely; under `metadata.required: true` a layout rule with
+`require.frontmatter: optional` suppresses it per path — this repository
+requires it for `docs/**` and exempts everything else. Adoption debt can also
+be recorded via the baseline instead of tripping this error.
 
 ```text
 docs/s3.md:1:1 MDL003 error Missing mdlineage metadata: no 'mdlineage' key
