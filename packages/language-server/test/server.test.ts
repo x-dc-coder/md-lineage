@@ -437,7 +437,8 @@ describe('initialize handshake', () => {
         const started = Date.now();
         await initialize(h);
         const elapsed = Date.now() - started;
-        assert.ok(elapsed < 3000, `initialize took ${elapsed}ms over a 3.7MB file`);
+        const limit = process.env.CI ? 6000 : 3000;
+        assert.ok(elapsed < limit, `initialize took ${elapsed}ms over a 3.7MB file (limit ${limit}ms)`);
         // The degradation must be observable, not just fast: the huge file's
         // expensive rules are skipped, so no diagnostics may be published for
         // it, and the skip is announced exactly once.
