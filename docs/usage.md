@@ -4,6 +4,8 @@ mdlineage:
   id: docs.usage
   kind: guide
   status: active
+  created_at: 2026-09-24
+  updated_at: 2026-09-30
 ---
 
 # CLI usage

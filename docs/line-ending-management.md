@@ -4,6 +4,8 @@ mdlineage:
   id: docs.line-ending-management
   kind: spec
   status: active
+  created_at: 2026-09-21
+  updated_at: 2026-09-21
 ---
 
 # Line-ending management

@@ -4,6 +4,8 @@ mdlineage:
   id: docs.remark-language-server-solution
   kind: spec
   status: active
+  created_at: 2026-09-21
+  updated_at: 2026-09-24
 ---
 
 # MDLineage 基于 remark-language-server 的实时校验方案

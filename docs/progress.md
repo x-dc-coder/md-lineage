@@ -4,6 +4,8 @@ mdlineage:
   id: docs.progress
   kind: report
   status: active
+  created_at: 2026-09-21
+  updated_at: 2026-09-30
 ---
 
 # Project progress tracker

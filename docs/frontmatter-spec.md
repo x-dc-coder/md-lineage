@@ -4,6 +4,8 @@ mdlineage:
   id: docs.frontmatter-spec
   kind: spec
   status: draft
+  created_at: 2026-09-21
+  updated_at: 2026-09-21
 ---
 
 # Front Matter specification draft

@@ -4,6 +4,8 @@ mdlineage:
   id: docs.configuration
   kind: reference
   status: active
+  created_at: 2026-09-24
+  updated_at: 2026-09-30
 ---
 
 # Configuration and Front Matter reference

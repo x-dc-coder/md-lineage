@@ -4,6 +4,8 @@ mdlineage:
   id: docs.dir-conventions
   kind: spec
   status: draft
+  created_at: 2026-09-21
+  updated_at: 2026-09-21
 ---
 
 # Directory conventions proposal

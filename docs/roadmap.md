@@ -4,6 +4,8 @@ mdlineage:
   id: docs.roadmap
   kind: plan
   status: active
+  created_at: 2026-09-21
+  updated_at: 2026-09-24
 ---
 
 # Initial roadmap

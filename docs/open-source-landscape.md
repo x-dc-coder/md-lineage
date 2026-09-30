@@ -4,6 +4,8 @@ mdlineage:
   id: docs.open-source-landscape
   kind: reference
   status: active
+  created_at: 2026-09-21
+  updated_at: 2026-09-24
 ---
 
 # Open-source project landscape

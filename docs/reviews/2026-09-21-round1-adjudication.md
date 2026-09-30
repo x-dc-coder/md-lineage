@@ -3,7 +3,9 @@ mdlineage:
   schema: 1
   id: docs.reviews.2026-09-21-round1-adjudication
   kind: report
-  status: active
+  status: archived
+  created_at: 2026-09-21
+  updated_at: 2026-09-21
 ---
 
 # Cross-review round 1 — adjudication record

@@ -16,9 +16,12 @@ metadata:
 
 # Repository-defined genres. Keeps the validator defaults (policy, guide,
 # architecture, reference) — the fixtures rely on them — and adds the genres
-# this documentation tree actually uses.
+# this documentation tree actually uses. `archived` marks frozen historical
+# records (the round-1 review reports) that are kept for reference but are
+# not expected to receive updates.
 vocabulary:
   kinds: [policy, guide, architecture, reference, spec, report, plan, vision]
+  statuses: [draft, active, deprecated, archived]
 
 layout:
   - match: '**/*.md'
@@ -27,3 +30,11 @@ layout:
   - match: 'docs/**'
     require:
       frontmatter: required
+
+# Freshness governance: an `active` document that goes 180 days without a
+# substantive update earns MDL801. Every document carries authored
+# `created_at`/`updated_at`, so the Git-clock fallback stays idle in steady
+# state; `archived` review records and in-progress `draft` designs are
+# outside `staleStatuses` and are never nagged.
+lifecycle:
+  staleAfterDays: 180

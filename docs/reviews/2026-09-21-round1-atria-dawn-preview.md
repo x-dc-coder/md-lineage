@@ -3,7 +3,9 @@ mdlineage:
   schema: 1
   id: docs.reviews.2026-09-21-round1-atria-dawn-preview
   kind: report
-  status: active
+  status: archived
+  created_at: 2026-09-21
+  updated_at: 2026-09-21
 ---
 
 # MDLineage cross-review report (Atria-Dawn-Preview)

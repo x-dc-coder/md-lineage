@@ -4,6 +4,8 @@ mdlineage:
   id: docs.editor-setup
   kind: guide
   status: active
+  created_at: 2026-09-24
+  updated_at: 2026-09-24
 ---
 
 # Editor & agent setup
