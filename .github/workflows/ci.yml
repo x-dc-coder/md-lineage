@@ -61,8 +61,8 @@ jobs:
             npm pack -w "packages/$p" --dry-run
           done
 
-      # The root README is a contract, not prose — see docs/specs/readme-contract.md.
-      - name: Verify root README contract
+      # READMEs are contracts, not prose — see docs/specs/readme-contract.md.
+      - name: Verify README contracts
         run: node scripts/check-readme.mjs
 
       # Currently red: 6 no-literal-urls warnings in docs/open-source-landscape.md.

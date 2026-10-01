@@ -8,23 +8,37 @@ mdlineage:
   updated_at: 2026-10-02
 ---
 
-# Root README contract
+# README contract
 
-Status: active. This document defines what the repository-root `README.md` is for, what it may contain, and how its shape is enforced. The README is the front door; the manuals under `docs/使用手册/` are the reference.
+Status: active. This document defines what a landing page in this repository is for, what it may contain, and how its shape is enforced. The root `README.md` is the project's front door; the manuals under `docs/使用手册/` are the reference.
+
+## Scope
+
+| Target | Role | Contract |
+| --- | --- | --- |
+| `README.md` (root) | project facade | full contract (clauses 1–7) |
+| any other `*/README.md` | directory landing page / index | light contract (clauses 1L, 2, 7) |
+| `test/fixtures/**` | fixture contracts and test material | exempt — ordinary documents |
+
+A directory without a `README.md` is not a defect: a landing page is added when a directory needs a map, not by default.
+
+## Naming
+
+Hand-written landing pages are named `README.md` — GitHub renders a directory's `README.md` inline when browsing, which is exactly what a landing page is for. `INDEX.md` is reserved for **generated** listings: the catalog capability sketched in `docs/specs/dir-conventions.md` (`intent.catalog`) would produce machine-written indexes, and a hand-written index taking that name would collide with generated output. No third name is introduced.
 
 ## Purpose
 
-The README answers four questions on the first screen and nothing more: what this is, what it can do, how to get it running in about a minute, and where the documentation lives. It is a navigation surface, not a manual.
+A landing page answers "what is here, and where do I go next" and nothing more. It is a navigation surface, not a manual.
 
 ## Language
 
-Chinese only. The developer-facing documentation of this repository is Chinese (`docs/使用手册/**`), so the README follows it rather than duplicating the front door in a second language that would drift. If an English entry point is ever needed, add a short `README.en.md` (positioning, install, links) instead of translating the whole file.
+Chinese for hand-written landing pages. The developer-facing documentation of this repository is Chinese (`docs/使用手册/**`), so the README follows it rather than duplicating the front door in a second language that would drift. If an English entry point is ever needed, add a short `README.en.md` (positioning, install, links) instead of translating the whole file.
 
 ## No new facts
 
-Every statement in the README must already exist in `docs/使用手册/**` or `docs/specs/**`. The README may summarize and link; it must never be the only place a fact lives.
+Every statement in a landing page must already exist in `docs/使用手册/**` or `docs/specs/**`. A landing page may summarize and link; it must never be the only place a fact lives.
 
-## Structure and budgets
+## Structure and budgets (root facade)
 
 | Section | Content | Budget |
 | --- | --- | --- |
@@ -36,7 +50,11 @@ Every statement in the README must already exist in `docs/使用手册/**` or `d
 | 开发 | clone, build, test, self-check commands | ≤ 10 lines |
 | 许可证 | one line | ≤ 2 lines |
 
-Machine-enforced clauses, checked by `scripts/check-readme.mjs` in CI:
+Landing pages follow no prescribed sections — they mirror the tree they index — but they are held to the light budget below.
+
+## Machine-enforced clauses
+
+Root facade (`README.md`):
 
 1. total length ≤ 100 lines;
 2. exactly one `#` heading, and no heading deeper than `##`;
@@ -46,8 +64,14 @@ Machine-enforced clauses, checked by `scripts/check-readme.mjs` in CI:
 6. a fenced code block appears within the first 15 lines (the quick start stays above the fold);
 7. every link target is relative — external URLs are not allowed, badges included.
 
-Reviewed by humans rather than the script: the "no new facts" rule, and the reader test — a newcomer can install and run the tool from the first screen alone.
+Directory landing pages:
+
+1L. total length ≤ 120 lines;
+2. exactly one `#` heading, and no heading deeper than `##`;
+7. every link target is relative.
+
+Reviewed by humans rather than the script: the "no new facts" rule, the navigation-only role of landing pages, and the reader test — a newcomer can install and run the tool from the first screen alone.
 
 ## Enforcement
 
-`scripts/check-readme.mjs` runs as a step in the `gates` job of `.github/workflows/ci.yml`. Changing a limit means changing this document and the script in the same commit.
+`scripts/check-readme.mjs` walks the repository (skipping `.git`, `node_modules` and `dist`), applies the facade contract to the root `README.md` and the light contract to every other `README.md`, and runs as a step in the `gates` job of `.github/workflows/ci.yml`. Changing a limit or the target table means changing this document and the script in the same commit.
