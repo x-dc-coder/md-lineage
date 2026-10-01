@@ -7,6 +7,14 @@ The project combines two ideas:
 - **Front Matter is the reviewable source of truth** for stable document identity and confirmed relationships.
 - **RAG and graph analysis are maintenance tools** that discover candidate relationships, themes, duplicates, and possible contradictions.
 
+### Metadata sources
+
+MDLineage supports three ways to provide document metadata:
+
+1. **Out-of-band manifest (preferred)**: Declare document metadata in `mdlineage.manifest.yaml` (automatically discovered beside `mdlineage.config.yaml` or declared via `manifestFile`/inline `manifest`). Markdown files remain completely untouched and clean. Missing entries can be generated with `mdlineage manifest seed`.
+2. **YAML Front Matter**: Embedded `---` blocks in each Markdown document.
+3. **Disabled**: Set `metadata.required: false` to disable missing metadata checks across the repository.
+
 The goal is not to make every agent query depend on a large graph index. Most day-to-day work should remain possible with repository-native tools such as file paths, Markdown links, and grep. Semantic indexing is used where literal search misses meaningful relationships or where a global view is needed.
 
 ## Why the name
@@ -93,7 +101,8 @@ Exit codes: `0` no error-severity diagnostics, `1` at least one error (`--frail`
 | `baseline verify` | CI gate: diagnostics must match the baseline exactly. |
 | `server --stdio` | Run the language server over stdio. |
 | `mcp --stdio` | Run the MCP server over stdio. |
-| `init` | Bootstrap config, `.gitattributes`, and `schemas/` (dry run). |
+| `init` | Bootstrap config, manifest skeleton, `.gitattributes`, and `schemas/` (dry run). |
+| `manifest seed [paths...]` | Generate missing manifest entries for documents (dry run). |
 | `suggest <file>` | Propose metadata for a document (no writes). |
 | `fix [paths...]` | Apply safe fixes (dry run by default). |
 | `config validate` | Check the config loads and passes the schema. |

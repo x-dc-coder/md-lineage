@@ -42,11 +42,18 @@ import { runInit } from './init.js';
 import { runFix } from './fix.js';
 import { runMove } from './move.js';
 import { runOrganize } from './organize.js';
+import { runManifestSeed } from './manifest.js';
 import { configValidate } from './config-validate.js';
 import { indexRebuild } from './index-rebuild.js';
 import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
+
+Metadata sources:
+  Out-of-band manifest (preferred): declare document metadata in mdlineage.manifest.yaml
+                                    (via manifestFile, inline manifest, or manifest seed)
+  Front matter:                     declare metadata in --- YAML front matter blocks
+  Disabled:                         metadata.required: false disables missing metadata checks
 
 Usage:
   mdlineage check [paths...]        Validate Markdown (default: the CWD)
@@ -56,7 +63,9 @@ Usage:
   mdlineage baseline verify         CI gate: diagnostics must match the baseline
   mdlineage server --stdio          Run the language server over stdio
   mdlineage mcp --stdio             Run the MCP server over stdio
-  mdlineage init                    Bootstrap config, .gitattributes and schemas/ (dry run)
+  mdlineage init                    Bootstrap config, manifest skeleton, .gitattributes and schemas/ (dry run)
+  mdlineage manifest seed [paths...]
+                                    Generate missing manifest entries for documents (dry run)
   mdlineage suggest <file>          Propose metadata for a document (no writes)
   mdlineage fix [paths...]          Apply safe fixes (missing fields, duplicate
                                     relations, line endings; default: dry run)
@@ -93,7 +102,8 @@ Options:
   --no-baseline               Ignore the committed baseline (report accepted debt)
   --force                     baseline update: write despite an unreadable baseline
   --report-only               baseline update: print the change set, write nothing
-  --write                     init/fix: apply the planned changes; move: relocate
+  --write                     init/fix: apply the planned changes; manifest seed:
+                              write generated manifest entries; move: relocate
                               the file and write the repaired documents;
                               organize: execute the planned moves (default is a
                               dry run)
@@ -192,6 +202,7 @@ function readArgs(argv: string[]): ParsedArgs {
       // flag carries `fix`, `move` and `organize`, and `--dry-run`/`--apply` add
       // the two shapes those commands need.
       write: { type: 'boolean' },
+      json: { type: 'boolean' },
       'dry-run': { type: 'boolean' },
       apply: { type: 'boolean' },
       plan: { type: 'boolean' },
@@ -247,6 +258,14 @@ export async function main(argv: string[]): Promise<number> {
     }
     if (command === 'init') {
       return runInit(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'manifest') {
+      const sub = parsed.positionals[1];
+      if (sub !== 'seed') {
+        process.stderr.write(`mdlineage: unknown manifest subcommand '${sub ?? ''}', expected 'seed'\n\n${HELP}\n`);
+        return 2;
+      }
+      return runManifestSeed(parsed.positionals.slice(2), parsed.values);
     }
     if (command === 'fix') {
       return runFix(parsed.positionals.slice(1), parsed.values);

@@ -56,6 +56,7 @@ const SINGLE_DOCUMENT_CODES = new Set([
   'MDL102',
   'MDL103',
   'MDL104',
+  'MDL105',
   'MDL201',
   'MDL202',
   'MDL601',

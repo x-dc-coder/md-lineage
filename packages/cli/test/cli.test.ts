@@ -1018,11 +1018,13 @@ describe('mdlineage init', () => {
       const out = runCli(['init'], dir.root);
       assert.equal(out.status, 0);
       assert.match(out.stdout, /create mdlineage\.config\.yaml/);
+      assert.match(out.stdout, /create mdlineage\.manifest\.yaml/);
       assert.match(out.stdout, /create \.gitattributes/);
       assert.match(out.stdout, /\+\* text=auto eol=lf/);
       assert.match(out.stdout, /create schemas\//);
       assert.match(out.stdout, /dry run, nothing written/);
       assert.equal(existsSync(join(dir.root, 'mdlineage.config.yaml')), before);
+      assert.equal(existsSync(join(dir.root, 'mdlineage.manifest.yaml')), false);
       assert.equal(existsSync(join(dir.root, '.gitattributes')), false);
       assert.equal(existsSync(join(dir.root, 'schemas')), false);
     } finally {
@@ -1030,14 +1032,18 @@ describe('mdlineage init', () => {
     }
   });
 
-  it('--write creates config, .gitattributes and schemas/', () => {
+  it('--write creates config, manifest skeleton, .gitattributes and schemas/', () => {
     const dir = scratchDir();
     try {
       const out = runCli(['init', '--write'], dir.root);
       assert.equal(out.status, 0);
       const config = readFileSync(join(dir.root, 'mdlineage.config.yaml'), 'utf8');
       assert.match(config, /configVersion: 1/);
+      assert.match(config, /manifestFile: mdlineage\.manifest\.yaml/);
       assert.match(config, /required: false/);
+      const manifest = readFileSync(join(dir.root, 'mdlineage.manifest.yaml'), 'utf8');
+      assert.match(manifest, /version: 1/);
+      assert.match(manifest, /documents: \{\}/);
       assert.equal(readFileSync(join(dir.root, '.gitattributes'), 'utf8'), '* text=auto eol=lf\n');
       assert.ok(existsSync(join(dir.root, 'schemas')));
     } finally {
@@ -1067,12 +1073,28 @@ describe('mdlineage init', () => {
       assert.equal(runCli(['init', '--write'], dir.root).status, 0);
       const snapshot = (name: string) => readFileSync(join(dir.root, name));
       const config = snapshot('mdlineage.config.yaml');
+      const manifest = snapshot('mdlineage.manifest.yaml');
       const attr = snapshot('.gitattributes');
       const out = runCli(['init', '--write'], dir.root);
       assert.equal(out.status, 0);
       assert.match(out.stdout, /nothing to do, already initialized/);
       assert.equal(snapshot('mdlineage.config.yaml').equals(config), true);
+      assert.equal(snapshot('mdlineage.manifest.yaml').equals(manifest), true);
       assert.equal(snapshot('.gitattributes').equals(attr), true);
+    } finally {
+      dir.cleanup();
+    }
+  });
+
+  it('an existing mdlineage.manifest.yaml is not overwritten', () => {
+    const dir = scratchDir();
+    const existing = 'version: 1\ndocuments:\n  foo.md:\n    id: foo\n';
+    writeFileSync(join(dir.root, 'mdlineage.manifest.yaml'), existing);
+    try {
+      const out = runCli(['init', '--write'], dir.root);
+      assert.equal(out.status, 0);
+      assert.match(out.stdout, /mdlineage\.manifest\.yaml: already present, left unchanged/);
+      assert.equal(readFileSync(join(dir.root, 'mdlineage.manifest.yaml'), 'utf8'), existing);
     } finally {
       dir.cleanup();
     }

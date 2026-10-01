@@ -181,7 +181,7 @@ describe('workspace fixtures (manifest contract)', () => {
   it('workspace fixtures produce zero single-document codes', () => {
     const index = workspaceFixtureIndex();
     const all = validateWorkspace(index, { includeSingleDocument: true });
-    const singleDocCodes = ['MDL001', 'MDL002', 'MDL003', 'MDL101', 'MDL102', 'MDL103', 'MDL104', 'MDL201', 'MDL202', 'MDL203'];
+    const singleDocCodes = ['MDL001', 'MDL002', 'MDL003', 'MDL101', 'MDL102', 'MDL103', 'MDL104', 'MDL105', 'MDL201', 'MDL202', 'MDL203'];
     const noise = all.filter((d) => singleDocCodes.includes(d.code));
     assert.deepEqual(
       [...new Set(noise.map((d) => `${d.path}:${d.code}`))].sort(),

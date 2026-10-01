@@ -24,8 +24,8 @@
       "code": "MDL003",
       "layer": "frontmatter-syntax",
       "severity": "error",
-      "message": "Missing mdlineage metadata",
-      "description": "The document has no mdlineage key (or no front matter at all) while metadata.required is enabled. Suppressed entirely when metadata.required is false."
+      "message": "Missing mdlineage metadata: no metadata key and no manifest entry",
+      "description": "The document has no mdlineage key (or no front matter at all) and no out-of-band manifest entry while metadata.required is enabled. Suppressed entirely when metadata.required is false or when metadata is provided via manifest."
     },
     {
       "code": "MDL101",
@@ -54,6 +54,13 @@
       "severity": "error",
       "message": "Unknown mdlineage field",
       "description": "A key inside the mdlineage object is not part of schema v1. Detected via additionalProperties: false; catches misspelled fields suggested by models."
+    },
+    {
+      "code": "MDL105",
+      "layer": "schema",
+      "severity": "warning",
+      "message": "Document has front matter metadata; its manifest entry is ignored",
+      "description": "The document declares front matter metadata and also has an entry in the out-of-band manifest. The front matter metadata takes precedence; the manifest entry is ignored."
     },
     {
       "code": "MDL201",

@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/cli",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "mdlineage command line: single-document and repository Markdown validation through @mdlineage/validator.",
   "type": "module",
   "main": "./dist/main.js",

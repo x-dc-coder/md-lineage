@@ -281,6 +281,7 @@ export interface ConfigDiagnostic {
 }
 
 const CONFIG_SCHEMA_FILE = 'mdlineage-config.schema.json';
+export const DEFAULT_MANIFEST_FILE = 'mdlineage.manifest.yaml';
 
 let compiledConfigValidator: ConfigValidateFn | null = null;
 
@@ -418,6 +419,50 @@ export function loadConfig(path?: string, from?: string): ConfigLoadResult {
   }
 
   const rawConfig = { ...extended.raw };
+
+  // Conventional manifest auto-discovery (when neither manifestFile nor non-empty inline manifest is declared)
+  const hasExplicitManifestFile = typeof rawConfig['manifestFile'] === 'string';
+  const inlineManifest = rawConfig['manifest'] as { documents?: Record<string, unknown> } | undefined;
+  const hasInlineDocs =
+    inlineManifest &&
+    typeof inlineManifest === 'object' &&
+    !Array.isArray(inlineManifest) &&
+    inlineManifest.documents &&
+    typeof inlineManifest.documents === 'object' &&
+    !Array.isArray(inlineManifest.documents) &&
+    Object.keys(inlineManifest.documents).length > 0;
+
+  if (!hasExplicitManifestFile && !hasInlineDocs) {
+    const autoManifestPath = resolve(dirname(configPath), DEFAULT_MANIFEST_FILE);
+    if (pathExists(autoManifestPath)) {
+      try {
+        const autoText = readFileSync(autoManifestPath, 'utf8');
+        const autoDoc = parseDocument(autoText);
+        if (autoDoc.errors.length === 0) {
+          const parsed = autoDoc.toJS() as Record<string, unknown> | null;
+          if (
+            parsed &&
+            typeof parsed === 'object' &&
+            !Array.isArray(parsed) &&
+            parsed.documents &&
+            typeof parsed.documents === 'object' &&
+            !Array.isArray(parsed.documents)
+          ) {
+            const inlineDocs =
+              inlineManifest && typeof inlineManifest === 'object' && inlineManifest.documents && typeof inlineManifest.documents === 'object'
+                ? (inlineManifest.documents as Record<string, unknown>)
+                : {};
+            rawConfig['manifestDocuments'] = {
+              ...(parsed.documents as Record<string, unknown>),
+              ...inlineDocs,
+            };
+          }
+        }
+      } catch {
+        // Silent skip on any read error during auto-discovery
+      }
+    }
+  }
 
   // Load out-of-band YAML manifest if declared
   if (typeof rawConfig['manifestFile'] === 'string') {
@@ -1037,6 +1082,7 @@ const DEFAULT_SEVERITIES: Readonly<Record<string, 'error' | 'warning' | 'informa
   MDL102: 'error',
   MDL103: 'error',
   MDL104: 'error',
+  MDL105: 'warning',
   MDL201: 'warning',
   MDL202: 'warning',
   MDL203: 'warning',

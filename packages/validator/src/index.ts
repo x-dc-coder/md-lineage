@@ -33,7 +33,7 @@ import { freshnessDiagnostics } from './freshness.js';
 import type { ValidateInput, ValidateResult } from './index-types.js';
 
 export type { Config, ConfigLoadResult, ConfigDiagnostic, EolPolicy, LayoutRule, LayoutRequire, LayoutIntent, LayoutException, LifecycleConfig, LinksConfig, ManifestDocument, ManifestRelation } from './config.js';
-export { defaultConfig, loadConfig, defaultConfigIsValid, filesIncludeSpecified, resolveSeverity, vocabularyAllows } from './config.js';
+export { defaultConfig, loadConfig, defaultConfigIsValid, filesIncludeSpecified, resolveSeverity, vocabularyAllows, DEFAULT_MANIFEST_FILE } from './config.js';
 export { layoutDiagnostics, layoutExemptsFrontmatter, type LayoutDiagnosticsParams } from './layout.js';
 export {
   MS_PER_DAY,
@@ -181,7 +181,12 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
   const manifestEntry = input.path
     ? (config.manifestDocuments.get(input.path) ?? config.manifestDocuments.get(normalizeFilterPath(input.path)))
     : undefined;
-  if (mdlineage === null && manifestEntry) {
+  if (mdlineage !== null && manifestEntry) {
+    const where = mdlineageRange ?? { start: 0, end: lineEnd(lineMap, 0) };
+    diagnostics.push(
+      mdl('MDL105', 'Document has front matter metadata; its manifest entry is ignored', where, lineMap, config),
+    );
+  } else if (mdlineage === null && manifestEntry) {
     mdlineage = manifestEntry as unknown as Record<string, unknown>;
   }
 
@@ -195,7 +200,7 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
   if (mdlineage === null && config.metadata.required && !frontmatterBroken && !layoutExempt) {
     const where = mdlineageRange ?? { start: 0, end: lineEnd(lineMap, 0) };
     diagnostics.push(
-      mdl('MDL003', `Missing mdlineage metadata: no '${metadataKey}' key`, where, lineMap, config),
+      mdl('MDL003', `Missing mdlineage metadata: no '${metadataKey}' key and no manifest entry`, where, lineMap, config),
     );
   }
 

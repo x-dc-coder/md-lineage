@@ -156,7 +156,7 @@
       "propertyNames": {
         "enum": [
           "MDL001", "MDL002", "MDL003",
-          "MDL101", "MDL102", "MDL103", "MDL104",
+          "MDL101", "MDL102", "MDL103", "MDL104", "MDL105",
           "MDL201", "MDL202", "MDL203",
           "MDL301", "MDL302", "MDL303", "MDL304", "MDL305", "MDL306",
           "MDL401", "MDL402", "MDL403",
@@ -471,7 +471,7 @@
     "manifestDocument": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "kind"],
+      "required": ["id", "kind", "status"],
       "properties": {
         "schema": {
           "type": "integer",
@@ -479,14 +479,16 @@
         },
         "id": {
           "type": "string",
-          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+          "description": "Stable repository-wide document identifier. Manifest-injected metadata is validated against the document metadata schema, so the id pattern strictly matches schema v1."
         },
         "kind": {
           "type": "string",
           "minLength": 1
         },
         "status": {
-          "type": "string"
+          "type": "string",
+          "description": "Lifecycle status of the document. Manifest-injected metadata is validated against the document metadata schema, so status is required."
         },
         "authority": {
           "type": "string"
