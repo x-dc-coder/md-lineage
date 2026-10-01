@@ -21,8 +21,8 @@ MDLineage addresses four classes of problems that Markdown repositories hit in r
 
 1. **Relationship indexing.** Cross-document relations (`depends_on`, `refines`, `supersedes`, …) are proposed with evidence by semantic analysis, confirmed into Front Matter, and used for impact analysis when documents change.
 2. **Syntax and metadata validation.** One validator core serves editor diagnostics (LSP), CLI checks, CI, and MCP: Front Matter boundaries, YAML, JSON Schema, cross-file semantics such as duplicate IDs and unresolved relation targets, with stable diagnostic codes.
-3. **Line-ending hygiene.** Cross-platform (WSL/Windows) editing silently flips line endings and produces phantom diffs. MDLineage detects, repairs, and prevents line-ending drift; see [Line-ending management](./docs/架构设计/行尾与编码卫生.md).
-4. **Directory convention constraints.** Repositories can declare which kinds of documents belong where; layout drift is reported as diagnostics and moves are proposed with their impact. Design is still open; see [Directory conventions](./docs/架构设计/目录契约设计.md).
+3. **Line-ending hygiene.** Cross-platform (WSL/Windows) editing silently flips line endings and produces phantom diffs. MDLineage detects, repairs, and prevents line-ending drift; see [Line-ending management](./docs/specs/line-ending-management.md).
+4. **Directory convention constraints.** Repositories can declare which kinds of documents belong where; layout drift is reported as diagnostics and moves are proposed with their impact. Design is still open; see [Directory conventions](./docs/specs/dir-conventions.md).
 
 ## Packages
 
@@ -149,15 +149,15 @@ This repository starts as a product and architecture proposal. The first phase a
 
 **Design documents**
 
-- [Product vision](./docs/迭代计划/项目愿景.md)
-- [Architecture](./docs/架构设计/系统架构.md)
-- [Front Matter specification draft](./docs/架构设计/元数据规范.md)
-- [Realtime validation via remark-language-server](./docs/架构设计/统一语言服务设计.md)
-- [Line-ending management](./docs/架构设计/行尾与编码卫生.md)
-- [Directory conventions (open design)](./docs/架构设计/目录契约设计.md)
-- [Progress tracker](./docs/迭代计划/进度台账.md)
-- [Open-source project landscape](./docs/迭代计划/开源生态分析.md)
-- [Initial roadmap](./docs/迭代计划/特性路线图.md)
+- [Product vision](./docs/project/vision.md)
+- [Architecture](./docs/specs/architecture.md)
+- [Front Matter specification draft](./docs/specs/frontmatter-spec.md)
+- [Realtime validation via remark-language-server](./docs/specs/remark-language-server-solution.md)
+- [Line-ending management](./docs/specs/line-ending-management.md)
+- [Directory conventions (open design)](./docs/specs/dir-conventions.md)
+- [Progress tracker](./docs/project/progress.md)
+- [Open-source project landscape](./docs/project/open-source-landscape.md)
+- [Initial roadmap](./docs/project/roadmap.md)
 
 ## License
 

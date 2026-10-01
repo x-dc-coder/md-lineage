@@ -1,7 +1,10 @@
 # mdlineage.config.yaml — the authoritative, non-executable configuration
 #
 # Adoption state (2026-10-01): the docs/ tree follows the universal
-# Chinese directory specification.
+# directory specification. Developer-facing documents are organized in
+# docs/使用手册/ with Chinese filenames and contents; internal specs,
+# project ledgers and reviews are kept under docs/specs/, docs/project/
+# and docs/reviews/.
 #
 # `metadata.required: true` plus the layout rules below implement the split:
 # the catch-all rule exempts every path, docs/** requires front matter,
@@ -29,25 +32,23 @@ layout:
       kinds: [guide, reference]
       forbidStatus: [draft]
       maxDepth: 2
-  - match: 'docs/架构设计/**'
+  - match: 'docs/specs/**'
     intent:
-      description: '系统架构基准、数据模型与技术规范'
+      description: 'System specifications and technical RFCs'
       kinds: [architecture, spec, policy]
-  - match: 'docs/迭代计划/**'
+      authority: [canonical]
+  - match: 'docs/project/**'
     intent:
-      description: '推进中的阶段任务、路线图与台账'
+      description: 'Project planning, ledgers and landscape'
       kinds: [plan, report, vision, reference]
-  - match: 'docs/质量审查/**'
+  - match: 'docs/reviews/**'
     intent:
-      description: '审查与审计报告'
+      description: 'Independent model reviews and test reports'
       kinds: [report]
-  - match: 'docs/历史归档/**'
-    intent:
-      description: '已结项或废弃的历史档案'
       statuses: [archived]
 
 lifecycle:
   staleAfterDays: 180
   staleStatuses: [active]
   exempt:
-    - 'docs/历史归档/**'
+    - 'docs/reviews/**'
