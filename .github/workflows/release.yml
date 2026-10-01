@@ -88,3 +88,45 @@ jobs:
         working-directory: packages/mcp-server
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # 把 5 个 tgz + 3 个 schema 挂到该 Release 的资产里（与 npm publish 相互独立）。
+  # `--clobber` 使重跑/补发幂等；版本守卫确保 tag 与 package.json 一致，防止发错版本。
+  pack:
+    name: pack & attach release assets (${{ github.event.release.tag_name || inputs.tag }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout (Release ref or dispatched tag)
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.release.tag_name || inputs.tag }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Guard version == tag
+        run: |
+          tag="${{ github.event.release.tag_name || inputs.tag }}"
+          v=$(node -p "require('./package.json').version")
+          if [ "v$v" != "$tag" ]; then
+            echo "::error::tag $tag does not match package.json version v$v"
+            exit 1
+          fi
+      - name: Pack 5 packages + schemas
+        run: |
+          mkdir -p dist-assets
+          for p in validator cli language-server mcp-server remark-lint-mdlineage; do
+            npm pack -w "packages/$p" --pack-destination dist-assets
+          done
+          cp schemas/diagnostic-codes.json schemas/mdlineage-config.schema.json schemas/mdlineage-v1.schema.json dist-assets/
+          ls -la dist-assets
+      - name: Upload assets to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name || inputs.tag }}" dist-assets/* --clobber

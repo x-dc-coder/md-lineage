@@ -1,0 +1,41 @@
+name: Pack
+
+# 每次 push 自动构建、测试并打包 5 个 npm 包 + 3 个 schema，作为工作流产物（Artifacts）保存。
+# 下载：Actions → 对应运行 → Artifacts。发布 Release 时另由 release.yml 把同一套产物挂为 Release 资产。
+
+on:
+  push:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pack:
+    name: build, test & pack (${{ github.ref_name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - name: Pack 5 packages + schemas
+        run: |
+          mkdir -p dist-assets
+          for p in validator cli language-server mcp-server remark-lint-mdlineage; do
+            npm pack -w "packages/$p" --pack-destination dist-assets
+          done
+          cp schemas/diagnostic-codes.json schemas/mdlineage-config.schema.json schemas/mdlineage-v1.schema.json dist-assets/
+          ls -la dist-assets
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: mdlineage-packages-${{ github.sha }}
+          path: dist-assets/*
+          if-no-files-found: error
+          retention-days: 30
