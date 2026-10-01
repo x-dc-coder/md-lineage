@@ -75,8 +75,11 @@ jobs:
       - name: Report npm authentication mode
         run: |
           if [ -n "$NPM_TOKEN" ]; then
-            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> "$HOME/.npmrc"
-            echo "::notice::NPM_TOKEN secret present — used as a bootstrap fallback for this publish; remove the secret once all five packages have trusted publishers configured."
+            # `actions/setup-node` points npm at its own temp userconfig via
+            # NPM_CONFIG_USERCONFIG; writing to $HOME/.npmrc would be ignored.
+            target="${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}"
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> "$target"
+            echo "::notice::NPM_TOKEN secret present — appended to ${target} as the bootstrap fallback for this publish; remove the secret once all five packages have trusted publishers configured."
           else
             echo "::notice::No NPM_TOKEN secret — publishing relies on npm trusted publishing (OIDC) for all five packages."
           fi
