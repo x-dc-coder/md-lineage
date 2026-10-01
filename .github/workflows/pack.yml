@@ -1,11 +1,16 @@
 name: Pack
 
-# 每次 push 自动构建、测试并打包 5 个 npm 包 + 3 个 schema，作为工作流产物（Artifacts）保存。
-# 下载：Actions → 对应运行 → Artifacts。发布 Release 时另由 release.yml 把同一套产物挂为 Release 资产。
+# 每次 push 到 main 或手动触发时自动构建、测试并打包 5 个 npm 包 + 3 个 schema。
+# 本工作流产出的 tgz 是构建快照（Actions 运行页下载，7 天过期），发布物以 GitHub Release 资产为准（由 release.yml 挂载）。
 
 on:
   push:
+    branches: [main]
   workflow_dispatch:
+
+concurrency:
+  group: pack-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
@@ -35,7 +40,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: mdlineage-packages-${{ github.sha }}
+          name: snapshot-mdlineage-packages-${{ github.sha }}
           path: dist-assets/*
           if-no-files-found: error
-          retention-days: 30
+          retention-days: 7

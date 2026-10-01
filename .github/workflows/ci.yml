@@ -52,6 +52,15 @@ jobs:
       - name: Verify committed baseline
         run: node packages/cli/dist/main.js baseline verify
 
+      # Packaging itself is a release-time job (pack.yml, main-only), but a broken
+      # workspace `files`/`prepack` setup would otherwise only surface on merge.
+      # A dry-run pack costs seconds and writes no artifacts.
+      - name: Verify packages are packable (dry run)
+        run: |
+          for p in validator cli language-server mcp-server remark-lint-mdlineage; do
+            npm pack -w "packages/$p" --dry-run
+          done
+
       # Currently red: 6 no-literal-urls warnings in docs/open-source-landscape.md.
       # Kept visible on purpose; do not skip or soften.
       - name: Markdown lint (remark)

@@ -12,6 +12,15 @@ on:
         description: Git tag to publish (must already exist)
         required: true
         type: string
+      allow_missing_npm_token:
+        description: 'Attach assets only: run without NPM_TOKEN instead of failing the publish job'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: release-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
 
 # `publishConfig.provenance: true` makes npm attach a Sigstore provenance
 # statement, which it can only mint from the GitHub OIDC token this job
@@ -49,6 +58,22 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # A missing NPM_TOKEN used to leave this job green with every publish step
+      # skipped — a "published" Release that shipped nothing to npm. The token is
+      # a repository secret, so its absence is invisible in the UI; say it loudly
+      # instead. A dispatch that only wants assets re-attached can opt out.
+      - name: Verify NPM_TOKEN availability
+        run: |
+          if [ -n "$NPM_TOKEN" ]; then
+            echo "NPM_TOKEN present; npm publish steps will run."
+            exit 0
+          fi
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.allow_missing_npm_token }}" != "true" ]; then
+            echo "::error::NPM_TOKEN repository secret is not configured, so npm publish cannot run. Re-dispatch with allow_missing_npm_token=true to attach release assets only."
+            exit 1
+          fi
+          echo "::warning::NPM_TOKEN is not configured — npm publish steps are skipped; release assets are still attached by the pack job."
 
       # `npm publish --workspaces` would publish all five packages, but it
       # skips a package whose version already exists on the registry with only
@@ -90,7 +115,9 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # 把 5 个 tgz + 3 个 schema 挂到该 Release 的资产里（与 npm publish 相互独立）。
-  # `--clobber` 使重跑/补发幂等；版本守卫确保 tag 与 package.json 一致，防止发错版本。
+  # `--clobber` 使重跑/补发幂等；版本守卫确保 tag 与 6 个 package.json 版本一致，防止发错版本。
+  # 注意：为已发布的 tag 重跑整个工作流时，资产会被覆盖（预期内），而 publish 腿会因 npm 上
+  # 版本已存在而失败变红——这是有意的：宁可红，也不要"部分发布"悄悄通过。
   pack:
     name: pack & attach release assets (${{ github.event.release.tag_name || inputs.tag }})
     runs-on: ubuntu-latest
@@ -110,14 +137,28 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      - name: Guard version == tag
+      # One tag must describe one version set: the root manifest and all five
+      # packages have to agree, or the release would ship a mixed-version set.
+      - name: Guard version == tag (all 6 manifests)
+        env:
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
         run: |
-          tag="${{ github.event.release.tag_name || inputs.tag }}"
-          v=$(node -p "require('./package.json').version")
-          if [ "v$v" != "$tag" ]; then
-            echo "::error::tag $tag does not match package.json version v$v"
+          set -e
+          versions=""
+          for f in package.json packages/validator/package.json packages/cli/package.json packages/language-server/package.json packages/mcp-server/package.json packages/remark-lint-mdlineage/package.json; do
+            versions="$versions $(node -p "require('./$f').version")"
+          done
+          unique=$(printf '%s\n' $versions | sort -u | wc -l)
+          if [ "$unique" -ne 1 ]; then
+            echo "::error::package.json versions disagree:$versions"
             exit 1
           fi
+          v=$(printf '%s\n' $versions | head -1)
+          if [ "v$v" != "$TAG" ]; then
+            echo "::error::tag $TAG does not match package version v$v"
+            exit 1
+          fi
+          echo "version guard OK: $TAG == v$v across all 6 manifests"
       - name: Pack 5 packages + schemas
         run: |
           mkdir -p dist-assets
@@ -129,4 +170,5 @@ jobs:
       - name: Upload assets to the Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name || inputs.tag }}" dist-assets/* --clobber
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: gh release upload "$TAG" dist-assets/* --clobber
