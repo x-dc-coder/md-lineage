@@ -508,11 +508,17 @@ describe('config defaults', () => {
     assert.equal(result.config.configVersion, 1);
     assert.equal(result.config.metadata.required, true, 'the docs/ pilot is enforced');
     assert.equal(result.config.source, resolve(repoRoot, 'mdlineage.config.yaml'));
-    // The exemption split: catch-all first, the docs/** requirement last.
-    assert.equal(result.config.layout.length, 2, 'two layout rules');
+    // The exemption split: catch-all first, the docs/** requirement second,
+    // followed by subdirectory intent rules.
+    assert.equal(result.config.layout.length, 7, 'seven layout rules');
     assert.equal(result.config.layout[0]?.require?.frontmatter, 'optional');
     assert.equal(result.config.layout[1]?.match, 'docs/**');
     assert.equal(result.config.layout[1]?.require?.frontmatter, 'required');
+    assert.equal(result.config.layout[2]?.match, 'docs/使用手册/**');
+    assert.equal(result.config.layout[3]?.match, 'docs/架构设计/**');
+    assert.equal(result.config.layout[4]?.match, 'docs/迭代计划/**');
+    assert.equal(result.config.layout[5]?.match, 'docs/质量审查/**');
+    assert.equal(result.config.layout[6]?.match, 'docs/历史归档/**');
     // The custom vocabulary is a superset of the validator defaults that the
     // fixtures rely on.
     for (const kind of ['policy', 'guide', 'architecture', 'reference']) {

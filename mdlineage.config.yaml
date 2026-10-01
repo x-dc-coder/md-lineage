@@ -1,24 +1,17 @@
 # mdlineage.config.yaml — the authoritative, non-executable configuration
-# (docs/remark-language-server-solution.md §7.1).
 #
-# Adoption state (2026-09-30): the docs/ tree is the pilot. Every Markdown
-# file under docs/ must carry mdlineage front matter; everywhere else
-# (README, test fixtures) front matter stays optional until adopted.
+# Adoption state (2026-10-01): the docs/ tree follows the universal
+# Chinese directory specification.
 #
 # `metadata.required: true` plus the layout rules below implement the split:
-# the catch-all rule exempts every path, and the docs/** rule re-requires
-# front matter — the last matching rule wins.
+# the catch-all rule exempts every path, docs/** requires front matter,
+# and subdirectories enforce architectural intent contracts.
 
 configVersion: 1
 
 metadata:
   required: true
 
-# Repository-defined genres. Keeps the validator defaults (policy, guide,
-# architecture, reference) — the fixtures rely on them — and adds the genres
-# this documentation tree actually uses. `archived` marks frozen historical
-# records (the round-1 review reports) that are kept for reference but are
-# not expected to receive updates.
 vocabulary:
   kinds: [policy, guide, architecture, reference, spec, report, plan, vision]
   statuses: [draft, active, deprecated, archived]
@@ -30,11 +23,31 @@ layout:
   - match: 'docs/**'
     require:
       frontmatter: required
+  - match: 'docs/使用手册/**'
+    intent:
+      description: '面向终端开发者的现行中文使用与配置手册'
+      kinds: [guide, reference]
+      forbidStatus: [draft]
+      maxDepth: 2
+  - match: 'docs/架构设计/**'
+    intent:
+      description: '系统架构基准、数据模型与技术规范'
+      kinds: [architecture, spec, policy]
+  - match: 'docs/迭代计划/**'
+    intent:
+      description: '推进中的阶段任务、路线图与台账'
+      kinds: [plan, report, vision, reference]
+  - match: 'docs/质量审查/**'
+    intent:
+      description: '审查与审计报告'
+      kinds: [report]
+  - match: 'docs/历史归档/**'
+    intent:
+      description: '已结项或废弃的历史档案'
+      statuses: [archived]
 
-# Freshness governance: an `active` document that goes 180 days without a
-# substantive update earns MDL801. Every document carries authored
-# `created_at`/`updated_at`, so the Git-clock fallback stays idle in steady
-# state; `archived` review records and in-progress `draft` designs are
-# outside `staleStatuses` and are never nagged.
 lifecycle:
   staleAfterDays: 180
+  staleStatuses: [active]
+  exempt:
+    - 'docs/历史归档/**'

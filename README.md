@@ -21,8 +21,8 @@ MDLineage addresses four classes of problems that Markdown repositories hit in r
 
 1. **Relationship indexing.** Cross-document relations (`depends_on`, `refines`, `supersedes`, …) are proposed with evidence by semantic analysis, confirmed into Front Matter, and used for impact analysis when documents change.
 2. **Syntax and metadata validation.** One validator core serves editor diagnostics (LSP), CLI checks, CI, and MCP: Front Matter boundaries, YAML, JSON Schema, cross-file semantics such as duplicate IDs and unresolved relation targets, with stable diagnostic codes.
-3. **Line-ending hygiene.** Cross-platform (WSL/Windows) editing silently flips line endings and produces phantom diffs. MDLineage detects, repairs, and prevents line-ending drift; see [Line-ending management](docs/line-ending-management.md).
-4. **Directory convention constraints.** Repositories can declare which kinds of documents belong where; layout drift is reported as diagnostics and moves are proposed with their impact. Design is still open; see [Directory conventions](docs/dir-conventions.md).
+3. **Line-ending hygiene.** Cross-platform (WSL/Windows) editing silently flips line endings and produces phantom diffs. MDLineage detects, repairs, and prevents line-ending drift; see [Line-ending management](./docs/架构设计/行尾与编码卫生.md).
+4. **Directory convention constraints.** Repositories can declare which kinds of documents belong where; layout drift is reported as diagnostics and moves are proposed with their impact. Design is still open; see [Directory conventions](./docs/架构设计/目录契约设计.md).
 
 ## Packages
 
@@ -103,7 +103,7 @@ Commands anchor “the workspace” differently, by design: `check`/`fix` use th
 
 ## Four integration channels
 
-One validator core, four ways to reach it — pick the channel that matches the job; setup for all of them is in [Editor & agent setup](docs/editor-setup.md).
+One validator core, four ways to reach it — pick the channel that matches the job; setup for all of them is in [Editor & agent setup](./docs/使用手册/编辑器配置.md).
 
 - **CLI** — batch validation, CI gates (`baseline verify`, `--format sarif`), and repair (`fix`). Start here.
 - **remark plugin + `remark-language-server`** — realtime validation while you type, including on unsaved buffers. This repository’s `.remarkrc.mjs` is a working template.
@@ -142,22 +142,22 @@ This repository starts as a product and architecture proposal. The first phase a
 
 **Guides**
 
-- [Usage](docs/usage.md) — commands, exit codes, output formats, CI patterns
-- [Editor & agent setup](docs/editor-setup.md) — the four channels, per-client configuration
-- [Configuration](docs/configuration.md) — `mdlineage.config.yaml` and schema overrides
-- [Diagnostics](docs/diagnostics.md) — every `MDL` code, its severity, and how to fix it
+- [Usage](./docs/使用手册/命令行参考.md) — commands, exit codes, output formats, CI patterns
+- [Editor & agent setup](./docs/使用手册/编辑器配置.md) — the four channels, per-client configuration
+- [Configuration](./docs/使用手册/配置指南.md) — `mdlineage.config.yaml` and schema overrides
+- [Diagnostics](./docs/使用手册/诊断码速查.md) — every `MDL` code, its severity, and how to fix it
 
 **Design documents**
 
-- [Product vision](docs/vision.md)
-- [Architecture](docs/architecture.md)
-- [Front Matter specification draft](docs/frontmatter-spec.md)
-- [Realtime validation via remark-language-server](docs/remark-language-server-solution.md)
-- [Line-ending management](docs/line-ending-management.md)
-- [Directory conventions (open design)](docs/dir-conventions.md)
-- [Progress tracker](docs/progress.md)
-- [Open-source project landscape](docs/open-source-landscape.md)
-- [Initial roadmap](docs/roadmap.md)
+- [Product vision](./docs/迭代计划/项目愿景.md)
+- [Architecture](./docs/架构设计/系统架构.md)
+- [Front Matter specification draft](./docs/架构设计/元数据规范.md)
+- [Realtime validation via remark-language-server](./docs/架构设计/统一语言服务设计.md)
+- [Line-ending management](./docs/架构设计/行尾与编码卫生.md)
+- [Directory conventions (open design)](./docs/架构设计/目录契约设计.md)
+- [Progress tracker](./docs/迭代计划/进度台账.md)
+- [Open-source project landscape](./docs/迭代计划/开源生态分析.md)
+- [Initial roadmap](./docs/迭代计划/特性路线图.md)
 
 ## License
 
