@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/language-server",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Dedicated MDLineage Language Server: LSP diagnostics over the @mdlineage/validator workspace index.",
   "type": "module",
   "main": "./dist/server.js",
@@ -36,8 +36,9 @@
   "dependencies": {
     "@mdlineage/validator": "*",
     "vscode-languageserver": "^9.0.1",
+    "vscode-languageserver-protocol": "^3.17.5",
     "vscode-languageserver-textdocument": "^1.0.11",
-    "vscode-languageserver-protocol": "^3.17.5"
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^20.19.0"

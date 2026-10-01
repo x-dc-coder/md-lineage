@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/cli",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "mdlineage command line: single-document and repository Markdown validation through @mdlineage/validator.",
   "type": "module",
   "main": "./dist/main.js",
@@ -36,7 +36,8 @@
     "@mdlineage/language-server": "*",
     "@mdlineage/mcp-server": "*",
     "@mdlineage/validator": "*",
-    "glob": "^10.5.0"
+    "glob": "^10.5.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^20.19.0"
