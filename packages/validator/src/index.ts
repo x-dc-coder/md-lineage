@@ -23,6 +23,7 @@ import type { Diagnostic } from './diagnostic.js';
 import { severityOf, layerOf } from './diagnostic.js';
 import { buildLineMap, rangeAt } from './source-map.js';
 import { validateLineEndings } from './line-endings.js';
+import { normalizeFilterPath } from './path-filter.js';
 import { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
 import { parseMarkdownSync } from './parse-markdown.js';
 import { validateAgainstSchema } from './schema-validator.js';
@@ -31,7 +32,7 @@ import { layoutDiagnostics, layoutExemptsFrontmatter } from './layout.js';
 import { freshnessDiagnostics } from './freshness.js';
 import type { ValidateInput, ValidateResult } from './index-types.js';
 
-export type { Config, ConfigLoadResult, ConfigDiagnostic, EolPolicy, LayoutRule, LayoutRequire, LifecycleConfig } from './config.js';
+export type { Config, ConfigLoadResult, ConfigDiagnostic, EolPolicy, LayoutRule, LayoutRequire, LayoutIntent, LayoutException, LifecycleConfig, LinksConfig, ManifestDocument, ManifestRelation } from './config.js';
 export { defaultConfig, loadConfig, defaultConfigIsValid, filesIncludeSpecified, resolveSeverity, vocabularyAllows } from './config.js';
 export { layoutDiagnostics, layoutExemptsFrontmatter, type LayoutDiagnosticsParams } from './layout.js';
 export {
@@ -43,11 +44,19 @@ export {
   type FreshnessDiagnosticsInput,
 } from './freshness.js';
 export {
+  classifyDestination,
+  resolveHostPath,
+  checkHostLink,
+  type DestinationKind,
+  type HostLinkResult,
+} from './host-links.js';
+export {
   BUILTIN_EXCLUDE_GLOBS,
   compileRules,
   excludedByRules,
   isPulledBackByNegation,
   isLiteralPath,
+  matchesPattern,
   normalizeFilterPath,
   PathFilter,
   type CompiledRule,
@@ -169,10 +178,18 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
     }
   }
 
+  const manifestEntry = input.path
+    ? (config.manifestDocuments.get(input.path) ?? config.manifestDocuments.get(normalizeFilterPath(input.path)))
+    : undefined;
+  if (mdlineage === null && manifestEntry) {
+    mdlineage = manifestEntry as unknown as Record<string, unknown>;
+  }
+
   // 3. Missing-metadata check (suppressed entirely when metadata.required is
   // false, and when MDL001/MDL002 already explained why no metadata could be
   // extracted — one diagnostic per problem, per the registry's stability note).
-  // Also suppressed when layout rule specifies `require.frontmatter: optional`.
+  // Also suppressed when layout rule specifies `require.frontmatter: optional`,
+  // or when an out-of-band manifest provides metadata for this document.
   const frontmatterBroken = diagnostics.some((d) => d.code === 'MDL001' || d.code === 'MDL002');
   const layoutExempt = input.path ? layoutExemptsFrontmatter(input.path, config.layout) : false;
   if (mdlineage === null && config.metadata.required && !frontmatterBroken && !layoutExempt) {
@@ -183,17 +200,30 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
   }
 
   // 4. JSON Schema (only when there is an object to validate).
-  if (mdlineage !== null && boundary) {
-    const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
-    if (parsed.parsed) {
+  if (mdlineage !== null) {
+    if (boundary) {
+      const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
+      if (parsed.parsed) {
+        diagnostics.push(
+          ...validateAgainstSchema(mdlineage, {
+            rawStart: boundary.rawStart,
+            lineMap,
+            doc: parsed.parsed.doc,
+            config,
+            metadataKey,
+            mdlineageRange,
+          }),
+        );
+      }
+    } else {
       diagnostics.push(
         ...validateAgainstSchema(mdlineage, {
-          rawStart: boundary.rawStart,
+          rawStart: 0,
           lineMap,
-          doc: parsed.parsed.doc,
+          doc: null,
           config,
           metadataKey,
-          mdlineageRange,
+          mdlineageRange: { start: 0, end: 0 },
         }),
       );
     }
@@ -208,18 +238,24 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
   }
 
   // 6. Document semantics.
-  if (mdlineage !== null && boundary) {
-    const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
-    const offsets = relationOffsetsOf(
-      parsed.parsed?.doc ?? null,
-      boundary.rawStart,
-      mdlineageRange?.start ?? boundary.rawStart,
-    );
-    diagnostics.push(...validateDocumentSemantics(mdlineage, tree, lineMap, boundary.rawStart, offsets, config, bodyStart));
+  if (mdlineage !== null) {
+    if (boundary) {
+      const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
+      const offsets = relationOffsetsOf(
+        parsed.parsed?.doc ?? null,
+        boundary.rawStart,
+        mdlineageRange?.start ?? boundary.rawStart,
+      );
+      diagnostics.push(...validateDocumentSemantics(mdlineage, tree, lineMap, boundary.rawStart, offsets, config, bodyStart));
+    } else {
+      const offsets = relationOffsetsOf(null, 0, 0);
+      diagnostics.push(...validateDocumentSemantics(mdlineage, tree, lineMap, 0, offsets, config, bodyStart));
+    }
   }
 
-  // 7. Layout policy (MDL501).
-  if (input.path && config.layout && config.layout.length > 0) {
+  // 7. Layout policy (MDL501–MDL504).
+  const hasExceptions = config.layoutExceptions && config.layoutExceptions.length > 0;
+  if (input.path && ((config.layout && config.layout.length > 0) || hasExceptions)) {
     diagnostics.push(
       ...layoutDiagnostics({
         path: input.path,
@@ -227,6 +263,7 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
         lineMap,
         range: mdlineageRange ?? { start: 0, end: lineEnd(lineMap, 0) },
         config,
+        nowMs: input.nowMs,
       }),
     );
   }

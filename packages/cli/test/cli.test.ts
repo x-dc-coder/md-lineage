@@ -243,7 +243,7 @@ describe('mdlineage check — fixtures', () => {
     const help = runCli(['--help']);
     assert.equal(help.status, 0);
     assert.match(help.stdout, /Roots — each command anchors/);
-    assert.match(help.stdout, /check\/fix\s+the CWD/);
+    assert.match(help.stdout, /check\/fix.*the CWD/);
     assert.match(help.stdout, /the git repository root/);
     assert.match(help.stdout, /walks up from the CWD/);
   });

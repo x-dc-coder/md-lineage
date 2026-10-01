@@ -133,11 +133,46 @@
       "description": "An evidence anchor or link fragment resolves against another document and does not match a heading there. Cross-file anchor resolution is checked at the workspace layer."
     },
     {
+      "code": "MDL403",
+      "layer": "link",
+      "severity": "warning",
+      "message": "Host-style link target",
+      "description": "Markdown link targets a host-absolute or home-relative path (~ or $HOME). These links depend on machine-local filesystem state and may not be portable across environments."
+    },
+    {
       "code": "MDL501",
       "layer": "policy-layout",
       "severity": "warning",
       "message": "Layout rule violation",
       "description": "Document metadata violates repository layout policy (forbidStatus, require.kind, require.authority)."
+    },
+    {
+      "code": "MDL502",
+      "layer": "policy-layout",
+      "severity": "warning",
+      "message": "Document does not match directory intent",
+      "description": "A document under a path whose layout rule declares an intent block violates it: its kind, authority or status is outside the declared set (intent.kinds, intent.authority) or is explicitly forbidden (intent.forbidStatus). A matching, unexpired layout exception suppresses this code."
+    },
+    {
+      "code": "MDL503",
+      "layer": "policy-layout",
+      "severity": "error",
+      "message": "Layout exception has expired",
+      "description": "A layoutExceptions entry whose expires date (YYYY-MM-DD) has passed. The exception no longer applies, so its intent checks run and this error is reported until the entry is renewed or removed. Severity is error: an unrenewed governance decision is an integrity failure, not a suggestion."
+    },
+    {
+      "code": "MDL504",
+      "layer": "policy-layout",
+      "severity": "warning",
+      "message": "Document violates directory structure constraint",
+      "description": "A document under a path whose layout rule declares intent.maxDepth or intent.naming breaks the declared structure: it sits deeper than maxDepth below the match prefix, or its filename does not match the naming pattern."
+    },
+    {
+      "code": "MDL505",
+      "layer": "policy-layout",
+      "severity": "warning",
+      "message": "Document is orphaned from any directory intent",
+      "description": "A document is not covered by any layout rule that declares an intent block. Reserved for the catalog/completeness check; not produced by the single-document validator yet."
     },
     {
       "code": "MDL601",
@@ -166,7 +201,7 @@
       "range": "MDL5xx",
       "layer": "policy-layout",
       "severity": null,
-      "description": "RESERVED for repository policy, including directory layout (P4). MDL501 is assigned for layout rule violations."
+      "description": "RESERVED for repository policy, including directory layout (P4). MDL501 is assigned for layout rule violations, MDL502 for directory-intent mismatches, MDL503 for expired layout exceptions, MDL504 for structure constraints, and MDL505 for orphaned documents."
     },
     {
       "range": "MDL7xx",

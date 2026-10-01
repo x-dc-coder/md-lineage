@@ -236,7 +236,7 @@ export interface SchemaContext {
   /** Line-start table for the whole document, so offsets become ranges. */
   lineMap: LineMap;
   /** Parsed YAML document carrying source tokens. */
-  doc: Document;
+  doc: Document | null;
   /** Config severity overrides and vocabulary. */
   config: Config;
   /** The front matter key holding the metadata (config.metadata.key). */
@@ -327,7 +327,7 @@ function validateVocabulary(data: unknown, ctx: SchemaContext): Diagnostic[] {
     const value = obj[key];
     if (value === undefined) continue;
     if (vocabularyAllows(ctx.config, field, value)) continue;
-    const node = lookupPointer(ctx.doc, `/${key}`, ctx.metadataKey);
+    const node = ctx.doc ? lookupPointer(ctx.doc, `/${key}`, ctx.metadataKey) : null;
     const located = node ? nodeRange(node) : null;
     const range = located ? shift(located, ctx.rawStart) : (ctx.mdlineageRange ?? { start: 0, end: 0 });
     const allowed = (ctx.config.vocabulary[field] as readonly string[] | undefined) ?? [];
@@ -363,7 +363,7 @@ function expandRootRequired(data: unknown, ctx: SchemaContext, requiredFields: r
   const out: Diagnostic[] = [];
   for (const field of requiredFields) {
     if (obj[field] !== undefined) continue;
-    const node = lookupPointer(ctx.doc, `/${field}`, ctx.metadataKey);
+    const node = ctx.doc ? lookupPointer(ctx.doc, `/${field}`, ctx.metadataKey) : null;
     const located = node ? nodeRange(node) : null;
     const range = located ? shift(located, ctx.rawStart) : (ctx.mdlineageRange ?? { start: 0, end: 0 });
     out.push({
@@ -423,7 +423,7 @@ export function resolveErrorRange(
   // An error at the root of the mdlineage object names no value node, so the
   // keyword-specific lookups below must run — `lookupPointer("")` would
   // otherwise hand back the whole front matter.
-  const node = pointer === '' ? null : lookupPointer(ctx.doc, pointer, ctx.metadataKey);
+  const node = ctx.doc && pointer !== '' ? lookupPointer(ctx.doc, pointer, ctx.metadataKey) : null;
 
   if (node) {
     const range = nodeRange(node);
@@ -473,6 +473,7 @@ export function resolveErrorRange(
 
 /** The mdlineage object's CST node, where key lookups start. */
 function mdlineageMap(ctx: SchemaContext): unknown {
+  if (!ctx.doc) return null;
   const root = ctx.doc.contents;
   if (root === null || root === undefined) return null;
   return mapAt(root, ctx.metadataKey);

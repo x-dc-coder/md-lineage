@@ -55,6 +55,7 @@ export interface ExpandedPath {
 export function knownWorkspacePaths(cwd: string, options: DiscoveryOptions = {}): string[] {
   const filter = new PathFilter({ config: options.config, extraExclude: options.exclude });
   const hardPrune = filter.hardPrunePatterns();
+  const follow = options.config?.files.followSymlinks ?? true;
 
   const hits = globSync(['**/*'], {
     cwd,
@@ -62,6 +63,7 @@ export function knownWorkspacePaths(cwd: string, options: DiscoveryOptions = {})
     nodir: false,
     mark: true,
     dot: false,
+    follow,
   });
 
   const out = new Set<string>();
@@ -148,24 +150,25 @@ export function expandMarkdownPaths(
       const mdPattern = escapes ? '**/*.md' : `${relDir === '' ? '.' : relDir}/**/*.md`;
       const allPattern = escapes ? '**' : `${relDir === '' ? '.' : relDir}/**`;
       const ignore = escapes ? hardPrune.filter((p) => p.startsWith('**/')) : hardPrune;
+      const follow = options.config?.files.followSymlinks ?? true;
 
       let addedAny = false;
-      for (const hit of globSync([mdPattern], { cwd: globCwd, ignore, nodir: true, mark: true })) {
+      for (const hit of globSync([mdPattern], { cwd: globCwd, ignore, nodir: true, mark: true, follow })) {
         const full = resolve(globCwd, hit);
         const rel = posixRelative(cwd, full);
         if (!filter.inReportSet(rel)) continue;
-        add(found, others, full, rel, cwd);
+        add(found, others, full, rel, cwd, rel);
         addedAny = true;
       }
-      for (const hit of globSync([allPattern], { cwd: globCwd, ignore, nodir: true, mark: true })) {
+      for (const hit of globSync([allPattern], { cwd: globCwd, ignore, nodir: true, mark: true, follow })) {
         const full = resolve(globCwd, hit);
         const rel = posixRelative(cwd, full);
         if (rel.toLowerCase().endsWith('.md')) continue;
         if (!filter.inUniverse(rel)) continue;
-        add(found, others, full, rel, cwd);
+        add(found, others, full, rel, cwd, rel);
       }
       if (!addedAny) {
-        const unfiltered = globSync([mdPattern], { cwd: globCwd, nodir: true, mark: true });
+        const unfiltered = globSync([mdPattern], { cwd: globCwd, nodir: true, mark: true, follow });
         if (unfiltered.length > 0) excluded.push(arg);
       }
       continue;
@@ -218,11 +221,12 @@ function add(
   absolute: string,
   asGiven: string,
   cwd: string,
+  logicalKey?: string,
 ): void {
   const target = absolute.toLowerCase().endsWith('.md') ? found : others;
-  const key = resolve(absolute);
+  const key = logicalKey ?? asGiven ?? resolve(absolute);
   if (target.has(key)) return;
-  target.set(key, { path: key, asGiven: relativeForReport(key, cwd, asGiven) });
+  target.set(key, { path: resolve(absolute), asGiven: relativeForReport(resolve(absolute), cwd, asGiven) });
 }
 
 function posixRelative(from: string, to: string): string {

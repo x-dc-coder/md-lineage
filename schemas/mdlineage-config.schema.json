@@ -31,6 +31,18 @@
             "minLength": 1
           },
           "description": "Globs to skip. Defaults to `['node_modules/**', 'dist/**', 'vendor/**']`."
+        },
+        "followSymlinks": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to follow symbolic links when scanning the workspace."
+        },
+        "symlinkMaxDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 64,
+          "default": 10,
+          "description": "Maximum number of symbolic link traversals."
         }
       },
       "description": "File discovery scope for CLI and workspace indexing."
@@ -147,12 +159,12 @@
           "MDL101", "MDL102", "MDL103", "MDL104",
           "MDL201", "MDL202", "MDL203",
           "MDL301", "MDL302", "MDL303", "MDL304", "MDL305", "MDL306",
-          "MDL401", "MDL402",
-          "MDL501",
+          "MDL401", "MDL402", "MDL403",
+          "MDL501", "MDL502", "MDL503", "MDL504", "MDL505",
           "MDL601", "MDL602",
           "MDL801"
         ],
-        "description": "Only codes registered in schemas/diagnostic-codes.json may carry a severity override. An unknown code such as MDL999 is rejected with MDL9xx semantics (the configuration references a diagnostic that does not exist). Reserved ranges (MDL5xx layout, MDL7xx fallback, MDL9xx config) have no assigned codes yet and are therefore not overridable yet."
+        "description": "Only codes registered in schemas/diagnostic-codes.json may carry a severity override. An unknown code such as MDL999 is rejected with MDL9xx semantics (the configuration references a diagnostic that does not exist). Reserved ranges (MDL7xx fallback, MDL9xx config) have no assigned codes yet and are therefore not overridable yet."
       },
       "description": "Severity overrides keyed by diagnostic code, for example `{MDL301: error, MDL304: warning}`."
     },
@@ -239,10 +251,112 @@
             },
             "minItems": 1,
             "description": "Status values that must not appear under this path."
+          },
+          "intent": {
+            "type": "object",
+            "minProperties": 1,
+            "additionalProperties": false,
+            "description": "Declarative statement of what this directory is for. Documented here, and enforced where a key has a check: intent.kinds, intent.authority and intent.forbidStatus report MDL502 (directory-misplaced); intent.maxDepth and intent.naming report MDL504 (layout-constraint). intent.description, intent.topics, intent.statuses, intent.catalog and intent.tolerateLegacy are recorded for humans and catalog generation and are not enforced yet.",
+            "properties": {
+              "description": {
+                "type": "string",
+                "minLength": 1,
+                "description": "One-sentence purpose of this directory."
+              },
+              "kinds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "Kinds expected in this directory; a document whose kind is outside this set reports MDL502."
+              },
+              "topics": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "Topics this directory covers, for catalog generation."
+              },
+              "authority": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "Authorities expected in this directory; a document whose authority is outside this set reports MDL502."
+              },
+              "statuses": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "Statuses expected in this directory."
+              },
+              "forbidStatus": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1
+                },
+                "minItems": 1,
+                "description": "Statuses that must not appear in this directory; a matching document reports MDL502."
+              },
+              "maxDepth": {
+                "type": "integer",
+                "minimum": 1,
+                "description": "Maximum directory depth below the rule's match prefix; a deeper document reports MDL504."
+              },
+              "naming": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Regular expression the file's basename must match (tested against both the basename and the extension-less stem); a mismatch reports MDL504. The schema does not check that this is a valid regular expression."
+              },
+              "catalog": {
+                "type": "boolean",
+                "description": "Whether documents here are listed in a generated catalog."
+              },
+              "tolerateLegacy": {
+                "type": "boolean",
+                "description": "Whether legacy documents that predate this intent are tolerated without an exception entry."
+              }
+            }
           }
         }
       },
-      "description": "Directory layout and structure conventions (MDL501). Enforces match/require/forbidStatus rules against document paths and metadata."
+      "description": "Directory layout and structure conventions (MDL501/MDL502/MDL504). Enforces match/require/forbidStatus rules against document paths and metadata, and the optional intent block."
+    },
+    "layoutExceptions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "reason"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Glob selecting the document(s) the exception covers."
+          },
+          "reason": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Why this document is allowed to stay where it is."
+          },
+          "expires": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "Review-by date (YYYY-MM-DD, UTC). Once this date has passed the exception no longer applies and reports MDL503 (exception-expired). Omit for a permanent exception."
+          }
+        }
+      },
+      "description": "Time-boxed exemptions from layout intent checks (MDL503). A matching exception that has not expired suppresses intent checks (MDL502/MDL504) for that document; an expired one reports MDL503 and stops exempting."
     },
     "lifecycle": {
       "type": "object",
@@ -309,10 +423,110 @@
       },
       "description": "Document lifecycle, deprecated reference blocking (MDL306), and staleness governance (MDL801)."
     },
+    "links": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "expandTilde": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether to expand ~ and $HOME in link targets."
+        },
+        "allowHostPaths": {
+          "type": "string",
+          "enum": ["always", "warning", "forbidden"],
+          "default": "warning",
+          "description": "Policy for host-style link targets (always: accept without diagnostic if target exists; warning: warn about non-portable host paths; forbidden: treat all host paths as errors)."
+        }
+      }
+    },
     "policies": {
       "type": "object",
       "additionalProperties": false,
       "description": "RESERVED for P4/M4. Declarative repository policy rules (remark-language-server-solution.md §7.3) are intentionally left empty here: the DSL (when/relation/require/forbid) is still design-in-progress and its keys must not be validated prematurely."
+    },
+    "manifestFile": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Path to an out-of-band YAML manifest file, relative to this config file's directory."
+    },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "version": {
+          "type": "number"
+        },
+        "documents": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/manifestDocument"
+          }
+        }
+      },
+      "required": ["documents"]
+    }
+  },
+  "$defs": {
+    "manifestDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind"],
+      "properties": {
+        "schema": {
+          "type": "integer",
+          "default": 1
+        },
+        "id": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._-]*$"
+        },
+        "kind": {
+          "type": "string",
+          "minLength": 1
+        },
+        "status": {
+          "type": "string"
+        },
+        "authority": {
+          "type": "string"
+        },
+        "topics": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "aliases": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "relations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type", "target"],
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "target": {
+                "type": "string"
+              },
+              "reason": {
+                "type": "string"
+              },
+              "evidence": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

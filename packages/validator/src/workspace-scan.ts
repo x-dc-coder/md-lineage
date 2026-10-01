@@ -5,8 +5,8 @@
  * (Markdown, non-Markdown files, and directories in both `dir` and `dir/` forms).
  */
 
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import type { Config } from './config.js';
 import { PathFilter, matchesPattern } from './path-filter.js';
 
@@ -30,42 +30,83 @@ export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUn
 
   const documents = new Map<string, string>();
   const knownPathsSet = new Set<string>();
-  const queue: string[] = [absRoot];
+
+  let initialRealRoot: string;
+  try {
+    initialRealRoot = realpathSync(absRoot);
+  } catch {
+    initialRealRoot = absRoot;
+  }
+  const visitedPhysical = new Set<string>([initialRealRoot]);
+
+  interface QueueItem {
+    logicalDir: string;
+    physicalDir: string;
+    depth: number;
+  }
+
+  const queue: QueueItem[] = [{ logicalDir: '', physicalDir: absRoot, depth: 0 }];
 
   while (queue.length > 0) {
-    const currentDir = queue.pop() as string;
+    const { logicalDir, physicalDir, depth } = queue.pop()!;
     let entries: import('node:fs').Dirent[];
     try {
-      entries = readdirSync(currentDir, { withFileTypes: true });
+      entries = readdirSync(physicalDir, { withFileTypes: true });
     } catch {
       continue;
     }
 
     for (const entry of entries) {
-      const fullPath = join(currentDir, entry.name);
-      const rel = relative(absRoot, fullPath).split(sep).join('/');
-      if (rel === '' || rel.startsWith('..')) continue;
+      const logicalPath = logicalDir ? `${logicalDir}/${entry.name}` : entry.name;
+      const physicalPath = join(physicalDir, entry.name);
 
-      let isDirectory = false;
-      let isFile = false;
-
-      if (entry.isDirectory()) {
-        isDirectory = true;
-      } else if (entry.isFile()) {
-        isFile = true;
-      } else {
-        try {
-          const st = statSync(fullPath);
-          isDirectory = st.isDirectory();
-          isFile = st.isFile();
-        } catch {
+      if (entry.isSymbolicLink()) {
+        if (!config.files.followSymlinks || depth >= config.files.symlinkMaxDepth) {
           continue;
         }
-      }
 
-      if (isDirectory) {
-        const cleanDir = rel.endsWith('/') ? rel.slice(0, -1) : rel;
-        // Check if hard pruned
+        let st: import('node:fs').Stats;
+        let realTarget: string;
+        try {
+          st = statSync(physicalPath);
+          realTarget = realpathSync(physicalPath);
+        } catch {
+          // Broken symlink
+          continue;
+        }
+
+        if (visitedPhysical.has(realTarget)) {
+          // Cycle or duplicate traversal
+          continue;
+        }
+        visitedPhysical.add(realTarget);
+
+        if (st.isDirectory()) {
+          const cleanDir = logicalPath.endsWith('/') ? logicalPath.slice(0, -1) : logicalPath;
+          if (hardPrune.some((pat) => matchesPattern(cleanDir, pat))) {
+            continue;
+          }
+          if (filter.inUniverse(cleanDir)) {
+            knownPathsSet.add(cleanDir);
+            knownPathsSet.add(cleanDir + '/');
+          }
+          queue.push({ logicalDir: logicalPath, physicalDir: realTarget, depth: depth + 1 });
+        } else if (st.isFile()) {
+          if (!filter.inUniverse(logicalPath)) {
+            continue;
+          }
+          knownPathsSet.add(logicalPath);
+          if (logicalPath.toLowerCase().endsWith('.md')) {
+            try {
+              const content = readFileSync(realTarget, 'utf8');
+              documents.set(logicalPath, content);
+            } catch {
+              // Unreadable document is skipped
+            }
+          }
+        }
+      } else if (entry.isDirectory()) {
+        const cleanDir = logicalPath.endsWith('/') ? logicalPath.slice(0, -1) : logicalPath;
         if (hardPrune.some((pat) => matchesPattern(cleanDir, pat))) {
           continue;
         }
@@ -73,16 +114,16 @@ export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUn
           knownPathsSet.add(cleanDir);
           knownPathsSet.add(cleanDir + '/');
         }
-        queue.push(fullPath);
-      } else if (isFile) {
-        if (!filter.inUniverse(rel)) {
+        queue.push({ logicalDir: logicalPath, physicalDir: physicalPath, depth });
+      } else if (entry.isFile()) {
+        if (!filter.inUniverse(logicalPath)) {
           continue;
         }
-        knownPathsSet.add(rel);
-        if (rel.toLowerCase().endsWith('.md')) {
+        knownPathsSet.add(logicalPath);
+        if (logicalPath.toLowerCase().endsWith('.md')) {
           try {
-            const content = readFileSync(fullPath, 'utf8');
-            documents.set(rel, content);
+            const content = readFileSync(physicalPath, 'utf8');
+            documents.set(logicalPath, content);
           } catch {
             // Unreadable document is skipped
           }

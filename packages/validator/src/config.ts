@@ -24,7 +24,7 @@ import { parseDocument } from 'yaml';
 // `ajv` ships no `exports` map, so the Draft 2020-12 build is imported by path;
 // its default export is the Ajv2020 class.
 import { Ajv2020 } from 'ajv/dist/2020.js';
-import { BUILTIN_EXCLUDE_GLOBS } from './path-filter.js';
+import { BUILTIN_EXCLUDE_GLOBS, normalizeFilterPath } from './path-filter.js';
 
 /** Line-ending policy for the raw-buffer scan (MDL602). */
 export type EolPolicy = 'lf' | 'crlf' | 'cr';
@@ -33,6 +33,24 @@ export interface ConfigVocabulary {
   readonly kinds?: readonly string[];
   readonly statuses?: readonly string[];
   readonly authorities?: readonly string[];
+}
+
+export interface ManifestRelation {
+  readonly type: string;
+  readonly target: string;
+  readonly reason?: string;
+  readonly evidence?: string;
+}
+
+export interface ManifestDocument {
+  readonly schema?: number;
+  readonly id: string;
+  readonly kind: string;
+  readonly status?: string;
+  readonly authority?: string;
+  readonly topics?: readonly string[];
+  readonly aliases?: readonly string[];
+  readonly relations?: readonly ManifestRelation[];
 }
 
 export interface RelationSwitch {
@@ -49,10 +67,40 @@ export interface LayoutRequire {
   readonly frontmatter?: 'required' | 'optional';
 }
 
+export interface LayoutIntent {
+  readonly description?: string;
+  readonly kinds?: readonly string[];
+  readonly topics?: readonly string[];
+  readonly authority?: readonly string[];
+  readonly statuses?: readonly string[];
+  readonly forbidStatus?: readonly string[];
+  readonly maxDepth?: number;
+  readonly naming?: string;
+  readonly catalog?: boolean;
+  readonly tolerateLegacy?: boolean;
+}
+
 export interface LayoutRule {
   readonly match: string;
   readonly require?: LayoutRequire;
   readonly forbidStatus?: readonly string[];
+  readonly intent?: LayoutIntent;
+}
+
+/**
+ * A time-boxed exemption from a directory's intent checks (MDL503).
+ * `path` is a glob; `expires` is a review-by date (YYYY-MM-DD, UTC). An
+ * exception with no `expires` is permanent.
+ */
+export interface LayoutException {
+  readonly path: string;
+  readonly reason: string;
+  readonly expires?: string;
+}
+
+export interface LinksConfig {
+  readonly expandTilde: boolean;
+  readonly allowHostPaths: 'always' | 'warning' | 'forbidden';
 }
 
 export interface LifecycleConfig {
@@ -75,7 +123,12 @@ export interface LifecycleConfig {
  */
 export interface Config {
   readonly configVersion: number;
-  readonly files: { readonly include: readonly string[]; readonly exclude: readonly string[] };
+  readonly files: {
+    readonly include: readonly string[];
+    readonly exclude: readonly string[];
+    readonly followSymlinks: boolean;
+    readonly symlinkMaxDepth: number;
+  };
   readonly metadata: {
     readonly key: string;
     readonly required: boolean;
@@ -85,8 +138,13 @@ export interface Config {
   readonly vocabulary: ConfigVocabulary;
   readonly relations: Readonly<Record<string, RelationSwitch>>;
   readonly layout: readonly LayoutRule[];
+  /** Time-boxed exemptions from layout intent checks (MDL503). */
+  readonly layoutExceptions: readonly LayoutException[];
   readonly lifecycle: LifecycleConfig;
+  readonly links: LinksConfig;
   readonly schemaFile?: string;
+  readonly manifestDocuments: ReadonlyMap<string, ManifestDocument>;
+  readonly manifestFile?: string;
   /** Severity overrides keyed by diagnostic code. */
   readonly diagnostics: Readonly<Record<string, 'error' | 'warning' | 'information' | 'hint'>>;
   /** Line-ending policy (§4.3). Schema key; git's `eol` attribute has no CR form. */
@@ -122,11 +180,28 @@ export function configToSchema(config: Config): Readonly<Record<string, unknown>
       staleStatuses: [...config.lifecycle.staleStatuses],
       exempt: [...config.lifecycle.exempt],
     },
+    links: { ...config.links },
     diagnostics: { ...config.diagnostics },
     eolPolicy: config.eolPolicy,
   };
   if (config.schemaFile) out.schemaFile = config.schemaFile;
+  if (config.manifestFile) out.manifestFile = config.manifestFile;
   if (config.layout && config.layout.length > 0) out.layout = config.layout;
+  if (config.layoutExceptions && config.layoutExceptions.length > 0) {
+    out.layoutExceptions = config.layoutExceptions;
+  }
+  if (config.manifestDocuments.size > 0 && !config.manifestFile) {
+    const docs: Record<string, unknown> = {};
+    for (const [p, doc] of config.manifestDocuments.entries()) {
+      docs[p] = doc;
+    }
+    out.manifest = { documents: docs };
+  } else if (config.raw && typeof config.raw['manifest'] === 'object' && config.raw['manifest'] !== null) {
+    const rawManifest = config.raw['manifest'] as { version?: number; documents?: Record<string, unknown> };
+    if (rawManifest.documents && Object.keys(rawManifest.documents).length > 0) {
+      out.manifest = rawManifest;
+    }
+  }
   for (const key of Object.keys(out)) {
     if (out[key] === undefined) delete out[key];
   }
@@ -141,7 +216,7 @@ export function configToSchema(config: Config): Readonly<Record<string, unknown>
 export function defaultConfig(): Config {
   return {
     configVersion: 1,
-    files: { include: ['**/*.md'], exclude: [...BUILTIN_EXCLUDE_GLOBS] },
+    files: { include: ['**/*.md'], exclude: [...BUILTIN_EXCLUDE_GLOBS], followSymlinks: true, symlinkMaxDepth: 10 },
     metadata: {
       key: 'mdlineage',
       required: true,
@@ -163,6 +238,7 @@ export function defaultConfig(): Config {
       related_to: { impact: false },
     },
     layout: [],
+    layoutExceptions: [],
     lifecycle: {
       activeStatuses: ['active'],
       deprecatedStatuses: ['deprecated'],
@@ -171,6 +247,11 @@ export function defaultConfig(): Config {
       staleStatuses: ['active'],
       exempt: [],
     },
+    links: {
+      expandTilde: true,
+      allowHostPaths: 'warning',
+    },
+    manifestDocuments: new Map(),
     diagnostics: { MDL301: 'error', MDL304: 'warning' },
     eolPolicy: 'lf',
     raw: null,
@@ -336,7 +417,68 @@ export function loadConfig(path?: string, from?: string): ConfigLoadResult {
     return { config: defaultConfig(), diagnostics: extended.diagnostics };
   }
 
-  return { config: normalize(extended.raw, configPath, extended.chain), diagnostics: [] };
+  const rawConfig = { ...extended.raw };
+
+  // Load out-of-band YAML manifest if declared
+  if (typeof rawConfig['manifestFile'] === 'string') {
+    const manifestPath = resolve(dirname(configPath), rawConfig['manifestFile'] as string);
+    try {
+      if (!pathExists(manifestPath)) {
+        return {
+          config: defaultConfig(),
+          diagnostics: [
+            {
+              code: 'MDL900',
+              severity: 'error',
+              message: `Manifest file not found: ${manifestPath}`,
+            },
+          ],
+        };
+      }
+      const manifestText = readFileSync(manifestPath, 'utf8');
+      const manifestDoc = parseDocument(manifestText);
+      if (manifestDoc.errors.length > 0) {
+        return {
+          config: defaultConfig(),
+          diagnostics: [
+            {
+              code: 'MDL900',
+              severity: 'error',
+              message: `Manifest is not valid YAML: ${manifestDoc.errors[0]?.message}`,
+            },
+          ],
+        };
+      }
+      const parsedManifest = manifestDoc.toJS() as Record<string, unknown> | null;
+      const externalDocs =
+        parsedManifest && typeof parsedManifest === 'object' && !Array.isArray(parsedManifest) && parsedManifest.documents && typeof parsedManifest.documents === 'object' && !Array.isArray(parsedManifest.documents)
+          ? (parsedManifest.documents as Record<string, unknown>)
+          : {};
+
+      const inlineManifest = rawConfig['manifest'] as { documents?: Record<string, unknown> } | undefined;
+      const inlineDocs =
+        inlineManifest && typeof inlineManifest === 'object' && inlineManifest.documents && typeof inlineManifest.documents === 'object'
+          ? inlineManifest.documents
+          : {};
+
+      // External documents merged with inline manifest documents (inline documents take precedence)
+      const mergedDocs = { ...externalDocs, ...inlineDocs };
+      rawConfig['manifestDocuments'] = mergedDocs;
+    } catch (error) {
+      return {
+        config: defaultConfig(),
+        diagnostics: [
+          {
+            code: 'MDL900',
+            severity: 'error',
+            message: `Cannot read manifest file ${manifestPath}: ${errorMessage(error)}`,
+          },
+        ],
+      };
+    }
+  }
+
+  return { config: normalize(rawConfig, configPath, extended.chain), diagnostics: [] };
 }
 
 /**
@@ -609,6 +751,11 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string, exten
       exclude: Array.isArray(files.exclude)
         ? [...BUILTIN_EXCLUDE_GLOBS, ...(files.exclude as string[])]
         : base.files.exclude,
+      followSymlinks: typeof files.followSymlinks === 'boolean' ? files.followSymlinks : base.files.followSymlinks,
+      symlinkMaxDepth:
+        typeof files.symlinkMaxDepth === 'number' && Number.isInteger(files.symlinkMaxDepth) && files.symlinkMaxDepth >= 0
+          ? files.symlinkMaxDepth
+          : 10,
     },
     metadata: {
       key: typeof metadata.key === 'string' ? metadata.key : base.metadata.key,
@@ -629,8 +776,12 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string, exten
     },
     relations: mergeRelationSwitches(relations, base.relations),
     layout: parseLayout(raw.layout),
+    layoutExceptions: parseLayoutExceptions(raw.layoutExceptions),
     lifecycle: parseLifecycle(raw.lifecycle, base.lifecycle),
+    links: parseLinks(raw.links, base.links),
     schemaFile: typeof raw.schemaFile === 'string' ? raw.schemaFile : undefined,
+    manifestFile: typeof raw.manifestFile === 'string' ? raw.manifestFile : undefined,
+    manifestDocuments: parseManifestDocuments(raw.manifestDocuments ?? (raw.manifest as { documents?: unknown })?.documents),
     diagnostics: mergeDiagnostics(diagnostics, base.diagnostics),
     // The schema enum guarantees validity; the guard keeps the cast honest if
     // a caller ever hands `normalize` an unvalidated document.
@@ -641,6 +792,50 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string, exten
     raw,
     extendsChain,
   };
+}
+
+function parseManifestDocuments(rawDocs: unknown): ReadonlyMap<string, ManifestDocument> {
+  const map = new Map<string, ManifestDocument>();
+  if (!rawDocs || typeof rawDocs !== 'object' || Array.isArray(rawDocs)) return map;
+  for (const [key, value] of Object.entries(rawDocs as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const docObj = value as Record<string, unknown>;
+    if (typeof docObj.id !== 'string' || typeof docObj.kind !== 'string') continue;
+
+    const relations: ManifestRelation[] | undefined = Array.isArray(docObj.relations)
+      ? (docObj.relations as unknown[]).flatMap((r) => {
+          if (!r || typeof r !== 'object' || Array.isArray(r)) return [];
+          const robj = r as Record<string, unknown>;
+          if (typeof robj.type !== 'string' || typeof robj.target !== 'string') return [];
+          const rel: ManifestRelation = {
+            type: robj.type,
+            target: robj.target,
+            ...(typeof robj.reason === 'string' ? { reason: robj.reason } : {}),
+            ...(typeof robj.evidence === 'string' ? { evidence: robj.evidence } : {}),
+          };
+          return [rel];
+        })
+      : undefined;
+
+    const doc: ManifestDocument = {
+      schema: typeof docObj.schema === 'number' ? docObj.schema : 1,
+      id: docObj.id,
+      kind: docObj.kind,
+      ...(typeof docObj.status === 'string' ? { status: docObj.status } : {}),
+      ...(typeof docObj.authority === 'string' ? { authority: docObj.authority } : {}),
+      ...(Array.isArray(docObj.topics)
+        ? { topics: (docObj.topics as unknown[]).filter((t): t is string => typeof t === 'string') }
+        : {}),
+      ...(Array.isArray(docObj.aliases)
+        ? { aliases: (docObj.aliases as unknown[]).filter((a): a is string => typeof a === 'string') }
+        : {}),
+      ...(relations ? { relations } : {}),
+    };
+
+    const normalizedKey = normalizeFilterPath(key);
+    map.set(normalizedKey, doc);
+  }
+  return map;
 }
 
 /**
@@ -675,7 +870,12 @@ function parseLayout(rawLayout: unknown): LayoutRule[] {
     if (!item || typeof item !== 'object') continue;
     const obj = item as Record<string, unknown>;
     if (typeof obj.match !== 'string') continue;
-    const rule: { match: string; require?: LayoutRequire; forbidStatus?: string[] } = {
+    const rule: {
+      match: string;
+      require?: LayoutRequire;
+      forbidStatus?: string[];
+      intent?: LayoutIntent;
+    } = {
       match: obj.match,
     };
     if (obj.require && typeof obj.require === 'object') {
@@ -699,9 +899,58 @@ function parseLayout(rawLayout: unknown): LayoutRule[] {
     if (Array.isArray(obj.forbidStatus)) {
       rule.forbidStatus = obj.forbidStatus as string[];
     }
+    if (obj.intent && typeof obj.intent === 'object' && !Array.isArray(obj.intent)) {
+      const intent = parseIntent(obj.intent as Record<string, unknown>);
+      if (intent) rule.intent = intent;
+    }
     rules.push(rule);
   }
   return rules;
+}
+
+/** Read one layout rule's `intent` block, dropping keys of the wrong shape. */
+function parseIntent(obj: Record<string, unknown>): LayoutIntent | null {
+  const intent: {
+    description?: string;
+    kinds?: string[];
+    topics?: string[];
+    authority?: string[];
+    statuses?: string[];
+    forbidStatus?: string[];
+    maxDepth?: number;
+    naming?: string;
+    catalog?: boolean;
+    tolerateLegacy?: boolean;
+  } = {};
+  if (typeof obj.description === 'string') intent.description = obj.description;
+  for (const key of ['kinds', 'topics', 'authority', 'statuses', 'forbidStatus'] as const) {
+    if (Array.isArray(obj[key])) intent[key] = obj[key] as string[];
+  }
+  if (typeof obj.maxDepth === 'number' && Number.isInteger(obj.maxDepth) && obj.maxDepth >= 1) {
+    intent.maxDepth = obj.maxDepth;
+  }
+  if (typeof obj.naming === 'string') intent.naming = obj.naming;
+  if (typeof obj.catalog === 'boolean') intent.catalog = obj.catalog;
+  if (typeof obj.tolerateLegacy === 'boolean') intent.tolerateLegacy = obj.tolerateLegacy;
+  return Object.keys(intent).length > 0 ? intent : null;
+}
+
+/** Read the top-level `layoutExceptions` array, dropping malformed entries. */
+function parseLayoutExceptions(raw: unknown): LayoutException[] {
+  if (!Array.isArray(raw)) return [];
+  const out: LayoutException[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue;
+    const obj = item as Record<string, unknown>;
+    if (typeof obj.path !== 'string' || typeof obj.reason !== 'string') continue;
+    const exception: { path: string; reason: string; expires?: string } = {
+      path: obj.path,
+      reason: obj.reason,
+    };
+    if (typeof obj.expires === 'string') exception.expires = obj.expires;
+    out.push(exception);
+  }
+  return out;
 }
 
 function parseLifecycle(rawLifecycle: unknown, baseLifecycle: LifecycleConfig): LifecycleConfig {
@@ -731,6 +980,22 @@ function parseLifecycle(rawLifecycle: unknown, baseLifecycle: LifecycleConfig): 
     exempt: Array.isArray(obj.exempt)
       ? (obj.exempt as string[])
       : baseLifecycle.exempt,
+  };
+}
+
+function parseLinks(rawLinks: unknown, baseLinks: LinksConfig): LinksConfig {
+  if (!rawLinks || typeof rawLinks !== 'object' || Array.isArray(rawLinks)) {
+    return baseLinks;
+  }
+  const obj = rawLinks as Record<string, unknown>;
+  const expandTilde = typeof obj.expandTilde === 'boolean' ? obj.expandTilde : baseLinks.expandTilde;
+  let allowHostPaths: 'always' | 'warning' | 'forbidden' = baseLinks.allowHostPaths;
+  if (obj.allowHostPaths === 'always' || obj.allowHostPaths === 'warning' || obj.allowHostPaths === 'forbidden') {
+    allowHostPaths = obj.allowHostPaths;
+  }
+  return {
+    expandTilde,
+    allowHostPaths,
   };
 }
 
@@ -783,7 +1048,12 @@ const DEFAULT_SEVERITIES: Readonly<Record<string, 'error' | 'warning' | 'informa
   MDL306: 'warning',
   MDL401: 'warning',
   MDL402: 'warning',
+  MDL403: 'warning',
   MDL501: 'warning',
+  MDL502: 'warning',
+  MDL503: 'error',
+  MDL504: 'warning',
+  MDL505: 'warning',
   MDL601: 'warning',
   MDL602: 'warning',
   MDL801: 'warning',

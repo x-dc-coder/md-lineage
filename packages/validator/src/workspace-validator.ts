@@ -39,6 +39,7 @@ import type { DocEntry, DocPath, WorkspaceIndex } from './workspace-index.js';
 import { resolveLinkPath } from './workspace-index.js';
 import type { Baseline } from './baseline.js';
 import { suppressWithBaseline } from './baseline.js';
+import { checkHostLink } from './host-links.js';
 
 /** A read-only empty neighbour list, reused for every node without edges. */
 const EMPTY_PATHS: readonly string[] = Object.freeze([]);
@@ -71,6 +72,8 @@ export interface ValidateWorkspaceOptions {
   readonly gitClocks?: ReadonlyMap<DocPath, { readonly provenStale: boolean; readonly seconds: number | null }>;
   /** Injected clock for freshness checks. */
   readonly nowMs?: number;
+  /** Root directory for workspace link resolution. Defaults to process.cwd(). */
+  readonly root?: string;
 }
 
 /**
@@ -102,7 +105,7 @@ export function validateWorkspace(
       ...mdl306(entry, index, config),
       ...mdlSelfReference(entry, index, config),
     );
-    out.push(...mdl304(entry, config), ...mdl401(entry, index, config), ...mdl402(entry, index, config));
+    out.push(...mdl304(entry, config), ...mdl401(entry, index, config, options.root), ...mdl402(entry, index, config));
 
     // MDL801 Git fallback clock for documents without authored timestamps
     const hasAuthoredMDL801 = entry.diagnostics.some((d) => d.code === 'MDL801');
@@ -508,11 +511,45 @@ function stronglyConnectedComponents(graph: Map<string, readonly string[]>): str
  * A same-page anchor (`path === ''`) is
  * skipped: it belongs to MDL201's in-document domain, never the link layer.
  */
-function mdl401(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
+function mdl401(
+  entry: DocEntry,
+  index: WorkspaceIndex,
+  config: Config,
+  root: string = process.cwd(),
+): WorkspaceDiagnostic[] {
   const out: WorkspaceDiagnostic[] = [];
   for (const link of entry.links) {
     if (!link.path) continue;
     if (isExternal(link.path)) continue;
+
+    // Check host link target first (MDL403)
+    const hostCheck = checkHostLink(link.path, root, config);
+    if (hostCheck?.isHostLink) {
+      if (hostCheck.diagnostic) {
+        const diag = build(
+          hostCheck.diagnostic.code,
+          hostCheck.diagnostic.message,
+          entry,
+          link.offset,
+          config,
+          {
+            url: link.url,
+            path: link.path,
+            ...(hostCheck.diagnostic.data ?? {}),
+          },
+        );
+        // If config diagnostics overrides severity, build() handles it,
+        // but if hostCheck diagnostic explicitly specified error (e.g. forbidden)
+        // ensure default severity is aligned if not overridden
+        if (config.diagnostics[hostCheck.diagnostic.code] === undefined) {
+          (diag as { severity: unknown }).severity = hostCheck.diagnostic.severity;
+        }
+        out.push(diag);
+      }
+      // Skip subsequent MDL401 check for host-style links
+      continue;
+    }
+
     const targets = resolveLinkPath(index, entry.path, link.path);
     if (targets.length > 0) {
       // Only an indexed document has heading anchors; a known non-Markdown file

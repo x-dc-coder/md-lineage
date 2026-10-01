@@ -40,6 +40,8 @@ import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verify
 import { startStdio } from '@mdlineage/language-server';
 import { runInit } from './init.js';
 import { runFix } from './fix.js';
+import { runMove } from './move.js';
+import { runOrganize } from './organize.js';
 import { configValidate } from './config-validate.js';
 import { indexRebuild } from './index-rebuild.js';
 import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
@@ -58,6 +60,12 @@ Usage:
   mdlineage suggest <file>          Propose metadata for a document (no writes)
   mdlineage fix [paths...]          Apply safe fixes (missing fields, duplicate
                                     relations, line endings; default: dry run)
+  mdlineage move <src> <dst>        Move a document and repair every relative
+                                    link that pointed at or out of it
+                                    (default: dry run)
+  mdlineage organize                Report the tree's kind/directory shape and
+                                    plan the moves its layout intents ask for
+                                    (--inventory, --report, --plan, --apply)
   mdlineage config validate         Check the config file loads and passes the
                                     schema (no config found: defaults, exit 0)
   mdlineage index rebuild           Rebuild the workspace index in memory and
@@ -65,8 +73,8 @@ Usage:
                                     (nothing is persisted)
 
 Roots — each command anchors "the workspace" differently, by design:
-  check/fix                        the CWD: paths are resolved against it, and
-                                    fix refuses anything outside it
+  check/fix/move/organize          the CWD: paths are resolved against it, and
+                                    every one of them refuses anything outside it
   baseline                         the git repository root (CWD outside a repo):
                                     the baseline is a repository-level contract
   init                             the git repository root (CWD outside a repo):
@@ -85,8 +93,16 @@ Options:
   --no-baseline               Ignore the committed baseline (report accepted debt)
   --force                     baseline update: write despite an unreadable baseline
   --report-only               baseline update: print the change set, write nothing
-  --write                     init/fix: apply the planned changes (default is a
+  --write                     init/fix: apply the planned changes; move: relocate
+                              the file and write the repaired documents;
+                              organize: execute the planned moves (default is a
                               dry run)
+  --dry-run                   move: print the plan even when --write is given
+  --apply                     organize: execute the planned moves (--write alias)
+  --scope <glob>              organize: analyse only the matching documents
+  --inventory                 organize: report kind and directory distribution
+  --report                    organize: report directory-intent compliance
+  --plan                      organize: output the move plan (the default)
   --frail                     Any diagnostic fails the run, warnings included
   --root <dir>                mcp: the workspace to index (default: the CWD)
   --help, -h                  Show this text
@@ -128,6 +144,12 @@ interface ParsedArgs {
     force?: boolean;
     'report-only'?: boolean;
     write?: boolean;
+    'dry-run'?: boolean;
+    apply?: boolean;
+    plan?: boolean;
+    inventory?: boolean;
+    report?: boolean;
+    scope?: string;
     stdio?: boolean;
     root?: string;
     help?: boolean;
@@ -166,8 +188,16 @@ function readArgs(argv: string[]): ParsedArgs {
       // `mdlineage mcp --root <dir>` names the tree the MCP server indexes.
       root: { type: 'string' },
       'report-only': { type: 'boolean' },
-      // `mdlineage init --write`: writing is always an explicit action.
+      // `mdlineage init --write`: writing is always an explicit action. The same
+      // flag carries `fix`, `move` and `organize`, and `--dry-run`/`--apply` add
+      // the two shapes those commands need.
       write: { type: 'boolean' },
+      'dry-run': { type: 'boolean' },
+      apply: { type: 'boolean' },
+      plan: { type: 'boolean' },
+      inventory: { type: 'boolean' },
+      report: { type: 'boolean' },
+      scope: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -220,6 +250,12 @@ export async function main(argv: string[]): Promise<number> {
     }
     if (command === 'fix') {
       return runFix(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'move') {
+      return runMove(parsed.positionals.slice(1), parsed.values, processCwd());
+    }
+    if (command === 'organize') {
+      return runOrganize(parsed.positionals.slice(1), parsed.values, processCwd());
     }
     if (command === 'config') {
       return runConfigCommand(parsed.positionals.slice(1), parsed.values);

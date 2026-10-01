@@ -525,7 +525,7 @@ describe('MDL401 — markdown link targets', () => {
     ]);
     const index = createWorkspaceIndex(files, defaultConfig());
     const all = validateWorkspace(index, { includeSingleDocument: false });
-    assert.equal(byCode(all, 'MDL401').length, 1, 'absolute paths keep exact-match-only semantics');
+    assert.equal(byCode(all, 'MDL403').length, 1, 'absolute paths report MDL403 host-style link');
   });
 
   it('decodes percent-encoded URL paths (%E4%B8%AD%E6%96%87.md)', () => {
