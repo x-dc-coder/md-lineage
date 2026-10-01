@@ -2,7 +2,8 @@ name: Release
 
 on:
   # A GitHub Release is the release lever: npm publish is only ever attempted
-  # from here, so a tag is always the provenance subject.
+  # from here, so a tag is always the provenance subject. Publishing
+  # authenticates through npm trusted publishing (OIDC) — see the publish job.
   release:
     types: [published]
   # Manual path for republishing or publishing outside the Release flow.
@@ -12,8 +13,8 @@ on:
         description: Git tag to publish (must already exist)
         required: true
         type: string
-      allow_missing_npm_token:
-        description: 'Attach assets only: run without NPM_TOKEN instead of failing the publish job'
+      skip_publish:
+        description: 'Attach assets only: skip npm publish entirely'
         required: false
         type: boolean
         default: false
@@ -22,9 +23,10 @@ concurrency:
   group: release-${{ github.event.release.tag_name || inputs.tag }}
   cancel-in-progress: false
 
-# `publishConfig.provenance: true` makes npm attach a Sigstore provenance
-# statement, which it can only mint from the GitHub OIDC token this job
-# requests. Without `id-token: write`, npm fails with EUSAGE instead.
+# `id-token: write` powers both npm trusted publishing (OIDC authentication
+# against each package's configured trusted publisher) and the Sigstore
+# provenance statement that `publishConfig.provenance: true` asks for.
+# Without this permission npm fails with EUSAGE.
 permissions:
   contents: read
   id-token: write
@@ -50,6 +52,12 @@ jobs:
           cache: npm
           registry-url: https://registry.npmjs.org
 
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; Node 22 bundles npm 10.x.
+      - name: Ensure npm supports trusted publishing
+        run: |
+          npm install -g 'npm@^11.5.1'
+          npm --version
+
       - name: Install (npm ci)
         run: npm ci
 
@@ -59,60 +67,54 @@ jobs:
       - name: Test
         run: npm test
 
-      # A missing NPM_TOKEN used to leave this job green with every publish step
-      # skipped — a "published" Release that shipped nothing to npm. The token is
-      # a repository secret, so its absence is invisible in the UI; say it loudly
-      # instead. A dispatch that only wants assets re-attached can opt out.
-      - name: Verify NPM_TOKEN availability
+      # The npm CLI (11.5.1+) auto-detects the GitHub OIDC environment and
+      # authenticates through each package's trusted publisher configuration.
+      # A token secret is only the bootstrap fallback for a package that does not
+      # exist on the registry yet — trusted publishers can only be configured for
+      # packages that already exist, so the very first publish needs a token.
+      - name: Report npm authentication mode
         run: |
           if [ -n "$NPM_TOKEN" ]; then
-            echo "NPM_TOKEN present; npm publish steps will run."
-            exit 0
+            echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" >> "$HOME/.npmrc"
+            echo "::notice::NPM_TOKEN secret present — used as a bootstrap fallback for this publish; remove the secret once all five packages have trusted publishers configured."
+          else
+            echo "::notice::No NPM_TOKEN secret — publishing relies on npm trusted publishing (OIDC) for all five packages."
           fi
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ] && [ "${{ inputs.allow_missing_npm_token }}" != "true" ]; then
-            echo "::error::NPM_TOKEN repository secret is not configured, so npm publish cannot run. Re-dispatch with allow_missing_npm_token=true to attach release assets only."
-            exit 1
-          fi
-          echo "::warning::NPM_TOKEN is not configured — npm publish steps are skipped; release assets are still attached by the pack job."
+
+      - name: Publish skipped (assets only)
+        if: ${{ inputs.skip_publish == true }}
+        run: echo "::notice::skip_publish=true — npm publish skipped on purpose; the pack job still attached the release assets."
 
       # `npm publish --workspaces` would publish all five packages, but it
       # skips a package whose version already exists on the registry with only
       # a warning, which would let a partially published release pass green.
       # Publishing one package at a time makes that a hard, local failure.
+      # Every step runs unless explicitly skipped: a publish that fails is a red
+      # run, never a silent green one.
       - name: Publish @mdlineage/validator
-        if: env.NPM_TOKEN != ''
+        if: ${{ inputs.skip_publish != true }}
         run: npm publish --provenance --access public
         working-directory: packages/validator
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mdlineage/remark-lint-mdlineage
-        if: env.NPM_TOKEN != ''
+        if: ${{ inputs.skip_publish != true }}
         run: npm publish --provenance --access public
         working-directory: packages/remark-lint-mdlineage
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mdlineage/cli
-        if: env.NPM_TOKEN != ''
+        if: ${{ inputs.skip_publish != true }}
         run: npm publish --provenance --access public
         working-directory: packages/cli
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mdlineage/language-server
-        if: env.NPM_TOKEN != ''
+        if: ${{ inputs.skip_publish != true }}
         run: npm publish --provenance --access public
         working-directory: packages/language-server
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @mdlineage/mcp-server
-        if: env.NPM_TOKEN != ''
+        if: ${{ inputs.skip_publish != true }}
         run: npm publish --provenance --access public
         working-directory: packages/mcp-server
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # 把 5 个 tgz + 3 个 schema 挂到该 Release 的资产里（与 npm publish 相互独立）。
   # `--clobber` 使重跑/补发幂等；版本守卫确保 tag 与 6 个 package.json 版本一致，防止发错版本。
