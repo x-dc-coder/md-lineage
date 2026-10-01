@@ -70,6 +70,12 @@ A link proves that the author created a navigation reference. It does not, by it
 
 Typed relationships such as `depends_on`, `refines`, and `supersedes` are authoritative. They may drive impact analysis, validation, and agent workflows.
 
+### Out-of-band Manifest relationships (Solution 4)
+
+When documentation cannot be modified directly (e.g. symlinked external skill libraries, third-party packages, or zero-touch governance repositories), metadata and typed relationships can be declared in an external manifest file (`manifestFile: mdlineage.manifest.yaml`) or inline configuration.
+
+The validator engine merges manifest declarations into the in-memory `DocEntry` during workspace indexing. Documents covered by the manifest receive full first-class citizen capabilities: ID resolution, cycle checking (MDL305), deprecated dependency blocking (MDL306), and impact analysis, while source Markdown files remain 100% byte-identical on disk.
+
 ### Inferred candidates
 
 Candidate discovery should combine lexical retrieval, embeddings, shared entities, headings, links, and existing metadata. An LLM classifies candidate pairs and returns evidence. Similarity is a recall signal, not a persisted relationship type by itself.
@@ -89,6 +95,23 @@ When files change:
 7. Optionally propose metadata updates for review.
 
 Theme communities and repository-wide summaries can be refreshed in batches rather than on every edit.
+
+## Discovery and freshness pipeline (Four-stage funnel)
+
+Auditing documentation for stale contents and broken prerequisites avoids linear, manual file-by-file reading. Instead, MDLineage executes a funnel-style discovery pipeline that narrows hundreds of documents to anomaly targets in seconds:
+
+1. **Stage 1: Mechanical rule and clock filtering**
+   Runs `mdlineage check .` to evaluate deterministic rules in milliseconds:
+   - Broken prerequisites: `MDL302` (missing target ID), `MDL306` (dependency deprecated), `MDL401`/`MDL403` (missing link paths).
+   - Lifecycle decay: `MDL801` (authored timestamp or Git clock exceeds `staleAfterDays`), `MDL503` (expired layout exception).
+2. **Stage 2: Graph topology and blast radius traversal**
+   Traverses the in-memory `WorkspaceIndex` directed acyclic graph:
+   - Orphan detection: flags isolated documents with zero in-degree and zero out-degree.
+   - Upstream impact: when a foundation document is deprecated or changed, queries `index.referrersOf(targetId)` to identify the exact downstream affected set.
+3. **Stage 3: Fact entity and environment probing**
+   Extracts hardcoded environment facts (tool versions, file paths, ports) via regex or AST and runs read-only probes (`which`, `--version`, `test -e`, `nc`) to detect external fact drift without LLM context overhead.
+4. **Stage 4: Targeted semantic review**
+   Performs detailed conceptual reading and editing exclusively on the small fraction of documents flagged by stages 1 to 3.
 
 ## Agent interface
 

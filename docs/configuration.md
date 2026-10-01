@@ -66,6 +66,9 @@ are read from `schemas/mdlineage-config.schema.json` and from `defaultConfig()` 
 |---|---|---|---|---|
 | `configVersion` | number, must be `1` | — (required) | Configuration schema version | MDL900 on any other value |
 | `files` | object | see below | Discovery scope for workspace indexing | none directly |
+| `manifestFile` | string | unset | Path to an out-of-band YAML manifest file (Solution 4) | MDL900 on missing/invalid |
+| `manifest` | object | unset | Inline out-of-band metadata manifest | MDL900 |
+| `links` | object | see below | Host-style link targets and tilde expansion | MDL403 |
 | `metadata` | object | see below | Front matter extraction behaviour | MDL003, MDL104 |
 | `vocabulary` | object | see below | Legal `kind` / `status` / `authority` values | MDL103 |
 | `relations` | object | see below | Per-relation-type strictness | MDL103, MDL304, MDL305 |
@@ -74,7 +77,8 @@ are read from `schemas/mdlineage-config.schema.json` and from `defaultConfig()` 
 | `eolPolicy` | `lf` \| `crlf` \| `cr` | `lf` | Line-ending policy | MDL601, MDL602 |
 | `schemaFile` | string | unset | Path to a repository-specific metadata schema | MDL102, MDL104, MDL900 |
 | `extends` | array of strings | unset | Organization presets to inherit | MDL900 |
-| `layout` | array | unset | Directory layout conventions | MDL501 |
+| `layout` | array | unset | Directory layout conventions and intent contracts | MDL501, MDL502, MDL504 |
+| `layoutExceptions` | array | unset | Time-boxed exemptions from layout intent rules | MDL503 |
 | `policies` | object | unset | Reserved for repository policy rules | none (not implemented) |
 
 Unknown top-level keys are rejected: the config schema sets
@@ -87,11 +91,15 @@ config error rather than a silently ignored block.
 |---|---|---|---|
 | `include` | array of globs | `['**/*.md']` | Candidate files for the workspace scan |
 | `exclude` | array of globs | `['node_modules/**', 'dist/**', 'vendor/**']` | Directories and paths to skip |
+| `followSymlinks` | boolean | `true` | Whether to traverse directory symbolic links during discovery |
+| `symlinkMaxDepth` | number | `10` | Maximum symlink traversal depth (loop-protected by realpath tracking) |
 
 The CLI, the language server and the MCP server all respect `files.exclude`.
 The built-in exclusions (`node_modules/**`, `dist/**`, `vendor/**`) are always
 prepended; setting `exclude: []` does not remove built-in exclusions. The CLI's
 repeatable `--exclude <pattern>` flag appends further patterns to the exclusion list.
+When `followSymlinks` is true, symbolic links are projected onto logical workspace
+paths, with cycle detection preventing infinite recursion.
 
 ### `metadata` — Front Matter extraction
 
@@ -209,15 +217,15 @@ and whether document ages exceed repository thresholds (MDL801).
 ### `diagnostics` — severity overrides
 
 Keys are diagnostic codes, values are `error`, `warning`, `information` or
-`hint`. Only the 22 codes registered in
+`hint`. Only the 27 codes registered in
 [`../schemas/diagnostic-codes.json`](../schemas/diagnostic-codes.json) may carry
 an override:
 
 ```text
 MDL001  MDL002  MDL003  MDL101  MDL102  MDL103  MDL104
 MDL201  MDL202  MDL203  MDL301  MDL302  MDL303  MDL304
-MDL305  MDL306  MDL401  MDL402  MDL501  MDL601  MDL602
-MDL801
+MDL305  MDL306  MDL401  MDL402  MDL403  MDL501  MDL502
+MDL503  MDL504  MDL505  MDL601  MDL602  MDL801
 ```
 
 An unknown code such as `MDL999`, or a code from a reserved range (MDL7xx,
@@ -315,17 +323,52 @@ mdlineage: config OK (.../mdlineage.config.yaml)
 A missing preset is an MDL900 (`Config file not found: ./missing.yaml (extended
 from ...)`) and the run falls back to the defaults.
 
-### `layout` — directory conventions (MDL501)
+### `layout` — directory conventions and intent contracts
 
-`layout` defines path-based structural policies. Each rule specifies a `match`
+`layout` defines path-based structural policies and directory intent contracts. Each rule specifies a `match`
 glob and constraints:
 
 - `forbidStatus`: list of status values forbidden under matching paths.
 - `require.kind`: required kind(s) for matching documents.
 - `require.authority`: required authority value(s).
 - `require.frontmatter`: `required` (default) or `optional` (exempts MDL003).
+- `intent`: declares the directory's architectural purpose and model:
+  - `kinds`: allowed document categories (violations produce **MDL502**).
+  - `naming`: regex pattern for document filenames without extension (**MDL504**).
+  - `maxDepth`: maximum relative directory nesting depth (**MDL504**).
+  - `forbidStatus`: forbidden lifecycle states for documents in this directory.
 
-Violations produce `MDL501` warnings. `policies` remains reserved for future DSL extensions.
+Uncategorized documents in directories without any intent rule trigger **MDL505**.
+
+### `layoutExceptions` — time-boxed layout exemptions
+
+`layoutExceptions` specifies exemptions from `layout.intent` rules for legacy documents undergoing migration:
+
+- `path`: document path to exempt.
+- `reason`: why this document is exempt.
+- `expires`: optional review-by date (`YYYY-MM-DD`). Once expired, the exemption is revoked and reports **MDL503** (error).
+
+### `links` — host paths and tilde expansion
+
+`links` controls how Linux Shell-style and machine-absolute paths are validated:
+
+- `expandTilde`: boolean (`true` by default). Expands `~` and `$HOME` to the host user's home directory.
+- `allowHostPaths`: policy enum for machine-dependent paths (`~/...`, `/...`):
+  - `warning` (default): warns that host paths are not portable across environments (**MDL403**), or reports missing physical targets. If the target exists inside the workspace root, suggests a portable relative link.
+  - `always`: accepts existing host paths cleanly without diagnostics.
+  - `forbidden`: strictly rejects all host-style links with MDL403 error (ideal for sandboxed CI runs).
+
+### `manifestFile` and `manifest` — Out-of-band metadata manifest (Solution 4)
+
+For external packages, symlinked assets (such as multi-agent skill farm directories), or repositories requiring
+zero modifications to Markdown bodies:
+
+- `manifestFile`: relative path to an external YAML file (e.g. `mdlineage.manifest.yaml`).
+- `manifest`: inline object with `documents: { <path>: { id, kind, status, relations, ... } }`.
+
+When declared, metadata is mapped into the `WorkspaceIndex` in-memory. Covered documents are exempt from **MDL003**
+and participate fully in ID uniqueness (**MDL301**), target resolution (**MDL302**), cycle detection (**MDL305**),
+and relation queries, leaving Markdown files 100% byte-identical on disk.
 
 ## Front Matter reference
 

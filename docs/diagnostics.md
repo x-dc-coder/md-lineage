@@ -76,7 +76,12 @@ Two caveats verified by running the CLI:
 | MDL306 | warning | workspace | no | Active document references deprecated target |
 | MDL401 | warning | link | no | Markdown link target path does not exist |
 | MDL402 | warning | link | no | Cross-document anchor does not exist |
+| MDL403 | warning | link | no | Host-style link target is not portable or does not exist |
 | MDL501 | warning | policy | no | Layout rule violation |
+| MDL502 | warning | policy | no | Document misplaced from directory intent |
+| MDL503 | error | policy | no | Layout exception has expired |
+| MDL504 | warning | policy | no | Document violates naming pattern or nesting depth limit |
+| MDL505 | warning | policy | no | Orphan document in uncategorized directory |
 | MDL601 | warning | EOL scan | yes | Mixed line endings within one file |
 | MDL602 | warning | EOL scan | yes | Line endings do not match repository policy |
 | MDL801 | warning | policy | no | Document has not been updated within staleAfterDays |
@@ -295,6 +300,18 @@ actually has.
 docs/a.md:16:5 MDL402 warning Markdown link fragment does not exist in docs/b.md: #nope
 ```
 
+### MDL403 — Host-style link target (warning)
+
+A Markdown link targets a host-absolute or home-relative path (`~` or `$HOME`). These
+links depend on local machine filesystem state and are not portable across environments.
+If the path does not exist on disk, a warning is emitted; if it points inside the
+workspace root, a relative link is suggested. Under `links.allowHostPaths: forbidden`,
+it is elevated to an error. Fix: replace machine-specific paths with relative paths.
+
+```text
+skills/design-ui/SKILL.md:20:3 MDL403 warning Host path is not portable across machines: ~/projects/dc-skills/design-diagram/SKILL.md
+```
+
 ## MDL6xx — line-ending hygiene
 
 Both codes come from a fast raw-buffer scan that runs **before** AST parsing,
@@ -328,6 +345,43 @@ Fix: adjust document metadata or update layout configuration rules.
 
 ```text
 docs/a.md:1:1 MDL501 warning Layout rule violation: status 'draft' is forbidden for 'docs/**'
+```
+
+### MDL502 — Document misplaced from directory intent (warning)
+
+The document's Front Matter (or manifest) `kind` or `authority` conflicts with the `intent` declared
+by its parent directory in `mdlineage.config.yaml`. Fix: move the document using `mdlineage move <src> <dst> --write`,
+or align the document's kind with the directory's intent.
+
+```text
+docs/guides/spec.md:1:1 MDL502 warning Document kind 'spec' does not match directory intent kinds [guide]
+```
+
+### MDL503 — Layout exception has expired (error)
+
+A temporary exception declared in `layoutExceptions` has passed its `expires` review-by date.
+Fix: complete the planned reorganization and remove the exception, or review the document and update the expiration date.
+
+```text
+docs/guides/legacy-tool.md:1:1 MDL503 error Layout exception has expired: review-by date 2026-09-01 passed
+```
+
+### MDL504 — Document violates layout constraint (warning)
+
+The document violates directory naming patterns (`intent.naming`) or directory nesting depth (`intent.maxDepth`).
+Fix: rename the file or move it to a shallower directory.
+
+```text
+docs/guides/deep/nested/tool.md:1:1 MDL504 warning Directory nesting depth 3 exceeds intent.maxDepth 2
+```
+
+### MDL505 — Orphan document in uncategorized directory (warning)
+
+The document sits in a root or directory that does not declare an `intent` rule.
+Fix: declare an intent for the directory in `layout:`, or relocate the document to an established section.
+
+```text
+orphan.md:1:1 MDL505 warning Document has no governing directory intent rule
 ```
 
 ## MDL8xx — lifecycle and freshness
