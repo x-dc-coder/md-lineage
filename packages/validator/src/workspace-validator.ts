@@ -581,6 +581,9 @@ function mdl401(
 
 /** A destination carrying a URL scheme is outside the repository. */
 function isExternal(url: string): boolean {
+  // A drive letter (with either separator or bare) and a UNC tail are host
+  // paths, not URL schemes — classify them before the scheme test short-circuits.
+  if (/^[a-zA-Z]:[\\/]/.test(url) || /^[a-zA-Z]:$/.test(url) || /^\\+/.test(url)) return false;
   const colon = url.indexOf(':');
   if (colon <= 0) return false;
   return /^[a-z][a-z0-9+.-]*$/i.test(url.slice(0, colon));

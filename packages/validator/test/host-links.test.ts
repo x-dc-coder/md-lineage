@@ -36,6 +36,12 @@ describe('classifyDestination', () => {
     assert.equal(classifyDestination('C:\\Windows\\notepad.exe', 'win32'), 'host-absolute');
     assert.equal(classifyDestination('D:/data/repo', 'win32'), 'host-absolute');
     assert.equal(classifyDestination('\\\\server\\share\\file', 'win32'), 'host-absolute');
+    // Single-leading-backslash UNC (what CommonMark leaves of `\\server\...`
+    // when the escape is not punctuation) and backslash forms on POSIX too.
+    assert.equal(classifyDestination('\\server\\share\\b.md'), 'host-absolute');
+    assert.equal(classifyDestination('C:\\x', 'win32'), 'host-absolute');
+    assert.equal(classifyDestination('C:\\x'), 'host-absolute');
+    assert.equal(classifyDestination('C:/x'), 'host-absolute');
   });
 
   it('classifies workspace-relative paths correctly', () => {

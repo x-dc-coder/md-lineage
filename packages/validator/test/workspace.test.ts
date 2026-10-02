@@ -273,6 +273,17 @@ describe('MDL401 — markdown link targets', () => {
     assert.deepEqual([...resolveLinkPath(index, 'a.md', 'https://a/b')], []);
   });
 
+  it('reports drive-letter links as host links, not external', () => {
+    // `C:\x\y.md` must reach the host-link layer (MDL403) instead of being
+    // dropped as an `c:` URL scheme by the old isExternal short-circuit.
+    const content = `${doc('docs.a')}\nSee [u](C:\\x\\y.md).\n`;
+    const files = new Map<string, string>([['a.md', content]]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0, 'a host path is not a missing workspace link');
+    assert.ok(byCode(all, 'MDL403').length > 0, 'expected an MDL403 host-link diagnostic');
+  });
+
   it('M-1: the line and column are exact with front matter above the link', () => {
     // The mdast tree is parsed from the body slice, so a link offset that is
     // not shifted by the front matter length lands that many code units early:

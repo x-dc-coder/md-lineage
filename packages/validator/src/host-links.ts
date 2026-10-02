@@ -58,14 +58,16 @@ export function classifyDestination(target: string, platform?: string): Destinat
     return 'host-absolute';
   }
 
-  // Windows-specific host absolute (drive letter or UNC)
+  // Windows-specific host absolute (drive letter or UNC). CommonMark only
+  // backslash-unescapes ASCII punctuation, so `\s` stays literal and a single
+  // leading backslash on a non-URL form is pragmatically treated as UNC.
   if (currentPlatform === 'win32') {
-    if (/^[a-zA-Z]:[\\/]/.test(target) || /^\\\\/.test(target)) {
+    if (/^[a-zA-Z]:[\\/]/.test(target) || /^\\+/.test(target)) {
       return 'host-absolute';
     }
   } else {
     // Even on non-Windows platforms, if path explicitly matches Windows drive or UNC, or if tested
-    if (/^[a-zA-Z]:[\\/]/.test(target) || /^\\\\/.test(target)) {
+    if (/^[a-zA-Z]:[\\/]/.test(target) || /^\\+/.test(target)) {
       return 'host-absolute';
     }
   }
