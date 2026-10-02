@@ -284,6 +284,17 @@ describe('MDL401 — markdown link targets', () => {
     assert.ok(byCode(all, 'MDL403').length > 0, 'expected an MDL403 host-link diagnostic');
   });
 
+  it('resolves case-insensitively only when the index opts in (win32 filesystem semantics)', () => {
+    const files = new Map<string, string>([
+      ['b.md', doc('docs.b')],
+    ]);
+    const posix = createWorkspaceIndex(files, defaultConfig());
+    assert.deepEqual([...resolveLinkPath(posix, 'docs/a.md', '../B.MD')], []);
+
+    const ci = createWorkspaceIndex(files, defaultConfig(), [], { caseInsensitive: true });
+    assert.deepEqual([...resolveLinkPath(ci, 'docs/a.md', '../B.MD')], ['b.md']);
+  });
+
   it('M-1: the line and column are exact with front matter above the link', () => {
     // The mdast tree is parsed from the body slice, so a link offset that is
     // not shifted by the front matter length lands that many code units early:

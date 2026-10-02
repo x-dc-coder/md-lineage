@@ -147,6 +147,12 @@ export interface WorkspaceIndex {
    * exist in the workspace (see `createWorkspaceIndex`).
    */
   knowsPath(path: DocPath): boolean;
+  /**
+   * Case-insensitive fallback lookup, present only when the index was built
+   * for a case-insensitive filesystem (win32, injectable for tests): follows
+   * the platform's filesystem semantics, where `../B.MD` opens `b.md`.
+   */
+  caseInsensitiveLookup?(path: DocPath): DocPath | null;
 }
 
 /** Result of an incremental update: who must be re-validated. */
@@ -172,8 +178,9 @@ export function createWorkspaceIndex(
   files: Map<DocPath, string> | ReadonlyArray<readonly [DocPath, string]> | Readonly<Record<DocPath, string>>,
   config: Config,
   knownPaths?: Iterable<DocPath>,
+  options?: { caseInsensitive?: boolean },
 ): WorkspaceIndex {
-  return new IndexImpl(config, mapEntries(files), knownPaths);
+  return new IndexImpl(config, mapEntries(files), knownPaths, options);
 }
 
 /**
@@ -235,16 +242,35 @@ class IndexImpl implements WorkspaceIndex {
    */
   private readonly known: ReadonlySet<DocPath>;
   readonly config: Config;
+  /** lower(path) → canonical path; built only under caseInsensitive. */
+  private readonly caseInsensitive?: Map<string, DocPath>;
 
-  constructor(config: Config, files: Iterable<readonly [DocPath, string]>, knownPaths?: Iterable<DocPath>) {
+  constructor(
+    config: Config,
+    files: Iterable<readonly [DocPath, string]>,
+    knownPaths?: Iterable<DocPath>,
+    options?: { caseInsensitive?: boolean },
+  ) {
     this.config = config;
     this.known = new Set(knownPaths ?? []);
+    if (options?.caseInsensitive ?? process.platform === 'win32') {
+      this.caseInsensitive = new Map();
+    }
     for (const [path, content] of files) {
       // A document that fails to parse yields diagnostics, never an exception:
       // one unreadable file must not invalidate the repository's index.
       this.entries.set(path, parseDocument(path, content, config));
     }
     for (const [path, entry] of this.entries) this.reindex(path, entry);
+    if (this.caseInsensitive) {
+      // Documents win over known non-documents at the same lowercase key.
+      for (const path of this.known) this.caseInsensitive.set(path.toLowerCase(), path);
+      for (const path of this.entries.keys()) this.caseInsensitive.set(path.toLowerCase(), path);
+    }
+  }
+
+  caseInsensitiveLookup(path: DocPath): DocPath | null {
+    return this.caseInsensitive?.get(path.toLowerCase()) ?? null;
   }
 
   get size(): number {
@@ -750,6 +776,12 @@ export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, rawLin
     const normalizedRaw = linkPath.startsWith('/') ? linkPath : normalizeRelative(fromPath, linkPath);
     if (normalizedRaw !== linkPath && index.knowsPath(normalizedRaw)) return [normalizedRaw];
     if (index.knowsPath(linkPath)) return [linkPath];
+  }
+  // Case-insensitive filesystem fallback (win32 only, injectable): the file
+  // exists under a different spelling, and the platform's FS would find it.
+  if (index.caseInsensitiveLookup) {
+    const ci = index.caseInsensitiveLookup(normalized) ?? index.caseInsensitiveLookup(trimmed);
+    if (ci) return [ci];
   }
   return EMPTY_PATHS;
 }
