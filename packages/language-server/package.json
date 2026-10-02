@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/language-server",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Dedicated MDLineage Language Server: LSP diagnostics over the @mdlineage/validator workspace index.",
   "type": "module",
   "main": "./dist/server.js",

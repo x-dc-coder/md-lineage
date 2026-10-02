@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/mcp-server",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "MCP server exposing @mdlineage/validator as model-facing tools (docs/remark-language-server-solution.md §12).",
   "type": "module",
   "main": "./dist/server.js",

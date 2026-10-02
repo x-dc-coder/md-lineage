@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/validator",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "Transport-independent MDLineage validation core: front matter syntax, JSON Schema, single-document semantics, line-ending hygiene.",
   "type": "module",
   "main": "./dist/index.js",

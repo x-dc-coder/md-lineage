@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/remark-lint-mdlineage",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "remark-lint rule that runs the @mdlineage/validator single-document stack on the in-memory buffer.",
   "type": "module",
   "main": "./dist/index.js",
