@@ -207,7 +207,10 @@ async function runGitLogChunk(
   if (chunkPaths.length === 0) {
     return { fresh: new Set(), provenStale: false };
   }
-  const args = ['--literal-pathspecs', 'log', '--name-only', '--format=%at', '--', ...chunkPaths];
+  // core.quotepath=false keeps non-ASCII paths as raw UTF-8 instead of
+  // quoted octal escapes, which would never match the tracked-path set on
+  // Windows with CJK filenames.
+  const args = ['-c', 'core.quotepath=false', '--literal-pathspecs', 'log', '--name-only', '--format=%at', '--', ...chunkPaths];
 
   if (customSpawn) {
     const res = await customSpawn(args, { cwd });

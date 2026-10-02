@@ -116,6 +116,29 @@ describe('git-clock — spawner invocation and batching', () => {
     assert.equal(clocks.size, 10);
   });
 
+  it('git log runs with core.quotepath=false so non-ASCII paths stay raw UTF-8', async () => {
+    const files = new Map([
+      ['a.md', ['---', 'mdlineage:', '  schema: 1', '  id: doc.a', '  kind: policy', '  status: active', '---'].join('\n')],
+    ]);
+    const calls: Array<readonly string[]> = [];
+    const spawnGit: SpawnGitFn = (args) => {
+      calls.push([...args]);
+      if (args[0] === 'rev-parse') return { stdout: '/repo\n', exitCode: 0 };
+      if (args.includes('ls-files')) return { stdout: 'a.md\0', exitCode: 0 };
+      if (args.includes('log')) return { stdout: '1700000000\na.md\n1000\n', exitCode: 0 };
+      return { stdout: '', exitCode: 0 };
+    };
+    const config = {
+      ...defaultConfig(),
+      lifecycle: { ...defaultConfig().lifecycle, staleAfterDays: 30 },
+    };
+    const index = createWorkspaceIndex(files, config);
+    await gitClocksForIndex(index, '/repo', { spawnGit, nowMs: 1700000000000 });
+    const logCall = calls.find((c) => c.includes('log'));
+    assert.ok(logCall, 'expected a log call');
+    assert.deepEqual(logCall.slice(0, 2), ['-c', 'core.quotepath=false']);
+  });
+
   it('201 candidates trigger 2 ls-files and 2 log calls, each with <= 200 pathspecs', async () => {
     const files = new Map<string, string>();
     for (let i = 0; i < 201; i++) {
