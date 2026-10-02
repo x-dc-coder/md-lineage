@@ -22,7 +22,7 @@ import { fileURLToPath } from 'node:url';
 import { defaultConfig, validateDocumentSync } from '../src/index.js';
 import { parseMarkdownSync } from '../src/index.js';
 import { collectHeadingTexts } from '../src/document-validator.js';
-import { createWorkspaceIndex, updateFile, removeFile, updateFiles } from '../src/workspace-index.js';
+import { createWorkspaceIndex, updateFile, removeFile, updateFiles, resolveLinkPath } from '../src/workspace-index.js';
 import type { WorkspaceIndex } from '../src/workspace-index.js';
 import { validateWorkspace } from '../src/workspace-validator.js';
 import type { WorkspaceDiagnostic } from '../src/workspace-validator.js';
@@ -254,6 +254,24 @@ describe('workspace fixtures (manifest contract)', () => {
 
 describe('MDL401 — markdown link targets', () => {
   const body = (links: string) => `${links}\n`;
+
+  it('normalizes backslash separators in relative links', () => {
+    const files = new Map<string, string>([
+      ['docs/sub/a.md', doc('docs.a')],
+      ['docs/sub/b.md', doc('docs.b')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    assert.deepEqual([...resolveLinkPath(index, 'docs/sub/a.md', '..\\sub\\b.md')], ['docs/sub/b.md']);
+    assert.deepEqual([...resolveLinkPath(index, 'docs/sub/a.md', '.\\b.md')], ['docs/sub/b.md']);
+    assert.deepEqual([...resolveLinkPath(index, 'docs/sub/a.md', 'b.md')], ['docs/sub/b.md']);
+  });
+
+  it('keeps URL schemes intact through separator normalization', () => {
+    const files = new Map<string, string>([['a.md', doc('docs.a')]]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    assert.deepEqual([...resolveLinkPath(index, 'a.md', 'mailto:x@y')], []);
+    assert.deepEqual([...resolveLinkPath(index, 'a.md', 'https://a/b')], []);
+  });
 
   it('M-1: the line and column are exact with front matter above the link', () => {
     // The mdast tree is parsed from the body slice, so a link offset that is

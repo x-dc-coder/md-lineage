@@ -666,16 +666,30 @@ function decodeLinkPath(path: string): string {
   }
 }
 
+/** Single-letter "scheme" is a Windows drive, not a URL; a leading backslash
+ * is what CommonMark backslash-unescaping leaves of a UNC destination. */
+function looksLikeUrlScheme(path: string): boolean {
+  if (/^[a-zA-Z]:/.test(path) || path.startsWith('//') || path.startsWith('\\')) return false;
+  const colon = path.indexOf(':');
+  return colon > 0 && /^[a-z][a-z0-9+.-]*$/i.test(path.slice(0, colon));
+}
+
+/** Treat '\' as a path separator (VS Code on Windows resolves these); URL
+ * schemes and protocol-relative URLs are exempted. */
+function normalizeSeparators(path: string): string {
+  return looksLikeUrlScheme(path) ? path : path.replace(/\\/g, '/');
+}
+
 /** Split `a.md#anchor` into its two independent parts. */
 function splitLink(url: string, offset: number): LinkEntry {
   const hash = url.indexOf('#');
-  if (hash < 0) return { url, offset, path: decodeLinkPath(url), anchor: '' };
+  if (hash < 0) return { url, offset, path: normalizeSeparators(decodeLinkPath(url)), anchor: '' };
   if (hash === 0) {
     // A same-page anchor: the link layer's domain is the link PATH, and an
     // in-page anchor is MDL201's concern, so it is kept out of MDL401's set.
     return { url, offset, path: '', anchor: url.slice(1) };
   }
-  return { url, offset, path: decodeLinkPath(url.slice(0, hash)), anchor: url.slice(hash + 1) };
+  return { url, offset, path: normalizeSeparators(decodeLinkPath(url.slice(0, hash))), anchor: url.slice(hash + 1) };
 }
 
 /** GFM reference-label matching is case-insensitive and collapses whitespace. */
@@ -687,7 +701,7 @@ function normalizeLabel(label: string): string {
 function normalizeRelative(fromPath: DocPath, linkPath: string): string {
   const slash = fromPath.lastIndexOf('/');
   const dir = slash >= 0 ? fromPath.slice(0, slash + 1) : '';
-  const parts = (dir + linkPath.replace(/^\.\//, '')).split('/');
+  const parts = (dir + linkPath.replace(/^\.[\\/]/, '')).split('/');
   const out: string[] = [];
   for (const part of parts) {
     if (part === '' || part === '.') continue;
@@ -716,7 +730,10 @@ function mapEntries(
  * normalized against the linking document, so a tree pointing at a sibling or a
  * parent resolves correctly.
  */
-export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, linkPath: string): readonly DocPath[] {
+export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, rawLinkPath: string): readonly DocPath[] {
+  // Same normalization splitLink applies, for direct callers (LSP/MCP) that
+  // hand over a destination without going through the link scan.
+  const linkPath = normalizeSeparators(rawLinkPath);
   // Priority when both resolve: document-relative wins (GitHub and mainstream
   // Markdown renderer semantics); exact root-relative match is the fallback.
   // Absolute paths keep exact-match-only behavior.
