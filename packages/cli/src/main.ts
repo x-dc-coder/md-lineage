@@ -32,7 +32,7 @@ import {
   type CheckResult,
   type CheckOptions,
 } from './check.js';
-import { validateDocumentSync, loadConfig } from '@mdlineage/validator';
+import { validateDocumentSync, loadConfig, stripBom } from '@mdlineage/validator';
 import { renderSarif } from './sarif.js';
 import { expandMarkdownPaths, UsageError, type ExpandedPath, type DiscoveryOptions } from './paths.js';
 import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from './git.js';
@@ -617,7 +617,7 @@ function runSuggest(args: string[], values: ParsedArgs['values']): number {
   const target = resolve(root, file);
   let content: string;
   try {
-    content = readFileSync(target, 'utf8');
+    content = stripBom(readFileSync(target, 'utf8'));
   } catch (error) {
     process.stderr.write(
       `mdlineage: cannot read ${file}: ${error instanceof Error ? error.message : String(error)}\n`,

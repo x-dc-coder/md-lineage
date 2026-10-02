@@ -48,6 +48,7 @@ import {
   parseBaseline,
   scanWorkspaceUniverse,
   scanBoundary,
+  stripBom,
   parseFrontmatter,
   type Config,
   type Diagnostic,
@@ -237,7 +238,7 @@ function readDocument(path: string, content: string | undefined, root: string): 
   try {
     const stats = statSync(absolute);
     if (!stats.isFile()) return { content: null, resolvedPath, diskPath: absolute, error: `not a file: ${absolute}` };
-    return { content: readFileSync(absolute, 'utf8'), resolvedPath, diskPath: absolute, error: null };
+    return { content: stripBom(readFileSync(absolute, 'utf8')), resolvedPath, diskPath: absolute, error: null };
   } catch (error) {
     return {
       content: null,

@@ -67,7 +67,7 @@ export { layerOf, severityOf, sortByRange } from './diagnostic.js';
 export { buildLineMap, positionAt, rangeAt } from './source-map.js';
 export type { LineMap, ResolvedRange } from './source-map.js';
 export { scanLineEndings, validateLineEndings } from './line-endings.js';
-export { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
+export { scanBoundary, parseFrontmatter, stripBom } from './parse-frontmatter.js';
 export { parseMarkdown, parseMarkdownSync } from './parse-markdown.js';
 export { getSchemaValidator, validateAgainstSchema, resolveErrorRange } from './schema-validator.js';
 export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset, collectAnchors, collectHeadingTexts, extractSamePageLinks } from './document-validator.js';

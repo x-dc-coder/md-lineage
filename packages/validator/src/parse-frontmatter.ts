@@ -20,6 +20,11 @@ import type { Document } from 'yaml';
 import type { LineMap } from './source-map.js';
 import { rangeAt } from './source-map.js';
 
+/** Node's utf8 decoding keeps the BOM; strip it once at every read entry. */
+export function stripBom(text: string): string {
+  return text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+}
+
 /** Result of the boundary scan. */
 export interface BoundaryScan {
   /** Offset of the first YAML byte (after the opening marker line). */

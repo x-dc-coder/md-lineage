@@ -24,6 +24,8 @@ import {
   parseAuthoredInstant,
   isOlderThan,
   MS_PER_DAY,
+  stripBom,
+  scanBoundary,
 } from '../src/index.js';
 import { loadConfig } from '../src/config.js';
 import { validateDocumentSemantics, relationOffsetsOf } from '../src/document-validator.js';
@@ -262,6 +264,19 @@ describe('UTF-16 semantics', () => {
       [],
       `expected a clean document with a Chinese anchor, got [${codes(diagnostics).join(', ')}]`,
     );
+  });
+  it('stripBom is identity for text without a BOM', () => {
+    const text = '---\nmdlineage: {}\n---\n';
+    assert.equal(stripBom(text), text);
+  });
+
+  it('stripBom removes a leading BOM so scanBoundary sees the opening fence', () => {
+    const content = '﻿---\nmdlineage:\n  schema: 1\n  id: docs.bom\n  kind: policy\n  status: active\n---\n\n# BOM\n';
+    assert.equal(scanBoundary(content), null, 'the raw BOM text has no boundary at offset 0');
+    const stripped = stripBom(content);
+    assert.ok(scanBoundary(stripped), 'after stripBom the front matter parses');
+    const { diagnostics } = validateDocumentSync({ content: stripped });
+    assert.ok(!codes(diagnostics).includes('MDL003'));
   });
 });
 

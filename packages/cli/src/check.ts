@@ -22,6 +22,7 @@ import {
   createWorkspaceIndex,
   validateWorkspace,
   gitClocksForIndex,
+  stripBom,
   diffAgainstBaseline,
   type Config,
   type Diagnostic,
@@ -175,7 +176,7 @@ export async function checkFiles(
   for (const file of files) {
     let content: string;
     try {
-      content = readFileSync(file.path, 'utf8');
+      content = stripBom(readFileSync(file.path, 'utf8'));
     } catch (error) {
       // An unreadable file is reported as MDL900 (the config/internal block):
       // it is not a document problem, but the run did not validate the file,

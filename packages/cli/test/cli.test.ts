@@ -397,6 +397,19 @@ describe('mdlineage check — workspace mode', () => {
     assert.deepEqual([...codes].sort(), codes);
   });
 
+  it('a UTF-8 BOM does not turn valid front matter into MDL003', () => {
+    const repo = scratchWorkspace({ 'bom.md': '﻿' + doc('docs.bom') });
+    try {
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], repo.root);
+      assert.equal(out.status, 0, out.stdout);
+      const report = reportsOf(out.stdout).find((r) => r.path === 'bom.md');
+      assert.ok(report, 'bom.md is in the report');
+      assert.deepEqual(report.diagnostics, []);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
   it('--frail fails on warnings', () => {
     const out = runCli(['check', 'test/fixtures/invalid/e17-evidence-anchor-missing.md', '--no-incremental', '--frail']);
     assert.equal(out.status, 1, 'a warning fails under --frail');

@@ -9,6 +9,7 @@ import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import type { Config } from './config.js';
 import { PathFilter, matchesPattern } from './path-filter.js';
+import { stripBom } from './parse-frontmatter.js';
 
 export interface WorkspaceUniverse {
   /** Root-relative path -> content map for Markdown documents. */
@@ -98,7 +99,7 @@ export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUn
           knownPathsSet.add(logicalPath);
           if (logicalPath.toLowerCase().endsWith('.md')) {
             try {
-              const content = readFileSync(realTarget, 'utf8');
+              const content = stripBom(readFileSync(realTarget, 'utf8'));
               documents.set(logicalPath, content);
             } catch {
               // Unreadable document is skipped
@@ -122,7 +123,7 @@ export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUn
         knownPathsSet.add(logicalPath);
         if (logicalPath.toLowerCase().endsWith('.md')) {
           try {
-            const content = readFileSync(physicalPath, 'utf8');
+            const content = stripBom(readFileSync(physicalPath, 'utf8'));
             documents.set(logicalPath, content);
           } catch {
             // Unreadable document is skipped

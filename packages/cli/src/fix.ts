@@ -30,6 +30,7 @@ import {
   scanBoundary,
   parseFrontmatter,
   buildLineMap,
+  stripBom,
 } from '@mdlineage/validator';
 import { buildProposals, applyProposalToContent, diffOf, type MetadataProposal } from '@mdlineage/mcp-server';
 import { expandMarkdownPaths } from './paths.js';
@@ -94,7 +95,9 @@ export function runFix(args: string[], values: FixValues): number {
   for (const file of files) {
     let content: string;
     try {
-      content = readFileSync(file.path, 'utf8');
+      // The atomic write-back does not restore a BOM: it is treated as
+      // removable noise, matching how editors on Windows save UTF-8.
+      content = stripBom(readFileSync(file.path, 'utf8'));
     } catch (error) {
       process.stderr.write(
         `mdlineage: cannot read ${file.asGiven}: ${error instanceof Error ? error.message : String(error)}\n`,

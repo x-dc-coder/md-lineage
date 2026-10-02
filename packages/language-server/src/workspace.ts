@@ -12,7 +12,7 @@
 import { readFileSync, statSync } from 'node:fs';
 import { isAbsolute, relative, resolve, sep, dirname } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { scanWorkspaceUniverse, type Config } from '@mdlineage/validator';
+import { scanWorkspaceUniverse, stripBom, type Config } from '@mdlineage/validator';
 
 /**
  * §13's degradation threshold: a document above this is parsed for the cheap
@@ -119,7 +119,7 @@ export function readDocument(path: string): string | null {
   try {
     const stats = statSync(path);
     if (!stats.isFile()) return null;
-    return readFileSync(path, 'utf8');
+    return stripBom(readFileSync(path, 'utf8'));
   } catch {
     return null;
   }
