@@ -396,8 +396,21 @@ function writeFileAtomic(path: string, content: string): void {
   const tmp = join(dirname(path), `.${randomBytes(6).toString('hex')}.mdlineage-tmp`);
   try {
     writeFileSync(tmp, content, { encoding: 'utf8', mode });
-    // rename(2) within the same directory is atomic.
-    renameSync(tmp, path);
+    // rename(2) within the same directory is atomic. Windows AV/indexers hold
+    // the target briefly and rename fails with EPERM/EBUSY; retry a few times.
+    for (let attempt = 0; ; attempt++) {
+      try {
+        renameSync(tmp, path);
+        break;
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        if (attempt >= 2 || (code !== 'EPERM' && code !== 'EBUSY')) {
+          throw error;
+        }
+        // Synchronous sleep: this runs inside a sync CLI code path.
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 50);
+      }
+    }
   } catch (error) {
     try {
       rmSync(tmp, { force: true });

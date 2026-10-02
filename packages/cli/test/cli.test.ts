@@ -1887,6 +1887,22 @@ describe('Phase 2 & Phase 1 RCA regressions', () => {
 });
 
 describe('Phase 3 (P2) — M1 path expansion & MDL801 CLI integration', () => {
+  it('expandMarkdownPaths normalizes backslash glob patterns to forward slashes (win32 argument form)', () => {
+    const root = mkdtempSync(join(tmpdir(), 'mdlineage-glob-'));
+    try {
+      mkdirSync(join(root, 'docs'), { recursive: true });
+      writeFileSync(join(root, 'docs', 'a.md'), '# A\n');
+      writeFileSync(join(root, 'docs', 'b.md'), '# B\n');
+      writeFileSync(join(root, 'README.md'), '# R\n');
+
+      const res = expandMarkdownPaths(['docs\\*.md'], root, { config: defaultConfig() });
+      const rels = res.files.map((f) => f.asGiven.replace(/\\/g, '/')).sort();
+      assert.deepEqual(rels, ['docs/a.md', 'docs/b.md']);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('M1: expandMarkdownPaths with ../other_repo yields 4 docs with distinct asGiven starting with ../other_repo/, excluding node_modules and vendor', () => {
     const parent = mkdtempSync(join(tmpdir(), 'mdlineage-m1-'));
     try {

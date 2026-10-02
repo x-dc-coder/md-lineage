@@ -125,10 +125,12 @@ export function expandMarkdownPaths(
     try {
       stats = statSync(absolute);
     } catch {
+      // Windows users pass backslash patterns; glob only understands '/'.
+      const pattern = /\\/.test(arg) ? arg.replace(/\\/g, '/') : arg;
       // Not a filesystem object: treat it as a glob pattern.
-      const matched = globSync([arg], { cwd, ignore: hardPrune, nodir: true, mark: true });
+      const matched = globSync([pattern], { cwd, ignore: hardPrune, nodir: true, mark: true });
       if (matched.length === 0) {
-        const unfiltered = globSync([arg], { cwd, nodir: true, mark: true });
+        const unfiltered = globSync([pattern], { cwd, nodir: true, mark: true });
         if (unfiltered.length > 0) excluded.push(arg);
         else missed.push(arg);
         continue;
@@ -137,7 +139,9 @@ export function expandMarkdownPaths(
         const full = resolve(cwd, hit);
         const rel = relativeForReport(full, cwd, hit);
         if (filter.inReportSet(rel)) {
-          add(found, others, full, arg, cwd);
+          // Key on the individual hit: the shared glob arg would collapse
+          // every match into one map entry.
+          add(found, others, full, hit, cwd);
         }
       }
       continue;

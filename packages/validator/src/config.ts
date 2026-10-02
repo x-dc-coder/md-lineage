@@ -19,7 +19,7 @@
 import { statSync } from 'node:fs';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { dirname, resolve, sep } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
 // `ajv` ships no `exports` map, so the Draft 2020-12 build is imported by path;
 // its default export is the Ajv2020 class.
@@ -673,7 +673,10 @@ function loadExtendsFile(
  * configuration.
  */
 function resolvePresetPath(name: string, baseDir: string): string | null {
-  const isPath = name.startsWith('./') || name.startsWith('../') || name.startsWith('/') || name.includes(sep);
+  // `sep` is '\' on win32, but a forward-slash preset name is a path on every
+  // platform, so test for both.
+  const isPath =
+    name.startsWith('./') || name.startsWith('../') || name.startsWith('/') || /[\\/]/.test(name);
   const candidate = isPath ? resolve(baseDir, name) : resolve(baseDir, 'node_modules', name, 'mdlineage.config.yaml');
   try {
     if (!statSync(candidate).isFile()) return null;

@@ -12,7 +12,7 @@
 
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -731,6 +731,25 @@ describe('config extends', () => {
     const r = loadConfigFrom(cfg);
     assert.ok(r.diagnostics.some((d) => d.code === 'MDL900' && d.message.includes('missing.yaml')),
       `expected a not-found diagnostic, got: ${JSON.stringify(r.diagnostics)}`);
+  });
+
+  it('a preset named with a forward-slash path resolves as a path on every platform', () => {
+    mkdirSync(resolve(dir, 'presets'), { recursive: true });
+    write('presets/base.yaml', 'configVersion: 1\nmetadata:\n  required: true\n');
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nextends: [presets/base.yaml]\n');
+    const r = loadConfigFrom(cfg);
+    assert.deepEqual(r.diagnostics, []);
+    assert.equal(r.config.metadata.required, true);
+  });
+
+  it('a backslash separator still takes the path branch (win32 preset names)', () => {
+    // On POSIX the file does not exist, so the observable behavior is the same
+    // MDL900 as a missing path — but NOT the node_modules package lookup that
+    // the old sep-only check would have taken on win32.
+    const cfg = write('mdlineage.config.yaml', 'configVersion: 1\nextends: [presets\\base.yaml]\n');
+    const r = loadConfigFrom(cfg);
+    assert.ok(r.diagnostics.some((d) => d.code === 'MDL900' && d.message.includes('base.yaml')),
+      `expected a path-branch not-found diagnostic, got: ${JSON.stringify(r.diagnostics)}`);
   });
 
   it('a preset may itself extend another preset (chained)', () => {
