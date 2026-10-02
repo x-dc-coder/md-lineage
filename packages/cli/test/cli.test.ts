@@ -641,6 +641,29 @@ describe('mdlineage baseline', () => {
     }
   });
 
+  it('a UTF-8 BOM in a document does not defeat the baseline path', () => {
+    const repo = scratchWorkspace({
+      'mdlineage.config.yaml': CONFIG_REQUIRED,
+      'a.md': '# no front matter\n',
+      'b.md': `\uFEFF${doc('docs.b')}`,
+    });
+    try {
+      // The baseline records the real debt (a.md); the BOM'd document is clean
+      // once the BOM is stripped, so it must not appear in it.
+      const update = runCli(['baseline', 'update'], repo.root);
+      assert.equal(update.status, 0);
+      const baseline = JSON.parse(readFileSync(join(repo.root, '.mdlineage-baseline.json'), 'utf8'));
+      assert.deepEqual(baseline.codes.MDL003, ['a.md'], 'the BOM must not turn valid front matter into MDL003');
+
+      // The check-with-baseline path reads the same document and must agree.
+      const out = runCli(['check'], repo.root);
+      assert.equal(out.status, 0, 'only the baselined violation remains');
+      assert.ok(!/b\.md MDL003/.test(out.stdout), 'b.md must not be reported');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
   it('verify fails on a new unexempted violation', () => {
     const repo = scratchWorkspace({
       'mdlineage.config.yaml': CONFIG_REQUIRED,

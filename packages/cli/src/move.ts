@@ -24,7 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { posix } from 'node:path';
 import { cwd as processCwd } from 'node:process';
-import { loadConfig, type Config } from '@mdlineage/validator';
+import { loadConfig, stripBom, type Config } from '@mdlineage/validator';
 import { UsageError, expandMarkdownPaths } from './paths.js';
 import { repositoryRoot } from './git.js';
 import {
@@ -102,7 +102,7 @@ export class Workspace {
     const unreadable: string[] = [];
     for (const file of files) {
       try {
-        documents.set(toPosix(relative(cwd, file.path)), readFileSync(file.path, 'utf8'));
+        documents.set(toPosix(relative(cwd, file.path)), stripBom(readFileSync(file.path, 'utf8')));
       } catch {
         unreadable.push(toPosix(relative(cwd, file.path)));
       }
@@ -268,7 +268,7 @@ export function runMove(argv: readonly string[], values: MoveValues, cwd: string
   // moves, so its bytes are read here rather than planned as an empty file.
   if (!workspace.documents.has(src)) {
     try {
-      workspace.documents.set(src, readFileSync(target.src, 'utf8'));
+      workspace.documents.set(src, stripBom(readFileSync(target.src, 'utf8')));
     } catch (error) {
       process.stderr.write(`mdlineage: cannot read ${src}: ${messageOf(error)}\n`);
       return 1;

@@ -22,6 +22,7 @@ import {
   validateWorkspace,
   gitClocksForIndex,
   parseBaseline,
+  stripBom,
   writeBaseline,
   pruneBaseline,
   diffAgainstBaseline,
@@ -77,7 +78,7 @@ export function loadBaseline(root: string): LoadedBaseline | null {
   if (!existsSync(path)) return null;
   let text: string;
   try {
-    text = readFileSync(path, 'utf8');
+    text = stripBom(readFileSync(path, 'utf8'));
   } catch (error) {
     return { path, baseline: null, error: `cannot read ${path}: ${messageOf(error)}` };
   }
@@ -98,7 +99,7 @@ async function workspaceDiagnostics(
   const indexFiles = new Map<string, string>();
   for (const file of files) {
     try {
-      indexFiles.set(file.asGiven, readFileSync(file.path, 'utf8'));
+      indexFiles.set(file.asGiven, stripBom(readFileSync(file.path, 'utf8')));
     } catch {
       // An unreadable file yields no diagnostics of its own here; the check
       // command reports it, and the baseline only records diagnosable debt.
@@ -255,7 +256,7 @@ export async function updateBaseline(root: string, options: BaselineOptions = {}
 function entryCount(path: string): number | null {
   let text: string;
   try {
-    text = readFileSync(path, 'utf8');
+    text = stripBom(readFileSync(path, 'utf8'));
   } catch {
     return null;
   }

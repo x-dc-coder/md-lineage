@@ -16,6 +16,7 @@ import {
   parseFrontmatter,
   buildLineMap,
   DEFAULT_MANIFEST_FILE,
+  stripBom,
 } from '@mdlineage/validator';
 import { expandMarkdownPaths, UsageError, type DiscoveryOptions } from './paths.js';
 
@@ -144,7 +145,7 @@ export function runManifestSeed(
 
   if (manifestExists) {
     try {
-      const manifestText = readFileSync(manifestPath, 'utf8');
+      const manifestText = stripBom(readFileSync(manifestPath, 'utf8'));
       parsedYamlDoc = parseDocument(manifestText);
       if (parsedYamlDoc.errors.length > 0) {
         process.stderr.write(`mdlineage: existing manifest file is not valid YAML: ${manifestPath}\n`);
@@ -240,7 +241,7 @@ export function runManifestSeed(
     // Skip if document already has front matter metadata
     let content: string;
     try {
-      content = readFileSync(file.path, 'utf8');
+      content = stripBom(readFileSync(file.path, 'utf8'));
     } catch {
       continue;
     }

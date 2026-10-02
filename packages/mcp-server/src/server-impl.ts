@@ -353,7 +353,7 @@ function resolveWriteTarget(
 /** A file's text, or null when it cannot be read (missing, a directory, …). */
 function readDiskText(path: string): string | null {
   try {
-    return readFileSync(path, 'utf8');
+    return stripBom(readFileSync(path, 'utf8'));
   } catch {
     return null;
   }

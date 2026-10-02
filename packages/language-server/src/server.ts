@@ -47,6 +47,7 @@ import {
   removeFile,
   validateWorkspace,
   gitClocksForIndex,
+  stripBom,
   scanWorkspaceUniverse,
   BASELINE_FILE_NAME,
   type Config,
@@ -639,7 +640,7 @@ function loadServerBaseline(rootPath: string): Baseline | null {
   const path = resolve(rootPath, BASELINE_FILE_NAME);
   let text: string;
   try {
-    text = readFileSync(path, 'utf8');
+    text = stripBom(readFileSync(path, 'utf8'));
   } catch {
     return null;
   }

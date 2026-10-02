@@ -14,6 +14,7 @@ import {
   createWorkspaceIndex,
   validateWorkspace,
   gitClocksForIndex,
+  stripBom,
 } from '@mdlineage/validator';
 import { expandMarkdownPaths, knownWorkspacePaths } from './paths.js';
 
@@ -44,7 +45,7 @@ export async function indexRebuild(options: IndexRebuildOptions): Promise<number
   let unreadable = 0;
   for (const file of files) {
     try {
-      entries.push([file.asGiven, readFileSync(file.path, 'utf8')]);
+      entries.push([file.asGiven, stripBom(readFileSync(file.path, 'utf8'))]);
     } catch (error) {
       unreadable++;
       process.stderr.write(`mdlineage: ${file.asGiven}:1:1 MDL900 error Could not read file: ${error instanceof Error ? error.message : String(error)}\n`);
