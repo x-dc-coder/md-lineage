@@ -1072,7 +1072,7 @@ function entryMetadata(
 function loadBaseline(root: string): Baseline | null {
   const path = resolve(root, '.mdlineage-baseline.json');
   try {
-    const text = readFileSync(path, 'utf8');
+    const text = stripBom(readFileSync(path, 'utf8'));
     return parseBaseline(text).baseline;
   } catch {
     return null;

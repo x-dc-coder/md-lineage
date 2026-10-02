@@ -659,6 +659,13 @@ describe('mdlineage baseline', () => {
       const out = runCli(['check'], repo.root);
       assert.equal(out.status, 0, 'only the baselined violation remains');
       assert.ok(!/b\.md MDL003/.test(out.stdout), 'b.md must not be reported');
+
+      // A BOM on the baseline file itself must not silently disable it.
+      const baselinePath = join(repo.root, '.mdlineage-baseline.json');
+      writeFileSync(baselinePath, `﻿${readFileSync(baselinePath, 'utf8')}`);
+      const withBomBaseline = runCli(['check'], repo.root);
+      assert.equal(withBomBaseline.status, 0, 'a BOM-prefixed baseline must still load');
+      assert.ok(!/a\.md MDL003/.test(withBomBaseline.stdout), 'a BOM-prefixed baseline must still suppress');
     } finally {
       repo.cleanup();
     }

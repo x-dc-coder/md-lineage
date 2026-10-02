@@ -16,8 +16,8 @@
  * code. TODO: replace with the assigned MDL9xx number once the block is opened.
  */
 
-import { statSync } from 'node:fs';
-import { readFileSync } from 'node:fs';
+import { statSync, readFileSync } from 'node:fs';
+import { stripBom } from './parse-frontmatter.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
@@ -352,7 +352,7 @@ export function loadConfig(path?: string, from?: string): ConfigLoadResult {
       if (!pathExists(inside)) return { config: defaultConfig(), diagnostics: [] };
       return loadConfig(inside);
     }
-    text = readFileSync(configPath, 'utf8');
+    text = stripBom(readFileSync(configPath, 'utf8'));
   } catch (error) {
     // A missing *implicit* lookup is the normal "no config in this tree" path
     // and stays silent. A missing *explicit* path is MDL900: the caller named
@@ -436,7 +436,7 @@ export function loadConfig(path?: string, from?: string): ConfigLoadResult {
     const autoManifestPath = resolve(dirname(configPath), DEFAULT_MANIFEST_FILE);
     if (pathExists(autoManifestPath)) {
       try {
-        const autoText = readFileSync(autoManifestPath, 'utf8');
+        const autoText = stripBom(readFileSync(autoManifestPath, 'utf8'));
         const autoDoc = parseDocument(autoText);
         if (autoDoc.errors.length === 0) {
           const parsed = autoDoc.toJS() as Record<string, unknown> | null;
@@ -480,7 +480,7 @@ export function loadConfig(path?: string, from?: string): ConfigLoadResult {
           ],
         };
       }
-      const manifestText = readFileSync(manifestPath, 'utf8');
+      const manifestText = stripBom(readFileSync(manifestPath, 'utf8'));
       const manifestDoc = parseDocument(manifestText);
       if (manifestDoc.errors.length > 0) {
         return {

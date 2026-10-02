@@ -14,7 +14,7 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'node:fs';
 import { cwd as processCwd } from 'node:process';
 import { resolve, join } from 'node:path';
-import { loadConfig, type EolPolicy } from '@mdlineage/validator';
+import { loadConfig, stripBom, type EolPolicy } from '@mdlineage/validator';
 import { repositoryRoot } from './git.js';
 
 const CONFIG_FILE = 'mdlineage.config.yaml';
@@ -100,7 +100,7 @@ function plan(root: string, policy: string): Step[] {
     steps.push({ target: null, apply: null, describe: `+${policy}` });
   } else {
     // The plan only reads this file, so an unreadable one is reported by name.
-    const existing = readFileSync(attrPath, 'utf8');
+    const existing = stripBom(readFileSync(attrPath, 'utf8'));
     const lines = new Set(
       existing
         .split('\n')
