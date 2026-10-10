@@ -15,7 +15,8 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -688,6 +689,76 @@ describe('MDL402 — link fragments', () => {
     const index = createWorkspaceIndex(files, config);
     const all = validateWorkspace(index, { includeSingleDocument: false });
     assert.equal(byCode(all, 'MDL402')[0]!.severity, 'error');
+  });
+
+  it('accepts valid line number anchor on a real non-Markdown file', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [pkg](../package.json#L5).'))],
+      ['docs/b.md', doc('docs.b', relations(), body('See [pkg range](../package.json#L5-L10).'))],
+      ['docs/c.md', doc('docs.c', relations(), body('See [pkg range without second L](../package.json#L5-10).'))],
+      ['docs/d.md', doc('docs.d', relations(), body('See [pkg lowercase](../package.json#l5).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig(), ['package.json']);
+    const all = validateWorkspace(index, { root: repoRoot, includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL401').length, 0);
+    assert.equal(byCode(all, 'MDL402').length, 0);
+  });
+
+  it('reports MDL402 when line number anchor is #L0', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [pkg](../package.json#L0).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig(), ['package.json']);
+    const all = validateWorkspace(index, { root: repoRoot, includeSingleDocument: false });
+    const d402 = byCode(all, 'MDL402');
+    assert.equal(d402.length, 1);
+    assert.equal(d402[0]!.message, 'Line number in link fragment must be greater than zero: #L0');
+    assert.equal(d402[0]!.path, 'docs/a.md');
+    assert.equal(d402[0]!.data?.anchor, 'L0');
+    assert.equal(d402[0]!.data?.path, '../package.json');
+    assert.equal(byCode(all, 'MDL401').length, 0);
+  });
+
+  it('reports MDL402 for inverted line range #L50-L20', () => {
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body('See [pkg](../package.json#L50-L20).'))],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig(), ['package.json']);
+    const all = validateWorkspace(index, { root: repoRoot, includeSingleDocument: false });
+    const d402 = byCode(all, 'MDL402');
+    assert.equal(d402.length, 1);
+    assert.equal(d402[0]!.message, 'Invalid line range in link fragment: #L50-L20');
+    assert.equal(d402[0]!.path, 'docs/a.md');
+    assert.equal(d402[0]!.data?.anchor, 'L50-L20');
+    assert.equal(d402[0]!.data?.path, '../package.json');
+    assert.equal(byCode(all, 'MDL401').length, 0);
+  });
+
+  it('reports MDL402 when line number exceeds file length', () => {
+    const tempDir = mkdtempSync(resolve(tmpdir(), 'mdl-line-test-'));
+    try {
+      const sampleFile = resolve(tempDir, 'sample.txt');
+      writeFileSync(sampleFile, Array.from({ length: 10 }, (_, i) => `line ${i + 1}`).join('\n'));
+      const files = new Map<string, string>([
+        ['docs/a.md', doc('docs.a', relations(), body('See [code](../sample.txt#L9999).'))],
+        ['docs/b.md', doc('docs.b', relations(), body('See [range](../sample.txt#L5-L9999).'))],
+      ]);
+      const index = createWorkspaceIndex(files, defaultConfig(), ['sample.txt']);
+      const all = validateWorkspace(index, { root: tempDir, includeSingleDocument: false });
+      const d402 = byCode(all, 'MDL402');
+      assert.equal(d402.length, 2);
+      assert.equal(
+        d402[0]!.message,
+        'Line anchor exceeds file length in sample.txt: #L9999 (file has 10 lines)',
+      );
+      assert.equal(
+        d402[1]!.message,
+        'Line anchor exceeds file length in sample.txt: #L5-L9999 (file has 10 lines)',
+      );
+      assert.equal(byCode(all, 'MDL401').length, 0);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 });
 

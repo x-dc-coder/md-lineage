@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Enforces the README contract — see docs/specs/readme-contract.md.
+// Enforces the README contract — see docs/架构设计/README契约.md.
 //
 // Targets and clauses:
 //   README.md (root)      project facade  : clauses 1-7

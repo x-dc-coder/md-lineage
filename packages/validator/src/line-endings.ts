@@ -81,8 +81,10 @@ export function validateLineEndings(
   const out: Diagnostic[] = [];
 
   if (scan.mixed) {
-    const first = scan.violations[0]!.style;
-    const offender = scan.violations.find((v) => v.style !== first);
+    const first = scan.violations[0];
+    if (!first) return [];
+    const style = first.style;
+    const offender = scan.violations.find((v) => v.style !== style);
     if (offender) {
       // Point at the line whose terminator differs, so an editor highlights the
       // line a whole-buffer normalization will rewrite.
@@ -124,10 +126,11 @@ function lineStartBefore(lineMap: LineMap, offset: number): number {
   let hi = starts.length - 1;
   while (lo < hi) {
     const mid = (lo + hi + 1) >>> 1;
-    if (starts[mid]! < offset) lo = mid;
+    const midVal = starts[mid];
+    if (midVal !== undefined && midVal < offset) lo = mid;
     else hi = mid - 1;
   }
-  return starts[lo]!;
+  return starts[lo] ?? 0;
 }
 
 function mdl(

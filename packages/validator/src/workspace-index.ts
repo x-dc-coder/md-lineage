@@ -474,7 +474,8 @@ function pushSorted(map: Map<string, DocPath[]>, id: string, path: DocPath): voi
   let hi = list.length;
   while (lo < hi) {
     const mid = (lo + hi) >>> 1;
-    if (list[mid]! < path) lo = mid + 1;
+    const midVal = list[mid];
+    if (midVal !== undefined && midVal < path) lo = mid + 1;
     else hi = mid;
   }
   list.splice(lo, 0, path);
@@ -795,5 +796,7 @@ export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, rawLin
 export function evidenceResolves(index: WorkspaceIndex, targetId: string, anchor: string): boolean {
   const paths = index.idToPaths(targetId);
   if (paths.length !== 1) return false;
-  return index.anchorsOf(paths[0]!).has(anchor);
+  const firstPath = paths[0];
+  if (!firstPath) return false;
+  return index.anchorsOf(firstPath).has(anchor);
 }

@@ -44,7 +44,7 @@ mdlineage: 12 files checked, no diagnostics
 - [配置指南](docs/使用手册/配置指南.md)：`mdlineage.config.yaml` 与自定义 schema
 - [诊断码速查](docs/使用手册/诊断码速查.md)：每个 `MDL` 码的含义与修法
 - [编辑器配置](docs/使用手册/编辑器配置.md)：VS Code / Neovim / Cursor 接入
-- 设计与规划：`docs/specs/`、`docs/project/`；变更与已知限制见 `docs/project/progress.md`
+- 设计与规划：`docs/架构设计/`、`docs/project/`；变更与已知限制见 `docs/project/progress.md`
 
 ## 开发
 

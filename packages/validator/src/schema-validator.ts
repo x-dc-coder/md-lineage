@@ -253,11 +253,11 @@ export function validateAgainstSchema(data: unknown, ctx: SchemaContext): Diagno
 
   if (ctx.config?.schemaFile) {
     const custom = loadCustomSchema(ctx);
-    if (custom.error) {
-      out.push(custom.error);
+    if (custom.error || !custom.validator) {
+      if (custom.error) out.push(custom.error);
       validator = getSchemaValidator();
     } else {
-      validator = custom.validator!;
+      validator = custom.validator;
       requiredFields = custom.requiredFields;
     }
   } else {
@@ -609,7 +609,8 @@ function isPair(node: unknown): node is { value: unknown; node?: unknown; key: u
 function findKeyNode(root: unknown, path: string[]): unknown {
   let current: unknown = root;
   for (let i = 0; i < path.length; i++) {
-    const part = path[i]!;
+    const part = path[i];
+    if (part === undefined) continue;
     if (current === null || typeof current !== 'object') return null;
     if (isSeq(current)) {
       const index = Number(part);

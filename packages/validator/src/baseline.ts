@@ -154,7 +154,8 @@ export function writeBaseline(
 
   const out: Record<string, string[]> = {};
   for (const code of Object.keys(codes).sort()) {
-    out[code] = dedupeSorted([...codes[code]!]);
+    const set = codes[code];
+    out[code] = set ? dedupeSorted([...set]) : [];
   }
 
   return (

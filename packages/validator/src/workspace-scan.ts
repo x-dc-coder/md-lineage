@@ -49,7 +49,9 @@ export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUn
   const queue: QueueItem[] = [{ logicalDir: '', physicalDir: absRoot, depth: 0 }];
 
   while (queue.length > 0) {
-    const { logicalDir, physicalDir, depth } = queue.pop()!;
+    const item = queue.pop();
+    if (!item) break;
+    const { logicalDir, physicalDir, depth } = item;
     let entries: import('node:fs').Dirent[];
     try {
       entries = readdirSync(physicalDir, { withFileTypes: true });

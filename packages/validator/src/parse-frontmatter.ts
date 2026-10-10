@@ -54,9 +54,10 @@ export function scanBoundary(text: string): BoundaryScan | null {
   // The closing marker must be a line of its own after the opening one.
   let closeStart: number | null = null;
   for (let i = 0; i < starts.length; i++) {
-    const start = starts[i]!;
-    if (start < contentStart) continue;
-    const end = i + 1 < starts.length ? starts[i + 1]! - eolBefore(text, starts[i + 1]!) : text.length;
+    const start = starts[i];
+    if (start === undefined || start < contentStart) continue;
+    const nextStart = starts[i + 1];
+    const end = nextStart !== undefined ? nextStart - eolBefore(text, nextStart) : text.length;
     const line = text.slice(start, end);
     if (CLOSE_MARKER.test(line)) {
       closeStart = start;
@@ -142,22 +143,24 @@ export function parseFrontmatter(
   if (doc.errors.length > 0) {
     // YAML errors carry 1-based line/column relative to `raw`; convert them to
     // absolute document offsets so the diagnostic lands on the offending bytes.
-    const first = doc.errors[0]!;
-    const lineIndex = first.linePos?.[0];
-    const start =
-      lineIndex && lineIndex.line >= 1
-        ? rawStart + (lineMap.lineStarts[lineIndex.line - 1] ?? 0) + (lineIndex.col - 1)
-        : rawStart + (first.pos[0] ?? 0);
-    const end = start + Math.max(1, (first.pos[1] ?? first.pos[0] ?? 0) - (first.pos[0] ?? 0));
-    return {
-      parsed: null,
-      error: {
-        message: first.message,
-        range: rangeAt(lineMap, start, end),
-        rawStart,
-        raw,
-      },
-    };
+    const first = doc.errors[0];
+    if (first) {
+      const lineIndex = first.linePos?.[0];
+      const start =
+        lineIndex && lineIndex.line >= 1
+          ? rawStart + (lineMap.lineStarts[lineIndex.line - 1] ?? 0) + (lineIndex.col - 1)
+          : rawStart + (first.pos[0] ?? 0);
+      const end = start + Math.max(1, (first.pos[1] ?? first.pos[0] ?? 0) - (first.pos[0] ?? 0));
+      return {
+        parsed: null,
+        error: {
+          message: first.message,
+          range: rangeAt(lineMap, start, end),
+          rawStart,
+          raw,
+        },
+      };
+    }
   }
 
   const js = doc.toJS();

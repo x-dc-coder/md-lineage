@@ -784,7 +784,8 @@ function kept(code: number): boolean {
   let hi = KEPT_RANGES.length - 1;
   while (lo <= hi) {
     const mid = (lo + hi) >>> 1;
-    const range = KEPT_RANGES[mid]!;
+    const range = KEPT_RANGES[mid];
+    if (!range) break;
     if (code < range.lo) hi = mid - 1;
     else if (code > range.hi) lo = mid + 1;
     else return true;
@@ -809,7 +810,8 @@ export function slugifyHeading(text: string): string {
   const lower = text.toLowerCase();
   let out = '';
   for (const ch of lower) {
-    const code = ch.codePointAt(0)!;
+    const code = ch.codePointAt(0);
+    if (code === undefined) continue;
     if (code === 0x20) {
       out += '-';
       continue;

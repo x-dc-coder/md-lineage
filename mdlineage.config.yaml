@@ -3,7 +3,7 @@
 # Adoption state (2026-10-01): the docs/ tree follows the universal
 # directory specification. Developer-facing documents are organized in
 # docs/使用手册/ with Chinese filenames and contents; internal specs,
-# project ledgers and reviews are kept under docs/specs/, docs/project/
+# project ledgers and reviews are kept under docs/架构设计/, docs/project/
 # and docs/reviews/.
 #
 # `metadata.required: true` plus the layout rules below implement the split:
@@ -32,7 +32,7 @@ layout:
       kinds: [guide, reference]
       forbidStatus: [draft]
       maxDepth: 2
-  - match: 'docs/specs/**'
+  - match: 'docs/架构设计/**'
     intent:
       description: 'System specifications and technical RFCs'
       kinds: [architecture, spec, policy]

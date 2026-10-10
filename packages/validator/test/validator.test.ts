@@ -531,7 +531,7 @@ describe('config defaults', () => {
     assert.equal(result.config.layout[1]?.match, 'docs/**');
     assert.equal(result.config.layout[1]?.require?.frontmatter, 'required');
     assert.equal(result.config.layout[2]?.match, 'docs/使用手册/**');
-    assert.equal(result.config.layout[3]?.match, 'docs/specs/**');
+    assert.equal(result.config.layout[3]?.match, 'docs/架构设计/**');
     assert.equal(result.config.layout[4]?.match, 'docs/project/**');
     assert.equal(result.config.layout[5]?.match, 'docs/reviews/**');
     // The custom vocabulary is a superset of the validator defaults that the

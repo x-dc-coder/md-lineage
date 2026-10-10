@@ -45,10 +45,12 @@ export function positionAt(lineMap: LineMap, offset: number): { line: number; co
   let hi = starts.length - 1;
   while (lo < hi) {
     const mid = (lo + hi + 1) >>> 1;
-    if (starts[mid]! <= clamped) lo = mid;
+    const midVal = starts[mid];
+    if (midVal !== undefined && midVal <= clamped) lo = mid;
     else hi = mid - 1;
   }
-  return { line: lo + 1, column: clamped - starts[lo]! + 1, offset: clamped };
+  const startOffset = starts[lo] ?? 0;
+  return { line: lo + 1, column: clamped - startOffset + 1, offset: clamped };
 }
 
 export interface ResolvedRange {

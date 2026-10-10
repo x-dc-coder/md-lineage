@@ -27,9 +27,14 @@ export function parseAuthoredInstant(value: string): number | null {
   const match = AUTHORED_DATE_REGEX.exec(value);
   if (!match) return null;
 
-  const year = parseInt(match[1]!, 10);
-  const month = parseInt(match[2]!, 10);
-  const day = parseInt(match[3]!, 10);
+  const yStr = match[1];
+  const mStr = match[2];
+  const dStr = match[3];
+  if (!yStr || !mStr || !dStr) return null;
+
+  const year = parseInt(yStr, 10);
+  const month = parseInt(mStr, 10);
+  const day = parseInt(dStr, 10);
   const hour = match[4] ? parseInt(match[4], 10) : 0;
   const minute = match[5] ? parseInt(match[5], 10) : 0;
   const second = match[6] ? parseInt(match[6], 10) : 0;

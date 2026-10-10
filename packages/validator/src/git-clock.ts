@@ -311,7 +311,8 @@ export async function gitClocksForIndex(
       options?.spawnGit,
     );
     for (const gitPath of chunk) {
-      const docPath = docPathByGitPath.get(gitPath)!;
+      const docPath = docPathByGitPath.get(gitPath);
+      if (!docPath) continue;
       if (fresh.has(gitPath)) {
         resultMap.set(docPath, { provenStale: false, seconds: null });
       } else if (provenStale) {

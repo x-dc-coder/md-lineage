@@ -314,7 +314,8 @@ function resolveSchemaPath(name: string): string {
       // try the next candidate
     }
   }
-  return candidates[0]!;
+  const fallback = candidates[0];
+  return fallback ?? resolve(here, '..', '..', '..', 'schemas', name);
 }
 
 
@@ -386,15 +387,17 @@ export function loadConfig(path?: string, from?: string): ConfigLoadResult {
 
   const doc = parseDocument(text);
   if (doc.errors.length > 0) {
-    const first = doc.errors[0]!;
+    const first = doc.errors[0];
+    const message = first ? first.message : 'Unknown YAML error';
+    const pos = first?.pos[0] ?? 0;
     return {
       config: defaultConfig(),
       diagnostics: [
         {
           code: 'MDL900',
           severity: 'error',
-          message: `mdlineage.config.yaml is not valid YAML: ${first.message}`,
-          range: lineColumnOf(null, first.pos[0] ?? 0),
+          message: `mdlineage.config.yaml is not valid YAML: ${message}`,
+          range: lineColumnOf(null, pos),
         },
       ],
     };
@@ -638,8 +641,9 @@ function loadExtendsFile(
   const text = readFileSync(path, 'utf8');
   const doc = parseDocument(text);
   if (doc.errors.length > 0) {
-    const first = doc.errors[0]!;
-    throw new Error(`${path} is not valid YAML: ${first.message}`);
+    const first = doc.errors[0];
+    const message = first ? first.message : 'Unknown YAML error';
+    throw new Error(`${path} is not valid YAML: ${message}`);
   }
   const raw = doc.toJS() as Record<string, unknown>;
   if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) {
@@ -656,7 +660,8 @@ function loadExtendsFile(
   if (extended.diagnostics.length > 0) {
     // The chain is broken somewhere below; report it once, at the link the
     // caller can actually see.
-    throw new Error(extended.diagnostics[0]!.message);
+    const firstDiag = extended.diagnostics[0];
+    throw new Error(firstDiag ? firstDiag.message : 'Extension failed');
   }
   return { raw: extended.raw as Record<string, unknown>, chain: extended.chain };
 }

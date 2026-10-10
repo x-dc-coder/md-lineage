@@ -30,6 +30,8 @@
  * edges, so it contributes nothing here, and no input can make this module throw.
  */
 
+import { readFileSync, statSync } from 'node:fs';
+import { resolve } from 'node:path';
 import type { Config } from './config.js';
 import type { Diagnostic } from './diagnostic.js';
 import { layerOf, severityOf } from './diagnostic.js';
@@ -89,6 +91,7 @@ export function validateWorkspace(
 ): WorkspaceDiagnostic[] {
   const config = index.config;
   const out: WorkspaceDiagnostic[] = [];
+  const fileLinesCache = new Map<string, number | null>();
 
   const scope = options.paths ? new Set(options.paths) : null;
   for (const path of index.paths()) {
@@ -105,7 +108,11 @@ export function validateWorkspace(
       ...mdl306(entry, index, config),
       ...mdlSelfReference(entry, index, config),
     );
-    out.push(...mdl304(entry, config), ...mdl401(entry, index, config, options.root), ...mdl402(entry, index, config));
+    out.push(
+      ...mdl304(entry, config),
+      ...mdl401(entry, index, config, options.root, fileLinesCache),
+      ...mdl402(entry, index, config),
+    );
 
     // MDL801 Git fallback clock for documents without authored timestamps
     const hasAuthoredMDL801 = entry.diagnostics.some((d) => d.code === 'MDL801');
@@ -177,7 +184,8 @@ function mdl301(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
 function mdl302(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
   const out: WorkspaceDiagnostic[] = [];
   for (let i = 0; i < entry.relations.length; i++) {
-    const rel = entry.relations[i]!;
+    const rel = entry.relations[i];
+    if (!rel) continue;
     if (index.idToPaths(rel.target).length > 0) continue;
     const where = entry.offsets.relationStart(i) ?? entry.offsets.mdlineageStart;
     out.push(
@@ -202,7 +210,8 @@ function mdl306(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
   }
   const out: WorkspaceDiagnostic[] = [];
   for (let i = 0; i < entry.relations.length; i++) {
-    const rel = entry.relations[i]!;
+    const rel = entry.relations[i];
+    if (!rel) continue;
     if (!config.lifecycle.blockingRelations.includes(rel.type)) continue;
     const targetPaths = index.idToPaths(rel.target);
     if (targetPaths.length === 0) continue;
@@ -261,7 +270,8 @@ function mdlSelfReference(entry: DocEntry, index: WorkspaceIndex, config: Config
   if (entry.id === null) return [];
   const out: WorkspaceDiagnostic[] = [];
   for (let i = 0; i < entry.relations.length; i++) {
-    const rel = entry.relations[i]!;
+    const rel = entry.relations[i];
+    if (!rel) continue;
     if (config.relations[rel.type]?.selfReference !== 'forbidden') continue;
     // Only a target that resolves to THIS document is a self-reference; a
     // dangling one is MDL302, and a target resolving elsewhere is not it.
@@ -298,7 +308,8 @@ function mdlSelfReference(entry: DocEntry, index: WorkspaceIndex, config: Config
 function mdl304(entry: DocEntry, config: Config): WorkspaceDiagnostic[] {
   const out: WorkspaceDiagnostic[] = [];
   for (let i = 0; i < entry.relations.length; i++) {
-    const rel = entry.relations[i]!;
+    const rel = entry.relations[i];
+    if (!rel) continue;
     if (config.relations[rel.type]?.reasonRequired !== true) continue;
     const reason = rel.reason;
     if (reason === undefined) continue; // absent key: MDL102 owns it
@@ -372,9 +383,12 @@ function mdl305(index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
     }
 
     for (const component of stronglyConnectedComponents(graph)) {
+      if (component.length === 0) continue;
       // A lone node is only a cycle when it points at itself, in which case the
       // component's single member IS the loop.
-      if (component.length === 1 && !graph.get(component[0]!)?.includes(component[0]!)) continue;
+      const firstMember = component[0];
+      if (firstMember === undefined) continue;
+      if (component.length === 1 && !graph.get(firstMember)?.includes(firstMember)) continue;
 
       // Every member path, sorted, so the anchor and `data.cycle` are stable.
       const paths: DocPath[] = [];
@@ -382,7 +396,8 @@ function mdl305(index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
         for (const p of index.idToPaths(id)) paths.push(p);
       }
       paths.sort();
-      const anchorPath = paths[0]!;
+      const anchorPath = paths[0];
+      if (!anchorPath) continue;
       const entry = index.entryOf(anchorPath);
       if (!entry) continue;
 
@@ -415,7 +430,8 @@ function mdl305(index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
 function cycleMessage(members: readonly string[]): string {
   const LIMIT = 5;
   const head = members.slice(0, LIMIT);
-  const tail = head.length < members.length ? `… (${members.length} documents)` : head[0]!;
+  const firstHead = head[0] ?? '';
+  const tail = head.length < members.length ? `… (${members.length} documents)` : firstHead;
   const noun = members.length === 1 ? 'document' : 'documents';
   return `cycle among ${members.length} ${noun}: ${[...head, tail].join(' → ')}`;
 }
@@ -442,7 +458,8 @@ function stronglyConnectedComponents(graph: Map<string, readonly string[]>): str
     frames.push({ node: start, next: 0 });
 
     while (frames.length > 0) {
-      const frame = frames[frames.length - 1]!;
+      const frame = frames[frames.length - 1];
+      if (!frame) break;
       if (!indices.has(frame.node)) {
         indices.set(frame.node, index);
         low.set(frame.node, index);
@@ -454,7 +471,8 @@ function stronglyConnectedComponents(graph: Map<string, readonly string[]>): str
       const neighbors = graph.get(frame.node) ?? EMPTY_PATHS;
       let descended = false;
       while (frame.next < neighbors.length) {
-        const target = neighbors[frame.next++]!;
+        const target = neighbors[frame.next++];
+        if (!target) continue;
         if (!indices.has(target)) {
           // A node the graph does not name as a source is still reachable and
           // belongs to no component, so only the graph's own nodes descend.
@@ -466,7 +484,9 @@ function stronglyConnectedComponents(graph: Map<string, readonly string[]>): str
           continue;
         }
         if (onStack.has(target)) {
-          low.set(frame.node, Math.min(low.get(frame.node)!, low.get(target)!));
+          const frameLow = low.get(frame.node) ?? 0;
+          const targetLow = low.get(target) ?? 0;
+          low.set(frame.node, Math.min(frameLow, targetLow));
         }
       }
       if (descended) continue;
@@ -487,7 +507,11 @@ function stronglyConnectedComponents(graph: Map<string, readonly string[]>): str
 
       frames.pop();
       const parent = frames[frames.length - 1];
-      if (parent) low.set(parent.node, Math.min(low.get(parent.node)!, low.get(frame.node)!));
+      if (parent) {
+        const parentLow = low.get(parent.node) ?? 0;
+        const frameLow = low.get(frame.node) ?? 0;
+        low.set(parent.node, Math.min(parentLow, frameLow));
+      }
     }
   }
 
@@ -516,6 +540,7 @@ function mdl401(
   index: WorkspaceIndex,
   config: Config,
   root: string = process.cwd(),
+  fileLinesCache: Map<string, number | null> = new Map(),
 ): WorkspaceDiagnostic[] {
   const out: WorkspaceDiagnostic[] = [];
   for (const link of entry.links) {
@@ -553,8 +578,9 @@ function mdl401(
     const targets = resolveLinkPath(index, entry.path, link.path);
     if (targets.length > 0) {
       // Only an indexed document has heading anchors; a known non-Markdown file
-      // resolves for MDL401's sake but its fragments are not judged.
-      const target = targets[0]!;
+      // resolves for MDL401's sake and checks line number anchors if present.
+      const target = targets[0];
+      if (!target) continue;
       if (link.anchor !== '' && index.entryOf(target) !== null && !index.anchorsOf(target).has(link.anchor)) {
         out.push(
           build(
@@ -566,6 +592,53 @@ function mdl401(
             { url: link.url, path: link.path, anchor: link.anchor },
           ),
         );
+      } else if (index.entryOf(target) === null && link.anchor !== '') {
+        const lineMatch = /^L(\d+)(?:-L?(\d+))?$/i.exec(link.anchor);
+        if (lineMatch && lineMatch[1]) {
+          const startLine = parseInt(lineMatch[1], 10);
+          const endLine = lineMatch[2] ? parseInt(lineMatch[2], 10) : undefined;
+          if (startLine <= 0) {
+            out.push(
+              build(
+                'MDL402',
+                `Line number in link fragment must be greater than zero: #${link.anchor}`,
+                entry,
+                link.offset,
+                config,
+                { url: link.url, path: link.path, anchor: link.anchor },
+              ),
+            );
+          } else if (endLine !== undefined && endLine < startLine) {
+            out.push(
+              build(
+                'MDL402',
+                `Invalid line range in link fragment: #${link.anchor}`,
+                entry,
+                link.offset,
+                config,
+                { url: link.url, path: link.path, anchor: link.anchor },
+              ),
+            );
+          } else {
+            let totalLines = fileLinesCache.get(target);
+            if (totalLines === undefined) {
+              totalLines = getFileLineCount(resolve(root, target));
+              fileLinesCache.set(target, totalLines);
+            }
+            if (totalLines !== null && (startLine > totalLines || (endLine !== undefined && endLine > totalLines))) {
+              out.push(
+                build(
+                  'MDL402',
+                  `Line anchor exceeds file length in ${target}: #${link.anchor} (file has ${totalLines} lines)`,
+                  entry,
+                  link.offset,
+                  config,
+                  { url: link.url, path: link.path, anchor: link.anchor },
+                ),
+              );
+            }
+          }
+        }
       }
       continue;
     }
@@ -604,13 +677,16 @@ function isExternal(url: string): boolean {
 function mdl402(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
   const out: WorkspaceDiagnostic[] = [];
   for (let i = 0; i < entry.relations.length; i++) {
-    const rel = entry.relations[i]!;
+    const rel = entry.relations[i];
+    if (!rel) continue;
     if (typeof rel.evidence !== 'string' || !rel.evidence.startsWith('#')) continue;
     const anchor = rel.evidence.slice(1);
     if (anchor === '') continue;
     const targets = index.idToPaths(rel.target);
     if (targets.length !== 1) continue;
-    const targetEntry = index.entryOf(targets[0]!);
+    const firstTarget = targets[0];
+    if (!firstTarget) continue;
+    const targetEntry = index.entryOf(firstTarget);
     if (!targetEntry || targetEntry.anchors.has(anchor)) continue;
     const where =
       entry.offsets.relationField(i, 'evidence') ?? entry.offsets.relationStart(i) ?? entry.offsets.mdlineageStart;
@@ -678,9 +754,28 @@ function lineEnd(lineMap: LineMap, offset: number): number {
   let hi = starts.length - 1;
   while (lo < hi) {
     const mid = (lo + hi + 1) >>> 1;
-    if (starts[mid]! <= offset) lo = mid;
+    const midVal = starts[mid];
+    if (midVal !== undefined && midVal <= offset) lo = mid;
     else hi = mid - 1;
   }
   const next = starts[lo + 1];
   return next === undefined ? lineMap.length : Math.max(offset + 1, next - 1);
 }
+
+/**
+ * Safely read a file and count its total lines (split by \n).
+ * Returns null if the file cannot be read, is not a regular file, is oversized (> 10MB), or is binary.
+ */
+function getFileLineCount(diskPath: string): number | null {
+  try {
+    const st = statSync(diskPath);
+    if (!st.isFile()) return null;
+    if (st.size > 10 * 1024 * 1024) return null;
+    const content = readFileSync(diskPath, 'utf8');
+    if (content.includes('\0')) return null;
+    return content.length === 0 ? 0 : content.split('\n').length;
+  } catch {
+    return null;
+  }
+}
+
