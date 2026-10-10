@@ -66,3 +66,12 @@ mdlineage:
 | [`2026-09-21-round1-adjudication.md`](./reviews/2026-09-21-round1-adjudication.md) | 第一轮红队交叉审查分歧最终裁决报告 | 确定统一实现路线 |
 | [`2026-09-21-round1-atria-dawn-preview.md`](./reviews/2026-09-21-round1-atria-dawn-preview.md) | Atria-Dawn-Preview 第一轮独立架构审查 | 红队审查意见 |
 | [`2026-09-21-round1-glm-5.3.md`](./reviews/2026-09-21-round1-glm-5.3.md) | glm-5.3 第一轮独立架构审查 | 红队审查意见 |
+
+---
+
+## 5. 研读复盘（研读复盘/ · 领域特化插槽）
+
+| 文档名称 | 主题说明 | 适用场景 |
+|---|---|---|
+| [`README.md`](./研读复盘/README.md) | 研读复盘导航地图与模块大纲 | 知识库深度研读导引 |
+| [`阅读与问答复盘台账.md`](./研读复盘/阅读与问答复盘台账.md) | 交互研讨问答、底层机制剖析与掌握度量台账 | 学习复盘与知识掌握追踪 |

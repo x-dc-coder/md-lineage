@@ -46,6 +46,11 @@ layout:
       description: 'Independent model reviews and test reports'
       kinds: [report]
       statuses: [archived]
+  - match: 'docs/研读复盘/**'
+    intent:
+      description: '知识库研读、问答复盘与掌握台账（领域特化插槽）'
+      kinds: [report, reference]
+      authority: [supporting]
 
 lifecycle:
   staleAfterDays: 180
