@@ -445,6 +445,52 @@
       "additionalProperties": false,
       "description": "RESERVED for P4/M4. Declarative repository policy rules (remark-language-server-solution.md §7.3) are intentionally left empty here: the DSL (when/relation/require/forbid) is still design-in-progress and its keys must not be validated prematurely."
     },
+    "federations": {
+      "type": "object",
+      "description": "Declarative external workspaces (Issue #4 Phase 1). Each key is a federation scope name; the value mounts one local member repository. Phase 1: local sources only, read-only trust. Member repositories use their OWN mdlineage.config.yaml (defaults when absent); they never inherit this file.",
+      "propertyNames": {
+        "pattern": "^[a-z][a-z0-9-]*$",
+        "not": { "enum": ["home", "*"] },
+        "description": "Scope names are lowercase slugs; 'home' and '*' are reserved. The scope appears in external coordinates as @scope//path."
+      },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["local"],
+        "properties": {
+          "local": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["path"],
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Relative path to the member root, resolved against the directory of the config file that declares it."
+              }
+            }
+          },
+          "trust": {
+            "const": "readonly",
+            "description": "Phase 1's only legal value; any other value is rejected by this schema (MDL900 config-schema diagnostic)."
+          },
+          "missing": {
+            "enum": ["warn", "error"],
+            "default": "warn",
+            "description": "What a member root that does not exist reports: MDL902 at the configured severity (warn skips the member)."
+          },
+          "include": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1
+            },
+            "default": ["**/*.md"],
+            "description": "Globs (member-root-relative) selecting which member files this repository adopts."
+          }
+        }
+      }
+    },
     "manifestFile": {
       "type": "string",
       "minLength": 1,

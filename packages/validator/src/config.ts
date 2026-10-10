@@ -9,18 +9,21 @@
  * The built-in defaults MUST validate against schemas/mdlineage-config.schema.json;
  * that invariant is asserted by the test suite.
  *
- * Code number note: MDL9xx is the reserved block for configuration and internal
- * state, but no number has been assigned yet (see the reservedRanges in
- * schemas/diagnostic-codes.json and the open issue in docs/progress.md). Config
- * failures therefore report "MDL900" — a placeholder number, not a registered
- * code. TODO: replace with the assigned MDL9xx number once the block is opened.
+ * Code number note: MDL9xx is the reserved block for configuration and
+ * internal state. MDL900 remains the generic placeholder (a config the
+ * caller asked for but could not use), while MDL901 (federation cycle),
+ * MDL902 (missing member root) and MDL903 (alias/scope collision) are
+ * assigned to federation integrity (see the reservedRanges in
+ * schemas/diagnostic-codes.json). Federation member configuration is also
+ * loaded here: resolveFederations reads each member's config from disk.
  */
 
-import { statSync, readFileSync } from 'node:fs';
+import { statSync, readFileSync, existsSync, readdirSync, realpathSync } from 'node:fs';
 import { stripBom } from './parse-frontmatter.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { parseDocument } from 'yaml';
+import { foldAliasPrefix, RESERVED_SCOPES } from './federation.js';
 // `ajv` ships no `exports` map, so the Draft 2020-12 build is imported by path;
 // its default export is the Ajv2020 class.
 import { Ajv2020 } from 'ajv/dist/2020.js';
@@ -121,6 +124,220 @@ export interface LifecycleConfig {
  *   - `derived` — values the validator computes that are not config-file keys:
  *     bookkeeping such as `raw`, `source` and `extendsChain`.
  */
+export interface FederationMemberPlan {
+  readonly scope: string;
+  /** Absolute member root, realpath-resolved. */
+  readonly root: string;
+  /** POSIX alias prefix relative to the home root with leading '..' segments stripped. */
+  readonly alias: string;
+  /** The member's own loaded config (defaults when it ships none). */
+  readonly config: Config;
+  readonly include: readonly string[];
+  readonly missing: 'warn' | 'error';
+  readonly trust: 'readonly';
+}
+
+export interface ResolvedFederation {
+  readonly homeRoot: string;
+  /** DFS pre-order across the whole federation closure (transitive members included). */
+  readonly members: readonly FederationMemberPlan[];
+}
+
+export interface FederationResolution {
+  readonly federation: ResolvedFederation | null;
+  readonly diagnostics: ConfigDiagnostic[];
+}
+
+/**
+ * Resolve the federation closure starting from a home configuration and home root.
+ * Performs DFS cycle detection (MDL901), missing root check (MDL902),
+ * and alias collision check (MDL903).
+ */
+export function resolveFederations(config: Config, homeRoot: string): FederationResolution {
+  const diagnostics: ConfigDiagnostic[] = [];
+  if (!config.federations || config.federations.size === 0) {
+    return { federation: { homeRoot, members: [] }, diagnostics: [] };
+  }
+
+  let realHome: string;
+  try {
+    realHome = realpathSync(resolve(homeRoot));
+  } catch {
+    realHome = resolve(homeRoot);
+  }
+
+  const stack = new Set<string>([realHome]);
+  const visited = new Map<string, string>(); // realpath -> scope
+  const members: FederationMemberPlan[] = [];
+
+  function dfs(
+    currentConfig: Config,
+    currentDeclaringDir: string,
+    currentStack: Set<string>
+  ): void {
+    for (const [scope, memberConfig] of currentConfig.federations.entries()) {
+      if (RESERVED_SCOPES.has(scope)) {
+        diagnostics.push({
+          code: 'MDL903',
+          severity: 'error',
+          message: `Federation scope name '${scope}' is reserved`,
+        });
+        continue;
+      }
+
+      const targetPath = resolve(currentDeclaringDir, memberConfig.localPath);
+      let realMember: string;
+      if (!existsSync(targetPath)) {
+        diagnostics.push({
+          code: 'MDL902',
+          severity: memberConfig.missing === 'error' ? 'error' : 'warning',
+          message: `Federated member repository is missing: ${memberConfig.localPath} (declared in ${currentDeclaringDir})`,
+        });
+        continue;
+      }
+
+      try {
+        realMember = realpathSync(targetPath);
+      } catch {
+        realMember = targetPath;
+      }
+
+      if (currentStack.has(realMember)) {
+        diagnostics.push({
+          code: 'MDL901',
+          severity: 'error',
+          message: `Circular federations: ${realMember} is already being federated (${[...currentStack, realMember].join(' → ')})`,
+        });
+        continue;
+      }
+
+      if (visited.has(realMember)) {
+        const existingScope = visited.get(realMember);
+        if (existingScope !== scope) {
+          diagnostics.push({
+            code: 'MDL903',
+            severity: 'error',
+            message: `Federated member '${realMember}' is mounted multiple times with different scopes ('${existingScope}' and '${scope}')`,
+          });
+        }
+        // Diamond dedup: already adopted in DFS pre-order
+        continue;
+      }
+
+      const alias = foldAliasPrefix(realHome, realMember);
+      if (!alias || alias === '') {
+        diagnostics.push({
+          code: 'MDL903',
+          severity: 'error',
+          message: `Federated member root resolves at or above the home root: ${realMember}`,
+        });
+        continue;
+      }
+
+      visited.set(realMember, scope);
+
+      const memberLoaded = loadConfig(undefined, realMember);
+      for (const diag of memberLoaded.diagnostics) {
+        diagnostics.push(diag);
+      }
+
+      const plan: FederationMemberPlan = {
+        scope,
+        root: realMember,
+        alias,
+        config: memberLoaded.config,
+        include: memberConfig.include,
+        missing: memberConfig.missing,
+        trust: 'readonly',
+      };
+      members.push(plan);
+
+      // Recurse into member's own federations
+      if (memberLoaded.config.federations.size > 0) {
+        const nextStack = new Set(currentStack);
+        nextStack.add(realMember);
+        const declaringDir = memberLoaded.config.source ? dirname(memberLoaded.config.source) : realMember;
+        dfs(memberLoaded.config, declaringDir, nextStack);
+      }
+    }
+  }
+
+  const homeDeclaringDir = config.source ? dirname(config.source) : realHome;
+  dfs(config, homeDeclaringDir, stack);
+
+  // Check alias and scope collisions across all adopted members
+  const scopeSeen = new Set<string>();
+  const aliasSeen = new Map<string, string>(); // alias -> scope
+  let homeTopLevelDirs: Set<string>;
+  try {
+    homeTopLevelDirs = new Set(
+      readdirSync(realHome, { withFileTypes: true })
+        .filter((d) => d.isDirectory())
+        .map((d) => d.name)
+    );
+  } catch {
+    homeTopLevelDirs = new Set();
+  }
+
+  for (const m of members) {
+    if (scopeSeen.has(m.scope)) {
+      diagnostics.push({
+        code: 'MDL903',
+        severity: 'error',
+        message: `Federation scope name '${m.scope}' is declared multiple times across the federation closure`,
+      });
+    }
+    scopeSeen.add(m.scope);
+
+    const firstSegment = m.alias.split('/')[0] ?? '';
+    if (homeTopLevelDirs.has(firstSegment)) {
+      diagnostics.push({
+        code: 'MDL903',
+        severity: 'error',
+        message: `Federated member mount alias '${m.alias}' collides with top-level directory '${firstSegment}' of home repository`,
+      });
+    }
+
+    if (aliasSeen.has(m.alias)) {
+      diagnostics.push({
+        code: 'MDL903',
+        severity: 'error',
+        message: `Federated member mount alias '${m.alias}' collides between scope '${m.scope}' and '${aliasSeen.get(m.alias)}'`,
+      });
+    } else {
+      // Check segment prefix collision
+      for (const [existingAlias, existingScope] of aliasSeen.entries()) {
+        if (m.alias.startsWith(existingAlias + '/') || existingAlias.startsWith(m.alias + '/')) {
+          diagnostics.push({
+            code: 'MDL903',
+            severity: 'error',
+            message: `Federated member mount alias '${m.alias}' prefix conflicts with '${existingAlias}' (${m.scope} vs ${existingScope})`,
+          });
+        }
+      }
+      aliasSeen.set(m.alias, m.scope);
+    }
+  }
+
+  const hasError = diagnostics.some((d) => d.severity === 'error');
+  if (hasError) {
+    return { federation: null, diagnostics };
+  }
+
+  return { federation: { homeRoot: realHome, members }, diagnostics };
+}
+
+/** One federated member as declared in mdlineage.config.yaml (schema-facing shape). */
+export interface FederationMemberConfig {
+  /** Relative path to the member root, resolved against the DECLARING config file's directory. */
+  readonly localPath: string;
+  /** Phase 1's only legal value. */
+  readonly trust: 'readonly';
+  readonly missing: 'warn' | 'error';
+  /** Glob subset of the member tree this repository adopts; default glob is markdown files. */
+  readonly include: readonly string[];
+}
+
 export interface Config {
   readonly configVersion: number;
   readonly files: {
@@ -149,6 +366,8 @@ export interface Config {
   readonly diagnostics: Readonly<Record<string, 'error' | 'warning' | 'information' | 'hint'>>;
   /** Line-ending policy (§4.3). Schema key; git's `eol` attribute has no CR form. */
   readonly eolPolicy: EolPolicy;
+  /** Declarative external federated workspaces (Issue #4 Phase 1). */
+  readonly federations: ReadonlyMap<string, FederationMemberConfig>;
   /** The unparsed configuration object, for keys this version does not interpret. */
   readonly raw: Readonly<Record<string, unknown>> | null;
   /** Absolute path the config was loaded from, or null for built-in defaults. */
@@ -189,6 +408,18 @@ export function configToSchema(config: Config): Readonly<Record<string, unknown>
   if (config.layout && config.layout.length > 0) out.layout = config.layout;
   if (config.layoutExceptions && config.layoutExceptions.length > 0) {
     out.layoutExceptions = config.layoutExceptions;
+  }
+  if (config.federations && config.federations.size > 0) {
+    const feds: Record<string, unknown> = {};
+    for (const [scope, fed] of config.federations.entries()) {
+      feds[scope] = {
+        local: { path: fed.localPath },
+        trust: fed.trust,
+        missing: fed.missing,
+        include: [...fed.include],
+      };
+    }
+    out.federations = feds;
   }
   if (config.manifestDocuments.size > 0 && !config.manifestFile) {
     const docs: Record<string, unknown> = {};
@@ -254,6 +485,7 @@ export function defaultConfig(): Config {
     manifestDocuments: new Map(),
     diagnostics: { MDL301: 'error', MDL304: 'warning' },
     eolPolicy: 'lf',
+    federations: new Map(),
     raw: null,
     source: null,
     extendsChain: [],
@@ -774,9 +1006,14 @@ function lineColumnOf(_doc: unknown, offset: number): { line: number; column: nu
   return { line: 1, column: offset + 1 };
 }
 
+/** Validate an arbitrary parsed config object against the config schema. */
+export function validateConfigSchema(data: unknown): boolean {
+  return Boolean(configValidator()(data));
+}
+
 /** Validate the built-in default config against the config schema. Pure. */
 export function defaultConfigIsValid(): boolean {
-  return configValidator()(configToSchema(defaultConfig()));
+  return validateConfigSchema(configToSchema(defaultConfig()));
 }
 
 /** Check whether user configuration explicitly specified files.include. */
@@ -836,6 +1073,7 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string, exten
     manifestFile: typeof raw.manifestFile === 'string' ? raw.manifestFile : undefined,
     manifestDocuments: parseManifestDocuments(raw.manifestDocuments ?? (raw.manifest as { documents?: unknown })?.documents),
     diagnostics: mergeDiagnostics(diagnostics, base.diagnostics),
+    federations: parseFederations(raw.federations),
     // The schema enum guarantees validity; the guard keeps the cast honest if
     // a caller ever hands `normalize` an unvalidated document.
     eolPolicy:
@@ -845,6 +1083,26 @@ function normalize(raw: Readonly<Record<string, unknown>>, source: string, exten
     raw,
     extendsChain,
   };
+}
+
+function parseFederations(rawFeds: unknown): ReadonlyMap<string, FederationMemberConfig> {
+  const map = new Map<string, FederationMemberConfig>();
+  if (!rawFeds || typeof rawFeds !== 'object' || Array.isArray(rawFeds)) return map;
+  for (const [scope, value] of Object.entries(rawFeds as Record<string, unknown>)) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue;
+    const fedObj = value as Record<string, unknown>;
+    const local = fedObj['local'] as Record<string, unknown> | undefined;
+    if (!local || typeof local !== 'object' || typeof local['path'] !== 'string') continue;
+
+    const member: FederationMemberConfig = {
+      localPath: local['path'],
+      trust: 'readonly',
+      missing: fedObj['missing'] === 'error' ? 'error' : 'warn',
+      include: Array.isArray(fedObj['include']) ? (fedObj['include'] as string[]) : ['**/*.md'],
+    };
+    map.set(scope, member);
+  }
+  return map;
 }
 
 function parseManifestDocuments(rawDocs: unknown): ReadonlyMap<string, ManifestDocument> {

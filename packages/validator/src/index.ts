@@ -32,8 +32,19 @@ import { layoutDiagnostics, layoutExemptsFrontmatter } from './layout.js';
 import { freshnessDiagnostics } from './freshness.js';
 import type { ValidateInput, ValidateResult } from './index-types.js';
 
-export type { Config, ConfigLoadResult, ConfigDiagnostic, EolPolicy, LayoutRule, LayoutRequire, LayoutIntent, LayoutException, LifecycleConfig, LinksConfig, ManifestDocument, ManifestRelation } from './config.js';
-export { defaultConfig, loadConfig, defaultConfigIsValid, filesIncludeSpecified, resolveSeverity, vocabularyAllows, DEFAULT_MANIFEST_FILE } from './config.js';
+export type { Config, ConfigLoadResult, ConfigDiagnostic, EolPolicy, LayoutRule, LayoutRequire, LayoutIntent, LayoutException, LifecycleConfig, LinksConfig, ManifestDocument, ManifestRelation, FederationMemberConfig, FederationMemberPlan, ResolvedFederation, FederationResolution } from './config.js';
+export { defaultConfig, loadConfig, defaultConfigIsValid, validateConfigSchema, filesIncludeSpecified, resolveSeverity, vocabularyAllows, DEFAULT_MANIFEST_FILE, configToSchema, resolveFederations } from './config.js';
+export {
+  FEDERATION_SCOPE_PATTERN,
+  RESERVED_SCOPES,
+  foldAliasPrefix,
+  isExternalPath,
+  scopedPath,
+  filterUniverseByInclude,
+  applyExternalScopePolicy,
+  createFederatedIndex,
+  type FederatedMemberMount,
+} from './federation.js';
 export { layoutDiagnostics, layoutExemptsFrontmatter, type LayoutDiagnosticsParams } from './layout.js';
 export {
   MS_PER_DAY,

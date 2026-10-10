@@ -8,7 +8,8 @@
  * cannot be used yields MDL900 diagnostics and fails the run, same as `check`.
  */
 
-import { loadConfig } from '@mdlineage/validator';
+import { dirname } from 'node:path';
+import { loadConfig, resolveFederations } from '@mdlineage/validator';
 
 export interface ConfigValidateOptions {
   format: 'text' | 'json';
@@ -26,6 +27,17 @@ export function configValidate(options: ConfigValidateOptions): number {
     severity: d.severity,
     message: d.message,
   }));
+
+  if (loaded.config.federations.size > 0 && loaded.config.source) {
+    const fed = resolveFederations(loaded.config, dirname(loaded.config.source));
+    for (const d of fed.diagnostics) {
+      diagnostics.push({
+        code: d.code,
+        severity: d.severity,
+        message: d.message,
+      });
+    }
+  }
 
   if (options.format === 'json') {
     process.stdout.write(`${JSON.stringify({ source, diagnostics }, null, 2)}\n`);

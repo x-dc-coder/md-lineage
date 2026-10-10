@@ -121,6 +121,14 @@ export interface WorkspaceIndex {
   pathToId(path: DocPath): string | null;
   /** Every path claiming `id`, sorted; empty for unknown ids. */
   idToPaths(id: string): readonly DocPath[];
+  /**
+   * Optional repository-scoped id resolution: paths claiming `id` in the same
+   * repository `contextPath` belongs to. Absent on ordinary indexes (their
+   * idToPaths is already repository-scoped); the federation proxy implements it
+   * because a federated id namespace is per-repository (Phase 1: bare ids never
+   * resolve across federation boundaries).
+   */
+  idToPathsIn?(id: string, contextPath: DocPath): readonly DocPath[];
   ids(): IterableIterator<string>;
   entryOf(path: DocPath): DocEntry | null;
   /** Paths whose relations point at `id`; empty for unknown ids. */

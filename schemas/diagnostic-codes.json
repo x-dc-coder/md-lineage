@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://mdlineage.dev/schemas/diagnostic-codes.json",
   "title": "MDLineage diagnostic code registry",
-  "description": "Machine-readable registry of MDLxxx diagnostic codes. Kept in lockstep with docs/remark-language-server-solution.md §8.1: no code may be invented here. Layers follow the five-layer rule stack of that document (§4). Severity defaults follow §8.2: parse failure, schema failure, duplicate ID, invalid target, and forbidden relations are errors; missing recommended reason, deprecated-document references, and suspicious relations are warnings; migration and supplemental-metadata suggestions are information; low-impact formatting is hint. Codes are stable identifiers — messages may improve, codes and severities do not change without a schema version bump.",
+  "description": "Machine-readable registry of MDLxxx diagnostic codes. Kept in lockstep with docs/架构设计/统一语言服务设计.md §8.1: no code may be invented here. Layers follow the five-layer rule stack of that document (§4). Severity defaults follow §8.2: parse failure, schema failure, duplicate ID, invalid target, and forbidden relations are errors; missing recommended reason, deprecated-document references, and suspicious relations are warnings; migration and supplemental-metadata suggestions are information; low-impact formatting is hint. Codes are stable identifiers — messages may improve, codes and severities do not change without a schema version bump.",
   "registryVersion": 1,
-  "sourceOfTruth": "docs/remark-language-server-solution.md §8.1 (initial codes) and §8.2 (severity defaults)",
+  "sourceOfTruth": "docs/架构设计/统一语言服务设计.md §8.1 (initial codes) and §8.2 (severity defaults)",
   "codes": [
     {
       "code": "MDL001",
@@ -201,6 +201,27 @@
       "severity": "warning",
       "message": "Document is stale",
       "description": "Document has not been updated within the configured staleAfterDays threshold. Only active when staleAfterDays is a positive integer. Clock priority: updated_at → created_at → Git batch fallback."
+    },
+    {
+      "code": "MDL901",
+      "layer": "config",
+      "severity": "error",
+      "message": "Federation declaration forms a cycle",
+      "description": "The federations graph closes a loop (A federates B while B, directly or transitively, federates A, or a member federates the home repository). Detected by DFS at configuration load; the run refuses to start and falls back to the default configuration."
+    },
+    {
+      "code": "MDL902",
+      "layer": "config",
+      "severity": "error",
+      "message": "Federated member repository is missing",
+      "description": "A federations entry's local.path does not exist. Severity follows the member's missing key: error fails the run (config falls back to defaults); warn (the default) skips the member and reports a warning."
+    },
+    {
+      "code": "MDL903",
+      "layer": "config",
+      "severity": "error",
+      "message": "Federated member mount alias conflicts",
+      "description": "Two members fold to the same (or segment-prefixed) physical alias prefix, an alias collides with a top-level directory of the home repository, the member root resolves at/above the home root, or a scope name is declared twice across the federation closure."
     }
   ],
   "reservedRanges": [
@@ -226,7 +247,7 @@
       "range": "MDL9xx",
       "layer": "config",
       "severity": "error",
-      "description": "RESERVED for configuration or internal state: unparseable mdlineage.config.yaml, a schemaFile that does not exist or fails to load, or validator-internal errors. Codes pending; severity defaults to error because integrity failures cannot be downgraded to hint (§8.2)."
+      "description": "MDL901–903 assigned (federation configuration); further codes pending."
     },
     {
       "range": "MDL6xx",

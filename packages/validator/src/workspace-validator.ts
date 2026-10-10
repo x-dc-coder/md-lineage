@@ -46,6 +46,10 @@ import { checkHostLink } from './host-links.js';
 /** A read-only empty neighbour list, reused for every node without edges. */
 const EMPTY_PATHS: readonly string[] = Object.freeze([]);
 
+function idsFor(index: WorkspaceIndex, id: string, contextPath: DocPath): readonly DocPath[] {
+  return index.idToPathsIn ? index.idToPathsIn(id, contextPath) : index.idToPaths(id);
+}
+
 /** Diagnostics carrying the file they belong to: the workspace report unit. */
 export interface WorkspaceDiagnostic extends Diagnostic {
   /** Path of the document the diagnostic reports, as keyed in the index. */
@@ -153,7 +157,7 @@ function byReportOrder(a: WorkspaceDiagnostic, b: WorkspaceDiagnostic): number {
  */
 function mdl301(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
   if (entry.id === null) return [];
-  const all = index.idToPaths(entry.id);
+  const all = idsFor(index, entry.id, entry.path);
   if (all.length < 2) return [];
   if (all.indexOf(entry.path) <= 0) return []; // the first claimant is canonical
 
@@ -186,7 +190,7 @@ function mdl302(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
   for (let i = 0; i < entry.relations.length; i++) {
     const rel = entry.relations[i];
     if (!rel) continue;
-    if (index.idToPaths(rel.target).length > 0) continue;
+    if (idsFor(index, rel.target, entry.path).length > 0) continue;
     const where = entry.offsets.relationStart(i) ?? entry.offsets.mdlineageStart;
     out.push(
       build('MDL302', `Relation target does not exist: ${rel.target}`, entry, where, config, {
@@ -213,7 +217,7 @@ function mdl306(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
     const rel = entry.relations[i];
     if (!rel) continue;
     if (!config.lifecycle.blockingRelations.includes(rel.type)) continue;
-    const targetPaths = index.idToPaths(rel.target);
+    const targetPaths = idsFor(index, rel.target, entry.path);
     if (targetPaths.length === 0) continue;
 
     for (const targetPath of targetPaths) {
@@ -275,7 +279,7 @@ function mdlSelfReference(entry: DocEntry, index: WorkspaceIndex, config: Config
     if (config.relations[rel.type]?.selfReference !== 'forbidden') continue;
     // Only a target that resolves to THIS document is a self-reference; a
     // dangling one is MDL302, and a target resolving elsewhere is not it.
-    const targets = index.idToPaths(rel.target);
+    const targets = idsFor(index, rel.target, entry.path);
     if (!targets.includes(entry.path)) continue;
     const where = entry.offsets.relationStart(i) ?? entry.offsets.mdlineageStart;
     out.push(
@@ -374,7 +378,7 @@ function mdl305(index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
       const edges: string[] = [];
       for (const rel of entry.relations) {
         if (rel.type !== type) continue;
-        for (const targetPath of index.idToPaths(rel.target)) {
+        for (const targetPath of idsFor(index, rel.target, entry.path)) {
           const targetId = index.pathToId(targetPath);
           if (targetId !== null) edges.push(targetId);
         }
@@ -682,7 +686,7 @@ function mdl402(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
     if (typeof rel.evidence !== 'string' || !rel.evidence.startsWith('#')) continue;
     const anchor = rel.evidence.slice(1);
     if (anchor === '') continue;
-    const targets = index.idToPaths(rel.target);
+    const targets = idsFor(index, rel.target, entry.path);
     if (targets.length !== 1) continue;
     const firstTarget = targets[0];
     if (!firstTarget) continue;

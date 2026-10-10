@@ -122,6 +122,9 @@ const LAYERS: Readonly<Record<string, DiagnosticLayer>> = {
   MDL601: 'eol-scan',
   MDL602: 'eol-scan',
   MDL801: 'policy-layout',
+  MDL901: 'config',
+  MDL902: 'config',
+  MDL903: 'config',
 };
 
 /** Layer of a registered code; undefined for unregistered codes. */

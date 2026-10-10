@@ -23,7 +23,7 @@ import { parseArgs } from 'node:util';
 import { cwd as processCwd } from 'node:process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { resolve, relative } from 'node:path';
+import { resolve, relative, dirname } from 'node:path';
 import {
   checkFiles,
   renderText,
@@ -32,7 +32,7 @@ import {
   type CheckResult,
   type CheckOptions,
 } from './check.js';
-import { validateDocumentSync, loadConfig, stripBom } from '@mdlineage/validator';
+import { validateDocumentSync, loadConfig, defaultConfig, resolveFederations, stripBom, type Config, type ResolvedFederation } from '@mdlineage/validator';
 import { renderSarif } from './sarif.js';
 import { expandMarkdownPaths, UsageError, type ExpandedPath, type DiscoveryOptions } from './paths.js';
 import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from './git.js';
@@ -99,6 +99,7 @@ Options:
   --no-ignore                 Do not ignore files matched by .gitignore
   --exclude <pattern>         Extra ignore pattern (repeatable)
   --no-incremental            Validate each file independently (no workspace pass)
+  --no-federation             Skip federated members (home workspace only)
   --no-baseline               Ignore the committed baseline (report accepted debt)
   --force                     baseline update: write despite an unreadable baseline
   --report-only               baseline update: print the change set, write nothing
@@ -149,6 +150,8 @@ interface ParsedArgs {
     exclude?: string[];
     incremental?: boolean;
     'no-incremental'?: boolean;
+    federation?: boolean;
+    'no-federation'?: boolean;
     'no-baseline'?: boolean;
     frail?: boolean;
     force?: boolean;
@@ -188,6 +191,8 @@ function readArgs(argv: string[]): ParsedArgs {
       // `--no-incremental` arrives as `--incremental=false` the same way.
       incremental: { type: 'boolean' },
       'no-incremental': { type: 'boolean' },
+      federation: { type: 'boolean' },
+      'no-federation': { type: 'boolean' },
       frail: { type: 'boolean' },
       force: { type: 'boolean' },
       'no-baseline': { type: 'boolean' },
@@ -312,6 +317,7 @@ export async function main(argv: string[]): Promise<number> {
     // `--incremental` is on by default; `--no-incremental` (or
     // `--incremental=false`) turns the workspace pass off.
     const incremental = parsed.values['no-incremental'] !== true && parsed.values.incremental !== false;
+    const noFederation = parsed.values['no-federation'] === true || parsed.values.federation === false;
     // A committed baseline is part of the repository's contract; `--no-baseline`
     // is the audit view that reports the debt it accepts.
     const noBaseline = parsed.values['no-baseline'] === true;
@@ -321,9 +327,9 @@ export async function main(argv: string[]): Promise<number> {
       // `--untracked` defaults on; `--no-untracked` (or `--untracked=false`)
       // turns it off.
       const untracked = parsed.values['no-untracked'] !== true && parsed.values.untracked !== false;
-      return await runChanged({ format, cwd, paths, exclude, config, untracked, incremental, frail, noBaseline, noIgnore });
+      return await runChanged({ format, cwd, paths, exclude, config, untracked, incremental, noFederation, frail, noBaseline, noIgnore });
     }
-    return await runPaths({ format, cwd, paths, exclude, config, incremental, frail, noBaseline, noIgnore });
+    return await runPaths({ format, cwd, paths, exclude, config, incremental, noFederation, frail, noBaseline, noIgnore });
   } catch (error) {
     if (error instanceof UsageError) {
       process.stderr.write(`mdlineage: ${error.message}\n`);
@@ -346,6 +352,7 @@ interface RunOptions {
   exclude: string[];
   config?: string;
   incremental: boolean;
+  noFederation?: boolean;
   frail: boolean;
   noBaseline: boolean;
   noIgnore?: boolean;
@@ -357,19 +364,10 @@ interface ChangedRunOptions extends RunOptions {
 
 /** `mdlineage check [paths...]`: expand, read, validate, report. */
 async function runPaths(options: RunOptions): Promise<number> {
-  const preloaded = loadConfig(options.config, options.config ? undefined : options.cwd);
-  const preloadedConfig = {
-    config: preloaded.config,
-    path: preloaded.config.source,
-    diagnostics: preloaded.diagnostics.map((d) => ({
-      code: d.code,
-      severity: d.severity,
-      message: d.message,
-    })),
-  };
+  const preloadedConfig = preResolveRunConfig(options.config, options.cwd, options.noFederation);
 
   const discoveryOptions: DiscoveryOptions = {
-    config: preloaded.config,
+    config: preloadedConfig.config,
     exclude: options.exclude,
     noIgnore: options.noIgnore,
   };
@@ -398,6 +396,41 @@ async function runPaths(options: RunOptions): Promise<number> {
   return emit(result, options);
 }
 
+/**
+ * Pre-resolve the run's config and federation exactly once. The resolution
+ * result (federation plus its diagnostics) is handed to checkFiles, which
+ * must not re-resolve it — a second pass would double the member loadConfig
+ * IO and would only be shielded from double-reporting by a (code, message)
+ * de-duplication key. On an error-severity resolution the config falls back
+ * to the built-in defaults (MDL901/902/903 refuse the run) but the
+ * diagnostics are kept so the user sees why.
+ */
+function preResolveRunConfig(
+  configArg: string | undefined,
+  cwd: string,
+  noFederation: boolean | undefined,
+): NonNullable<CheckOptions['preloadedConfig']> {
+  const preloaded = loadConfig(configArg, configArg ? undefined : cwd);
+  const diagnostics = preloaded.diagnostics.map((d) => ({
+    code: d.code,
+    severity: d.severity,
+    message: d.message,
+  }));
+  let config: Config = preloaded.config;
+  let federation: ResolvedFederation | null = null;
+  if (!noFederation && config.federations.size > 0) {
+    const declaringDir = config.source ? dirname(config.source) : cwd;
+    const fedRes = resolveFederations(config, declaringDir);
+    for (const d of fedRes.diagnostics) diagnostics.push({ code: d.code, severity: d.severity, message: d.message });
+    if (fedRes.diagnostics.some((d) => d.severity === 'error')) {
+      config = defaultConfig();
+    } else {
+      federation = fedRes.federation;
+    }
+  }
+  return { config, path: preloaded.config.source, diagnostics, federation };
+}
+
 function toCheckOptions(options: RunOptions): CheckOptions {
   return {
     format: options.format,
@@ -407,6 +440,7 @@ function toCheckOptions(options: RunOptions): CheckOptions {
     // run does (and a scoped run's report paths stay the caller's own spelling).
     baselineRoot: baselineRoot(options.cwd),
     noBaseline: options.noBaseline,
+    noFederation: options.noFederation,
     incremental: options.incremental,
     frail: options.frail,
     cwd: options.cwd,
@@ -446,19 +480,12 @@ async function runChanged(options: ChangedRunOptions): Promise<number> {
     }
   }
 
-  const preloaded = loadConfig(options.config, options.config ? undefined : options.cwd);
-  const preloadedConfig = {
-    config: preloaded.config,
-    path: preloaded.config.source,
-    diagnostics: preloaded.diagnostics.map((d) => ({
-      code: d.code,
-      severity: d.severity,
-      message: d.message,
-    })),
-  };
+  const preloadedConfig = preResolveRunConfig(options.config, options.cwd, options.noFederation);
+
   const checkOpts: CheckOptions = {
     ...toCheckOptions(options),
     preloadedConfig,
+    emitExternalReports: false,
   };
 
   const result = await checkFiles(files, checkOpts);

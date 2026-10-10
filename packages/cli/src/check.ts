@@ -15,17 +15,26 @@
  */
 
 import { readFileSync } from 'node:fs';
-import { resolve, relative, sep } from 'node:path';
+import { dirname, resolve, relative, sep } from 'node:path';
 import {
   validateDocumentSync,
   loadConfig,
+  defaultConfig,
   createWorkspaceIndex,
+  createFederatedIndex,
+  applyExternalScopePolicy,
+  filterUniverseByInclude,
+  isExternalPath,
+  resolveFederations,
+  type FederatedMemberMount,
   validateWorkspace,
   gitClocksForIndex,
   stripBom,
   diffAgainstBaseline,
+  scanWorkspaceUniverse,
   type Config,
   type Diagnostic,
+  type ResolvedFederation,
   type WorkspaceDiagnostic,
 } from '@mdlineage/validator';
 import type { ExpandedPath } from './paths.js';
@@ -106,12 +115,25 @@ export interface CheckResult {
 export interface CheckOptions {
   format?: 'text' | 'json' | 'sarif';
   configFile?: string;
-  /** Preloaded config to avoid duplicate loading. */
-  preloadedConfig?: { config: Config; diagnostics: any[]; path: string | null };
+  /**
+ * Preloaded config to avoid duplicate loading. `federation` carries the
+ * federation resolution already performed by the caller; when absent, this
+ * run re-resolves it (or skips it under `noFederation`).
+ */
+  preloadedConfig?: {
+    config: Config;
+    diagnostics: ConfigDiagnosticReport[];
+    path: string | null;
+    federation?: ResolvedFederation | null;
+  };
   /** Absolute directory the baseline file is searched from. */
   baselineRoot?: string;
   /** True to ignore a committed baseline and report every diagnostic. */
   noBaseline?: boolean;
+  /** True to skip federation assembly entirely (home-only run). */
+  noFederation?: boolean;
+  /** False to build the federated index but keep member diagnostics out of reports (--changed). */
+  emitExternalReports?: boolean;
   /**
    * False to skip the workspace pass and validate each file independently.
    *
@@ -163,11 +185,29 @@ export async function checkFiles(
   options: CheckOptions,
   others: readonly ExpandedPath[] = [],
 ): Promise<CheckResult> {
-  const { config, diagnostics: configDiagnostics, path: configPath } =
+  let { config, diagnostics: configDiagnostics, path: configPath } =
     options.preloadedConfig ?? loadRunConfig(options.configFile, options.cwd);
   const incremental = options.incremental ?? true;
   const reports: FileReport[] = [];
   const unreadable: UnreadableFile[] = [];
+
+  // Federation resolution happens once in the CLI (main.ts) and arrives via
+  // preloadedConfig.federation: its diagnostics already sit in configDiagnostics
+  // and a failed resolution handed us defaultConfig. This call site re-resolves
+  // only when the caller did not pre-resolve (no preloadedConfig).
+  let federation: ResolvedFederation | null;
+  const pre = options.preloadedConfig;
+  if (pre && pre.federation !== undefined) {
+    federation = pre.federation;
+  } else if (!options.noFederation && config.federations.size > 0) {
+    const declaringDir = configPath ? dirname(configPath) : options.cwd;
+    const fedRes = resolveFederations(config, declaringDir);
+    for (const diag of fedRes.diagnostics) configDiagnostics.push(diag);
+    federation = fedRes.diagnostics.some((d) => d.severity === 'error') ? null : fedRes.federation;
+    if (federation === null) config = defaultConfig();
+  } else {
+    federation = null;
+  }
 
   // The index only sees readable files, so its paths must line up with the
   // reports the caller reads: `asGiven` is the reporting key.
@@ -197,10 +237,24 @@ export async function checkFiles(
     for (const path of knownWorkspacePaths(options.cwd, { config, exclude: options.exclude })) {
       knownPaths.add(path);
     }
-    const index = createWorkspaceIndex(indexFiles, config, knownPaths);
-    const gitClocks = await gitClocksForIndex(index, options.cwd);
+    const homeIndex = createWorkspaceIndex(indexFiles, config, knownPaths);
+    let index = homeIndex;
+
+    if (federation && federation.members.length > 0) {
+      const mounts = new Map<string, FederatedMemberMount>();
+      for (const plan of federation.members) {
+        const universe = scanWorkspaceUniverse(plan.root, plan.config);
+        const filtered = filterUniverseByInclude(universe, plan.include);
+        const memberIdx = createWorkspaceIndex(filtered.documents, plan.config, filtered.knownPaths);
+        mounts.set(plan.scope, { scope: plan.scope, index: memberIdx, alias: plan.alias });
+      }
+      index = createFederatedIndex(homeIndex, mounts);
+    }
+
+    const gitClocks = await gitClocksForIndex(homeIndex, options.cwd);
     const baseline = loadRunBaseline(options);
-    const all = validateWorkspace(index, { gitClocks });
+    let all = validateWorkspace(index, { gitClocks });
+    all = applyExternalScopePolicy(all);
     // The validator owns the suppression predicate; the CLI only counts what it
     // dropped, so the two cannot drift on what "covered" means. Matching runs in
     // the baseline's own (repo-relative) path vocabulary, then the diagnostics
@@ -212,6 +266,13 @@ export async function checkFiles(
     const byPath = groupByPath(withReportPaths(reported, baseline, options.cwd));
     for (const path of read.keys()) {
       reports.push({ path, diagnostics: (byPath.get(path) ?? []).map(toJsonDiagnostic) });
+    }
+    if (federation && options.emitExternalReports !== false) {
+      for (const p of index.paths()) {
+        if (isExternalPath(p)) {
+          reports.push({ path: p, diagnostics: (byPath.get(p) ?? []).map(toJsonDiagnostic) });
+        }
+      }
     }
     const result = tally(
       reports,
@@ -267,6 +328,7 @@ function loadRunBaseline(options: CheckOptions): { loaded: LoadedBaseline; ancho
  */
 function toReportPath(path: string, anchor: string, cwd: string): string {
   if (!path) return path;
+  if (isExternalPath(path)) return path;
   const absolute = resolve(anchor, path);
   const root = resolve(cwd);
   if (absolute === root) return path;
@@ -312,6 +374,7 @@ function toBaselineKeyed(diag: WorkspaceDiagnostic, anchor: string, cwd: string)
  */
 function repoRelativeOf(path: string, anchor: string, cwd: string): string {
   if (!path) return path;
+  if (isExternalPath(path)) return path;
   const absolute = resolve(cwd, path);
   const root = resolve(anchor);
   if (!absolute.startsWith(root + sep) && absolute !== root) return path;
