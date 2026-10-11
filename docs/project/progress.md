@@ -30,12 +30,18 @@ Master status table for MDLineage. The product has four pillars (defined in `REA
 | Directory conventions: design finalization → implementation | P4 | 🟡 Open design | TBD | resolve 5 open questions in `dir-conventions.md`, then declarative `layout:` block | path–kind consistency enforced; every doc matches or carries exception | dir-conventions.md |
 | **Issue #4 Phase 1 — 声明式外部工作区接入与只读路由代理** | P1, P2 | ✅ Done (2026-10-11) | dev: grok-build (subagent); design: brief / Issue #4 | 声明式 `federations:` 配置段、DFS 闭包解析（MDL901 环路 / MDL902 缺失 / MDL903 别名冲突）、`createFederatedIndex` 只读路由代理（`@scope//` 规范坐标与物理别名折叠）、`WorkspaceIndex` 可选扩展 `idToPathsIn` 实现裸 ID 本仓隔离（MDL302 跨界保留）、退出码主权（外部错误封顶为 warning、跳过外部 MDL5xx/MDL801）、CLI `--no-federation` 标志 | 23 项测试全绿，全仓测试 729 tests / 110 suites 全绿，`check .` 零诊断，`baseline verify` 无漂移 | [CI run 38072528991](https://github.com/x-dc-coder/md-lineage/actions/runs/38072528991) + [Pack 38072528978](https://github.com/x-dc-coder/md-lineage/actions/runs/38072528978) green on commit `48aa402` |
 | **Issue #4 Phase 2 PR-a — `@scope//id` 信封寻址与跨仓语义解析** | P1, P2 | ✅ Done (2026-10-11) | dev: grok-build (subagent); design: brief / Issue #4 Phase 2 | 信封模式扩展（`@scope//id` 与 `@*//id`）、三级解析语义与 `resolveRelationTarget` 路由代理、MDL307（歧义 error）/ MDL308（缺员 hint）新诊断码、六处关系调用点信封升级、跨仓成环 scoped key 拓扑隔离 | 新增测试全绿，`check .` 零诊断，`baseline verify` 无漂移 | PR-a |
+| **Issue #4 Phase 2 PR-b — 跨仓拓扑守门、写守卫、LSP/MCP 联邦视野与反向边** | P1, P2 | ✅ Done (2026-10-11) | dev: grok-build (subagent); design: brief C / Issue #4 Phase 2 | MDL305 跨仓成环主权分级（home 参与环保持 error 锚定最小 home 路径；纯成员间环封顶 warning 锚定外部路径）、保留隐式作用域 `@home//` 路由主仓、代理反向边惰性派生 `referrersOf`、写守卫（`scopeOfPath` 拦截 fix/move，LSP rename 对成员文档只读拒付）、LSP 联邦集成（按 scope 路由 didOpen/didChange/didClose/didSave、外部诊断封顶、watchedFiles 忽略成员目录）、MCP 联邦集成（`validate_repository` 走联邦、`resolve_relation_target` 接受信封并返回仓根、`list_document_ids` 增加 `scope` 过滤） | T1-T22 新增测试全绿，全套用例全绿，`check .` 56 文件零诊断，`baseline verify` 23 无漂移 | PR-b |
 | Repository-wide analysis (dup concepts, contradictions, orphans, themes) | P1 | ⬜ Not started | TBD | batch analysis, topic clusters, evaluation sets | recall/precision targets | roadmap Phase 3 |
 
 ## Decision log
 
 | Date | Decision | Rationale |
 |---|---|---|
+| 2026-10-11 | MDL305 跨仓成环主权分级与锚定规则 | 涉及主仓文档的环路锚定于环内字典序最小的主仓路径，作为主仓 error 计入退出码；纯成员间环路锚定于字典序最小的成员 scoped 路径，经 applyExternalScopePolicy 封顶为 warning，不破坏主仓退出码 |
+| 2026-10-11 | 保留作用域 `@home//` 隐式路由主仓 | 外部成员仓若需反指主仓文档，可在联邦语境下通过 `@home//id` 精确解析到主仓索引；独立校验时由于 home 未声明自动诚实报 MDL302；配置 schema 的 scope 规则保留 home |
+| 2026-10-11 | 反向边 `referrersOf` 惰性派生 | 避免手动维护外部 overlay 反指映射导致的与 live 索引漂移，查询 scoped target 时现扫 home 与各挂载成员索引 live relations，性能稳定且无缓存一致性失效漏洞 |
+| 2026-10-11 | 成员仓 trust: readonly 写守卫边界与 LSP rename 绝对拦截 | 成员仓作为外部只读引用面，任何写操作（CLI fix/move、LSP rename）一律前置断言拒绝；LSP rename 遇到被外部成员引用的 ID 同样拒绝，避免下发外部 WorkspaceEdit |
+| 2026-10-11 | LSP 对成员仓外部磁盘变更的 Phase 2 边界 | LSP watchedFiles 仅监听主仓内部文件变动，忽略外部成员目录；成员文件热更新依靠编辑器的 didOpen/didChange/didSave 事件流，外部第三方工具修改成员仓靠重载或重启全量 rescan 同步 |
 | 2026-10-11 | 跨仓关系信封寻址与三级解析语义（bare / `@scope//` / `@*//`） | bare 保持本仓隔离；`@scope//` 精确路由指定成员；`@*//` 全联邦搜索；未知 scope 保持 MDL302，多义报告 MDL307，缺失成员报告 MDL308 hint |
 | 2026-10-11 | MDL307 / MDL308 纳入 `mdlineage-config.schema.json` diagnostics 可覆盖枚举 | MDL307/MDL308 作为工作区语义层代码，待遇跟随同层 MDL301–306，允许项目按需调整 severity |
 | 2026-10-11 | 信封 scope 段字符集收紧至 `^[a-z][a-z0-9-]*$` 与联邦配置命名规则一致 | 确保信封 scope 拼写规范与 `FEDERATION_SCOPE_PATTERN` 完全对齐，数字开头的非法 scope 模式在单文档 schema 层拦截（MDL103） |

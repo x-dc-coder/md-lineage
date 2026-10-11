@@ -29,6 +29,7 @@
  */
 
 import { resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { readFileSync } from 'node:fs';
 import type { Connection } from 'vscode-languageserver';
 import type { DidChangeWatchedFilesParams, PublishDiagnosticsParams } from 'vscode-languageserver-protocol';
@@ -50,11 +51,21 @@ import {
   stripBom,
   scanWorkspaceUniverse,
   BASELINE_FILE_NAME,
+  resolveFederations,
+  createFederatedIndex,
+  filterUniverseByInclude,
+  applyExternalScopePolicy,
+  scopeOfPath,
+  scopedPath,
   type Config,
   type Baseline,
   type WorkspaceIndex,
   type DocPath,
   type GitClock,
+  type FederatedMemberMount,
+  type ResolvedFederation,
+  type FederationMemberPlan,
+  type ConfigDiagnostic,
 } from '@mdlineage/validator';
 import { toLspDiagnostic } from './diagnostics.js';
 import type { ServerHooks } from './hooks.js';
@@ -69,8 +80,7 @@ import {
   toRootDirectory,
   MAX_DOCUMENT_BYTES,
 } from './workspace.js';
-import { relative } from 'node:path';
-import { sep } from 'node:path';
+import { relative, sep, dirname, isAbsolute } from 'node:path';
 
 export { toLspDiagnostic, severityToLsp } from './diagnostics.js';
 export { diagnosticRange, toLspRange as rangeToLsp } from './position.js';
@@ -155,6 +165,10 @@ export interface ServerContext {
    * response reads are fresh.
    */
   validateNow(paths: ReadonlyArray<DocPath>): void;
+  /** Map document URI to index key (home relative or federated scoped path). */
+  pathToKey?(uri: string): DocPath | null;
+  /** Map index key (home relative or federated scoped path) to document URI. */
+  uriOfKey?(path: DocPath): string;
 }
 
 /** The running server's handles, for tests and for the CLI's stdio entry. */
@@ -201,7 +215,11 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   // §10.3's first step is a scan; it is deferred so `initialize` can answer the
   // client once it is done instead of blocking the connection's reader for a
   // whole repository.
-  let index = createWorkspaceIndex(new Map(), config);
+  let homeIndex: WorkspaceIndex = createWorkspaceIndex(new Map(), config);
+  let index: WorkspaceIndex = homeIndex;
+  let mounts = new Map<string, FederatedMemberMount & { readonly plan: FederationMemberPlan }>();
+  let federationPlan: ResolvedFederation | null = null;
+  let federationDiagnostics: ConfigDiagnostic[] = [];
   let gitClocks: ReadonlyMap<DocPath, GitClock> | undefined;
   let scanPromise: Promise<void> | null = null;
   let scanned = false;
@@ -218,18 +236,44 @@ export function createServer(connection: Connection, options: ServerOptions = {}
    * means a new index: the scan that follows repopulates it from the same root.
    */
   function reconfigure(root: string): void {
-    if (options.configFile !== undefined) return;
-    const reloaded = loadConfig(undefined, root);
+    const reloaded = loadConfig(options.configFile, options.configFile ? undefined : root);
     baseline = loadServerBaseline(root);
-    if (reloaded.config.source === config.source) return;
+    // 固定 configFile 场景或同一 config 来源时保持原配置以避免漂移；
+    // 但在初次装配或 config.source 变化时重新解析联邦与重建索引。
+    if (options.configFile !== undefined && config.source !== null && reloaded.config.source === config.source) {
+      return;
+    }
+    if (reloaded.config.source !== null && reloaded.config.source === config.source && homeIndex.size > 0) {
+      return;
+    }
     config = reloaded.config;
-    index = createWorkspaceIndex(new Map(), config);
+    homeIndex = createWorkspaceIndex(new Map(), config);
+    index = homeIndex;
+
+    const declaringDir = reloaded.config.source ? dirname(reloaded.config.source) : root;
+    const fed = resolveFederations(reloaded.config, declaringDir);
+    federationDiagnostics = fed.diagnostics.slice();
+    if (fed.diagnostics.some((d) => d.severity === 'error')) {
+      // MDL901/902(error)/903: fallback to home-only index
+      federationPlan = null;
+      mounts.clear();
+      index = homeIndex;
+    } else {
+      federationPlan = fed.federation;
+    }
   }
 
   const documents = new TextDocuments(TextDocument);
   documents.listen(connection);
   documents.onDidChangeContent((event) => {
-    const path = indexPathOfUri(effectiveRoot(), event.document.uri);
+    const abs = uriToPath(event.document.uri);
+    const m = abs ? mountOf(abs) : null;
+    let path: DocPath | null = null;
+    if (m) {
+      path = scopedPath(m.scope, m.memberPath) as DocPath;
+    } else {
+      path = indexPathOfUri(effectiveRoot(), event.document.uri);
+    }
     if (path === null) return;
     scheduleValidation(path);
   });
@@ -237,15 +281,55 @@ export function createServer(connection: Connection, options: ServerOptions = {}
     // §10.3: discard the unsaved overlay and revalidate against the disk
     // snapshot, so a closed dirty buffer stops reporting what the file no longer
     // holds.
-    const path = indexPathOfUri(effectiveRoot(), event.document.uri);
+    const abs = uriToPath(event.document.uri);
+    const m = abs ? mountOf(abs) : null;
+    let path: DocPath | null = null;
+    if (m) {
+      path = scopedPath(m.scope, m.memberPath) as DocPath;
+    } else {
+      path = indexPathOfUri(effectiveRoot(), event.document.uri);
+    }
     if (path === null) return;
+
+    if (m) {
+      const mount = mounts.get(m.scope);
+      if (!mount) return;
+      const onDisk = readDocument(resolve(mount.plan.root, m.memberPath));
+      const targetIndex = mount.index;
+      const oldEntry = targetIndex.entryOf(m.memberPath as DocPath);
+      const oldId = oldEntry?.id;
+      if (onDisk === null) {
+        const { affected } = removeFile(targetIndex, m.memberPath as DocPath);
+        const toPub = new Set<DocPath>([path]);
+        for (const p of affected) toPub.add(scopedPath(m.scope, p) as DocPath);
+        if (oldId) {
+          for (const ref of index.referrersOf(scopedPath(m.scope, oldId))) toPub.add(ref);
+        }
+        publishAffected(toPub);
+        return;
+      }
+      const { affected } = updateFile(targetIndex, m.memberPath as DocPath, onDisk);
+      const newEntry = targetIndex.entryOf(m.memberPath as DocPath);
+      const newId = newEntry?.id;
+      const toPub = new Set<DocPath>([path]);
+      for (const p of affected) toPub.add(scopedPath(m.scope, p) as DocPath);
+      if (oldId) {
+        for (const ref of index.referrersOf(scopedPath(m.scope, oldId))) toPub.add(ref);
+      }
+      if (newId && newId !== oldId) {
+        for (const ref of index.referrersOf(scopedPath(m.scope, newId))) toPub.add(ref);
+      }
+      publishAffected(toPub);
+      return;
+    }
+
     const onDisk = readDocument(toAbsolutePath(effectiveRoot(), path));
     if (onDisk === null) {
-      const { affected } = removeFile(index, path);
+      const { affected } = removeFile(homeIndex, path);
       publishAffected(new Set([...affected, path]));
       return;
     }
-    const { affected } = updateFile(index, path, onDisk);
+    const { affected } = updateFile(homeIndex, path, onDisk);
     publishAffected(new Set([...affected, path]));
   });
 
@@ -258,9 +342,37 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   // NOTIFICATIONS on `initialized`, when the connection is live.
   const startupDiagnostics = loaded.diagnostics.slice();
 
+  function mountOf(absPath: string): { scope: string; memberPath: string } | null {
+    for (const [scope, m] of mounts) {
+      const rel = relative(m.plan.root, absPath);
+      if (rel !== '' && !rel.startsWith('..') && !isAbsolute(rel)) {
+        return { scope, memberPath: rel.split(sep).join('/') };
+      }
+    }
+    return null;
+  }
+
+  function uriOfKey(path: DocPath): string {
+    const match = /^@([a-z0-9][a-z0-9-]*)\/\/(.+)$/.exec(path);
+    if (!match) return pathToUri(path, effectiveRoot());
+    const scope = match[1];
+    const memberRel = match[2];
+    if (!scope || !memberRel) return pathToUri(path, effectiveRoot());
+    const m = mounts.get(scope);
+    return m ? pathToFileURL(resolve(m.plan.root, memberRel)).href : pathToUri(path, effectiveRoot());
+  }
+
   function resolveText(path: DocPath): string | null {
-    const document = documents.get(pathToUri(path, effectiveRoot()));
-    return document ? document.getText() : readDocument(toAbsolutePath(effectiveRoot(), path));
+    const uri = uriOfKey(path);
+    const document = documents.get(uri);
+    if (document) return document.getText();
+    const match = /^@([a-z0-9][a-z0-9-]*)\/\/(.+)$/.exec(path);
+    if (!match) return readDocument(toAbsolutePath(effectiveRoot(), path));
+    const scope = match[1];
+    const memberRel = match[2];
+    if (!scope || !memberRel) return null;
+    const m = mounts.get(scope);
+    return m ? readDocument(resolve(m.plan.root, memberRel)) : null;
   }
 
   /**
@@ -300,7 +412,38 @@ export function createServer(connection: Connection, options: ServerOptions = {}
         degradeLarge(path);
         continue;
       }
-      const { affected } = updateFile(index, path, text);
+
+      const match = /^@([a-z0-9][a-z0-9-]*)\/\/(.+)$/.exec(path);
+      if (match) {
+        const scope = match[1];
+        const memberRel = match[2];
+        const mount = scope ? mounts.get(scope) : undefined;
+        if (scope && memberRel && mount) {
+          const oldEntry = mount.index.entryOf(memberRel as DocPath);
+          const oldId = oldEntry?.id;
+          const { affected } = updateFile(mount.index, memberRel as DocPath, text);
+          const newEntry = mount.index.entryOf(memberRel as DocPath);
+          const newId = newEntry?.id;
+          toPublish.add(path);
+          for (const p of affected) toPublish.add(scopedPath(scope, p) as DocPath);
+          if (oldId) {
+            for (const ref of index.referrersOf(scopedPath(scope, oldId))) toPublish.add(ref);
+          }
+          if (newId && newId !== oldId) {
+            for (const ref of index.referrersOf(scopedPath(scope, newId))) toPublish.add(ref);
+          }
+          // Cross-repository affected: notify any home docs pointing at oldId or newId
+          for (const p of homeIndex.paths()) {
+            const entry = homeIndex.entryOf(p);
+            if (entry?.relations.some((r) => (newId && r.target === scopedPath(scope, newId)) || (oldId && r.target === scopedPath(scope, oldId)))) {
+              toPublish.add(p);
+            }
+          }
+          continue;
+        }
+      }
+
+      const { affected } = updateFile(homeIndex, path, text);
       toPublish.add(path);
       for (const p of affected) toPublish.add(p);
     }
@@ -323,10 +466,11 @@ export function createServer(connection: Connection, options: ServerOptions = {}
   }
 
   function publishOne(path: DocPath): void {
-    const uri = pathToUri(path, effectiveRoot());
+    const uri = uriOfKey(path);
     const text = resolveText(path);
     const lines = text === null ? [] : text.split(/\r\n|\r|\n/);
-    const diagnostics =
+    const isMember = scopeOfPath(path) !== 'home';
+    const rawDiags =
       text === null || isLarge(text)
         ? []
         : validateWorkspace(index, { paths: [path], baseline: toBaselineSuppression(path), gitClocks })
@@ -336,8 +480,9 @@ export function createServer(connection: Connection, options: ServerOptions = {}
             // other documents. Positioning one here would borrow this document's
             // line table for a range in another file, so only this document's
             // own diagnostics are published.
-            .filter((diag) => diag.path === path)
-            .map((diag) => toLspDiagnostic(diag, lines));
+            .filter((diag) => diag.path === path);
+    const policyDiags = isMember ? applyExternalScopePolicy(rawDiags) : rawDiags;
+    const diagnostics = policyDiags.map((diag) => toLspDiagnostic(diag, lines));
     const params: PublishDiagnosticsParams = { uri, diagnostics };
     counters.diagnosticsPublished++;
     void connection.sendNotification('textDocument/publishDiagnostics', params);
@@ -490,7 +635,7 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
   connection.onInitialized(() => {
     // Surface startup config diagnostics now: the connection is live, and a
     // notification (not showMessageRequest) needs no client round-trip.
-    for (const message of startupDiagnostics) {
+    for (const message of [...startupDiagnostics, ...federationDiagnostics]) {
       void connection.sendNotification('window/showMessage', {
         type: 2,
         message: `mdlineage: ${message.code} ${message.message}`,
@@ -514,7 +659,14 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
     // §10.3: the overlay becomes the committed snapshot. The index already holds
     // the same text (the change notifications led it), so this is a refresh that
     // also republishes the file's referrers.
-    const path = indexPathOfUri(effectiveRoot(), event.textDocument.uri);
+    const abs = uriToPath(event.textDocument.uri);
+    const m = abs ? mountOf(abs) : null;
+    let path: DocPath | null = null;
+    if (m) {
+      path = scopedPath(m.scope, m.memberPath) as DocPath;
+    } else {
+      path = indexPathOfUri(effectiveRoot(), event.textDocument.uri);
+    }
     if (path === null) return;
     validateNow([path]);
   });
@@ -528,10 +680,16 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
   });
 
   function handleWatchedFile(change: { uri: string; type: number }): void {
+    const abs = uriToPath(change.uri);
+    if (abs && mountOf(abs)) {
+      // 客户端不保证 watch rootUri 之外的路径（成员仓在主仓之外）；
+      // 成员文件的热更新经由 didOpen/didChange/didSave，外部磁盘变更依赖重启（或下次 initialize）。
+      return;
+    }
     const path = indexPathOfUri(effectiveRoot(), change.uri);
     if (path === null || !isMarkdownUri(change.uri)) return;
     if (change.type === 3 /* Deleted */) {
-      const { affected } = removeFile(index, path);
+      const { affected } = removeFile(homeIndex, path);
       publishAffected(new Set([...affected, path]));
       return;
     }
@@ -541,7 +699,7 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
     // The same degradation as every other entry point: a file an external
     // change grew past the threshold is indexed but not validated.
     if (isLarge(text)) degradeLarge(path);
-    const { affected } = updateFile(index, path, text);
+    const { affected } = updateFile(homeIndex, path, text);
     publishAffected(new Set([...affected, path]));
   }
 
@@ -561,7 +719,7 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
     scanPromise = new Promise<void>((fulfill) => {
       setImmediate(async () => {
         const universe = scanWorkspaceUniverse(root, config);
-        index = createWorkspaceIndex(new Map(), config, universe.knownPaths);
+        homeIndex = createWorkspaceIndex(new Map(), config, universe.knownPaths);
         for (const [path, content] of universe.documents) {
           if (documents.get(pathToUri(path, root)) !== undefined) continue;
           // §13's degradation applies to the scan too, not just to
@@ -571,9 +729,41 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
           // Major-3). The document is still indexed — completion, definition
           // and symbol queries read it — only its expensive validation waits.
           if (isLarge(content)) degradeLarge(path);
-          updateFile(index, path, content);
+          updateFile(homeIndex, path, content);
         }
-        gitClocks = await gitClocksForIndex(index, root);
+
+        mounts.clear();
+        if (federationPlan && federationDiagnostics.every((d) => d.severity !== 'error')) {
+          for (const memberPlan of federationPlan.members) {
+            const memberUniverse = scanWorkspaceUniverse(memberPlan.root, memberPlan.config);
+            const filteredUniverse = filterUniverseByInclude(memberUniverse, memberPlan.include);
+            const memberIndex = createWorkspaceIndex(
+              filteredUniverse.documents,
+              memberPlan.config,
+              filteredUniverse.knownPaths,
+            );
+            mounts.set(memberPlan.scope, {
+              plan: memberPlan,
+              index: memberIndex,
+              alias: memberPlan.alias,
+              scope: memberPlan.scope,
+            });
+          }
+        }
+
+        // Assemble federated proxy if federation plan exists
+        index =
+          federationPlan && mounts.size > 0
+            ? createFederatedIndex(
+                homeIndex,
+                mounts,
+                { missingScopes: new Set(federationPlan.missingScopes) },
+              )
+            : homeIndex;
+
+        // Home repository git clocks only: member repos do not run git subprocesses
+        // because external freshness diagnostics (MDL801) are dropped by sovereignty policy.
+        gitClocks = await gitClocksForIndex(homeIndex, root);
         scanned = true;
         // The scan itself is silent (no per-file publish during indexing), so
         // once it lands the client gets one workspace-wide pass: without this,
@@ -610,6 +800,13 @@ function legacyRoot(params: { rootUri?: string | null; rootPath?: string | null 
     },
     resolveText,
     validateNow,
+    pathToKey(uri: string): DocPath | null {
+      const abs = uriToPath(uri);
+      const m = abs ? mountOf(abs) : null;
+      if (m) return scopedPath(m.scope, m.memberPath) as DocPath;
+      return indexPathOfUri(effectiveRoot(), uri);
+    },
+    uriOfKey,
   };
   // §10.2's handlers register against the live context. The default hooks carry
   // them; a caller passing its own hooks is the escape hatch for a host that

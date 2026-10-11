@@ -68,6 +68,7 @@ import {
   Slugger,
   type Config,
   type DocPath,
+  scopeOfPath,
 } from '@mdlineage/validator';
 import type { ServerContext } from './server.js';
 import { characterOf } from './position.js';
@@ -128,6 +129,10 @@ export function registerLanguageFeatures(context: ServerContext): void {
  * one document's diagnostics identical across every entry point (§14.4).
  */
 function requestPath(context: ServerContext, params: { textDocument: { uri: string } }): DocPath | null {
+  if (context.pathToKey) {
+    const key = context.pathToKey(params.textDocument.uri);
+    if (key !== null) return key;
+  }
   return indexPathOfUri(context.rootPath, params.textDocument.uri);
 }
 
@@ -529,8 +534,8 @@ function wordAt(text: string, position: LspPosition): string | null {
   // is how a developer places it after typing the value in full.
   const left = line.slice(0, at);
   const right = line.slice(at);
-  const startMatch = /[A-Za-z0-9._-]*$/.exec(left);
-  const endMatch = /^[A-Za-z0-9._-]*/.exec(right);
+  const startMatch = /[A-Za-z0-9._/@*-]*$/.exec(left);
+  const endMatch = /^[A-Za-z0-9._/@*-]*/.exec(right);
   const word = `${startMatch ? startMatch[0] : ''}${endMatch ? endMatch[0] : ''}`;
   return word.length > 0 ? word : null;
 }
@@ -542,9 +547,9 @@ function wordRange(text: string, position: LspPosition): LspRange | null {
   const line = lines[position.line]!;
   const at = Math.min(position.character, line.length);
   const left = line.slice(0, at);
-  const startMatch = /[A-Za-z0-9._-]*$/.exec(left);
+  const startMatch = /[A-Za-z0-9._/@*-]*$/.exec(left);
   const start = startMatch ? at - startMatch[0].length : at;
-  const endMatch = /^[A-Za-z0-9._-]*/.exec(line.slice(at));
+  const endMatch = /^[A-Za-z0-9._/@*-]*/.exec(line.slice(at));
   const end = at + (endMatch ? endMatch[0].length : 0);
   if (end === start) return null;
   return {
@@ -570,7 +575,17 @@ function definition(context: ServerContext, params: DefinitionParams): Location 
 
   if (cursor.field === 'target' || cursor.field === 'id') {
     // A `target:` value jumps to the target document's id declaration line.
-    const locations = idDeclarationLocations(context, word);
+    let paths: readonly DocPath[] = [];
+    const federatedIndex = context.index as { resolveRelationTarget?: (t: string, p: DocPath) => { kind: string; paths?: readonly DocPath[] } };
+    if (cursor.field === 'target' && typeof federatedIndex.resolveRelationTarget === 'function') {
+      const res = federatedIndex.resolveRelationTarget(word, path);
+      if (res.kind === 'resolved' && res.paths) {
+        paths = res.paths;
+      }
+    } else {
+      paths = context.index.idToPaths(word);
+    }
+    const locations = idDeclarationLocationsFromPaths(context, paths);
     return locations.length > 0 ? locations : null;
   }
   if (cursor.field === 'evidence') {
@@ -584,9 +599,9 @@ function definition(context: ServerContext, params: DefinitionParams): Location 
 }
 
 /** Where `id` is declared, in every document that claims it. */
-function idDeclarationLocations(context: ServerContext, id: string): Location[] {
+function idDeclarationLocationsFromPaths(context: ServerContext, targetPaths: readonly DocPath[]): Location[] {
   const out: Location[] = [];
-  for (const targetPath of context.index.idToPaths(id)) {
+  for (const targetPath of targetPaths) {
     const entry = context.index.entryOf(targetPath);
     if (!entry) continue;
     const lineMap = { lineStarts: lineStartTableOfEntry(entry), length: entry.lineMap.length };
@@ -775,6 +790,30 @@ function rename(context: ServerContext, params: RenameParams): WorkspaceEdit | n
   if (!ID_PATTERN.test(params.newName)) {
     throw new ResponseError(ErrorCodes.InvalidParams, `Invalid mdlineage id '${params.newName}': must match ^[a-z0-9]+(?:[.-][a-z0-9]+)*$`);
   }
+
+  // 联邦只读守卫：成员文档的 id 声明不可改（其所在仓不是本仓的写面）。
+  const ownScope = scopeOfPath(path);
+  if (ownScope !== 'home') {
+    throw new ResponseError(
+      ErrorCodes.InvalidParams,
+      `cannot rename: '${path}' belongs to federated member '${ownScope}' (trust: readonly)`,
+    );
+  }
+  // 反向引用里的外部文档同样不可编辑：WorkspaceEdit 一旦携带外部 URI，客户端会把编辑写进只读成员仓。
+  // 成员文档引用 home 文档只能通过 @home//oldId 或 @*//oldId 信封拼写；
+  // 成员仓内的裸 id 引用只解析本仓，与 home 的同名 id 无关，因此无需也不应查询裸 id。
+  const externalRefCandidateSet = new Set<DocPath>([
+    ...context.index.referrersOf(`@home//${oldId}`),
+    ...context.index.referrersOf(`@*//${oldId}`),
+  ]);
+  const externalReferrers = [...externalRefCandidateSet].filter((p) => scopeOfPath(p) !== 'home');
+  if (externalReferrers.length > 0) {
+    throw new ResponseError(
+      ErrorCodes.InvalidParams,
+      `cannot rename '${oldId}': referenced from federated member document(s) ${externalReferrers.join(', ')} (trust: readonly)`,
+    );
+  }
+
   // Renaming onto an id another document already claims would fabricate
   // MDL301 in every touched file the moment the edit lands; the same
   // ResponseError contract as a broken pattern applies.
@@ -1236,5 +1275,8 @@ function splitLinesOf(context: ServerContext, path: DocPath): string[] {
 
 /** The `file://` URI of an indexed path. */
 function pathToUriOf(context: ServerContext, path: DocPath): string {
+  if (context.uriOfKey) {
+    return context.uriOfKey(path);
+  }
   return pathToUri(path, context.rootPath);
 }

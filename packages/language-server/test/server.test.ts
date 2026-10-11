@@ -17,7 +17,7 @@ import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync, rmSync, mkdirSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   createWorkspaceIndex,
   validateWorkspace,
@@ -45,6 +45,7 @@ interface ReceivedMessage {
   method?: string;
   params?: Record<string, unknown>;
   result?: unknown;
+  error?: { message?: string; code?: number };
 }
 
 /** `file://` URI of a path under the harness root. */
@@ -225,7 +226,7 @@ async function request(
   const id = nextRequestId++;
   h.send({ jsonrpc: '2.0', id, method, params });
   const response = await waitFor(h, (m) => m.id === id);
-  return { result: response.result, error: response.error as { message?: string } | undefined };
+  return { result: response.result, error: response.error };
 }
 
 /** A cursor position in 0-based LSP coordinates. */
@@ -1893,6 +1894,667 @@ describe('initialize root negotiation', () => {
       assert.equal(symbols[0]!.location.uri, uri(h, 'README.md'), 'the URI is spelled under the client folder');
     } finally {
       h.close();
+    }
+  });
+});
+
+describe('LSP Federation (Issue #4 Phase 2 PR-b: T12-T17)', () => {
+  it('T12: member document diagnostics are published to member URI and capped to warning', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t12-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+      // Member document with MDL102 (missing required fields)
+      const memberDocText = `---
+mdlineage:
+  schema: 1
+  id: docs.broken
+---
+# Broken
+`;
+      writeFileSync(resolve(memberDir, 'docs/broken.md'), memberDocText);
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const memberUri = pathUri(resolve(memberDir, 'docs/broken.md'));
+        didOpen(h, memberUri, 1, memberDocText);
+
+        const diags = await waitForDiagnostics(h, memberUri);
+        assert.ok(diags.length > 0, 'Member document diagnostics published');
+        assert.ok(diags.some((d) => d.code === 'MDL102'), 'Must report MDL102');
+        assert.ok(
+          diags.every((d) => d.severity !== 1),
+          'Sovereignty capping: member error must not have Error severity (1)',
+        );
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T12b: member filename with Chinese and spaces publishes diagnostics to matching URI and resolveText uses buffer', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t12b-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+
+      // On-disk file has broken front matter (missing required fields -> MDL102)
+      const diskText = `---
+mdlineage:
+  schema: 1
+  id: docs.chinese-space
+---
+# 中文与空格
+`;
+      const memberFile = resolve(memberDir, 'docs/中文 with space.md');
+      writeFileSync(memberFile, diskText);
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const memberUri = pathToFileURL(memberFile).href;
+        // Client opens with invalid text first
+        didOpen(h, memberUri, 1, diskText);
+
+        const diags1 = await waitForDiagnostics(h, memberUri);
+        assert.ok(diags1.length > 0, 'Diagnostics published for Chinese/space URI');
+        assert.ok(diags1.some((d) => d.code === 'MDL102'), 'Disk text reports MDL102');
+
+        // Now client updates buffer in memory with valid content; resolveText must hit open buffer
+        const fixedText = `---
+mdlineage:
+  schema: 1
+  id: docs.chinese-space
+  kind: guide
+  status: active
+---
+# 中文与空格 Fixed
+`;
+        const baseline = h.received.length;
+        h.send({
+          jsonrpc: '2.0',
+          method: 'textDocument/didChange',
+          params: {
+            textDocument: { uri: memberUri, version: 2 },
+            contentChanges: [{ text: fixedText }],
+          },
+        });
+
+        await waitFor(
+          h,
+          (m) =>
+            m.method === 'textDocument/publishDiagnostics' &&
+            (m.params as { uri: string }).uri === memberUri &&
+            h.received.indexOf(m) >= baseline,
+        );
+        assert.equal(diagnosticsFor(h, memberUri).length, 0, 'Buffer edit resolved via resolveText clears MDL102');
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T12c: outbound URIs use real member filesystem path in references and definition', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t12c-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+
+      const homeDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.home-ref
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@member-a//docs.member-target"
+      reason: "points to member"
+---
+# Home Doc
+`;
+      const memberDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.member-target
+  kind: guide
+  status: active
+---
+# Member Target
+`;
+      writeFileSync(resolve(homeDir, 'docs/home.md'), homeDoc);
+      writeFileSync(resolve(memberDir, 'docs/m.md'), memberDoc);
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const homeUri = pathUri(resolve(homeDir, 'docs/home.md'));
+        const memberUri = pathUri(resolve(memberDir, 'docs/m.md'));
+        didOpen(h, homeUri, 1, homeDoc);
+        didOpen(h, memberUri, 1, memberDoc);
+
+        // 1. Definition jump on homeDoc's "@member-a//docs.member-target" target
+        // Line 9 (0-based 8): target: "@member-a//docs.member-target"
+        const defResp = await request(h, 'textDocument/definition', {
+          textDocument: { uri: homeUri },
+          position: at(8, 20),
+        });
+        assert.ok(defResp.result, 'Definition must return result');
+        const defLocations = Array.isArray(defResp.result) ? defResp.result : [defResp.result];
+        assert.equal(defLocations.length, 1);
+        assert.equal(
+          defLocations[0].uri,
+          memberUri,
+          'Definition jump must resolve to member real file URI instead of pseudo path',
+        );
+
+        // 2. References on memberDoc declaration
+        // Line 4 (0-based 3): id: docs.member-target
+        const refResp = await request(h, 'textDocument/references', {
+          textDocument: { uri: memberUri },
+          position: at(3, 10),
+          context: { includeDeclaration: true },
+        });
+        assert.ok(refResp.result, 'References must return result');
+        const refLocations = refResp.result as Array<{ uri: string }>;
+        assert.ok(
+          refLocations.some((loc) => loc.uri === memberUri),
+          'Declaration in member must return real member URI, not file://<home>/@member-a/...',
+        );
+        assert.ok(
+          refLocations.every((loc) => !loc.uri.includes('@member-a')),
+          'No pseudo scoped URI leaked in references',
+        );
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T13: home depends_on member resolves dynamically when member adds id via didChange', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t13-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+
+      const homeDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.home
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@member-a//docs.target"
+      reason: need target
+---
+# Home
+`;
+      writeFileSync(resolve(homeDir, 'docs/home.md'), homeDoc);
+
+      // Member initially empty of docs.target
+      const memberDocInit = `---
+mdlineage:
+  schema: 1
+  id: docs.other
+  kind: guide
+  status: active
+---
+# Other
+`;
+      writeFileSync(resolve(memberDir, 'docs/target.md'), memberDocInit);
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const homeUri = uri(h, 'docs/home.md');
+        const memberUri = pathUri(resolve(memberDir, 'docs/target.md'));
+
+        didOpen(h, homeUri, 1, homeDoc);
+        const homeDiags1 = await waitForDiagnostics(h, homeUri);
+        assert.ok(homeDiags1.some((d) => d.code === 'MDL302'), 'Home initially reports MDL302');
+
+        // Now member opens and didChange adds docs.target
+        const memberDocUpdated = `---
+mdlineage:
+  schema: 1
+  id: docs.target
+  kind: guide
+  status: active
+---
+# Target
+`;
+        didOpen(h, memberUri, 1, memberDocInit);
+        h.send({
+          jsonrpc: '2.0',
+          method: 'textDocument/didChange',
+          params: {
+            textDocument: { uri: memberUri, version: 2 },
+            contentChanges: [{ text: memberDocUpdated }],
+          },
+        });
+
+        const deadline = Date.now() + 6000;
+        let cleared = false;
+        while (Date.now() < deadline) {
+          const currentHome = diagnosticsFor(h, homeUri);
+          if (!currentHome.some((d) => d.code === 'MDL302')) {
+            cleared = true;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 50));
+        }
+        assert.ok(cleared, 'Home MDL302 was cleared after member provided docs.target');
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T14: didChangeWatchedFiles for member files is safely ignored', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t14-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const memberUri = pathUri(resolve(memberDir, 'docs/external.md'));
+
+        // Push watched file event for member path
+        h.send({
+          jsonrpc: '2.0',
+          method: 'workspace/didChangeWatchedFiles',
+          params: { changes: [{ uri: memberUri, type: 1 /* Created */ }] },
+        });
+
+        await new Promise((r) => setTimeout(r, 200));
+        // Server must not crash or publish diagnostics to un-opened member URI
+        assert.equal(diagnosticsFor(h, memberUri).length, 0);
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T15: rename on member document declaration is refused with ResponseError', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t15-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+
+      const memberDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.member-id
+  kind: guide
+  status: active
+---
+# Member
+`;
+      writeFileSync(resolve(memberDir, 'docs/m.md'), memberDoc);
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const memberUri = pathUri(resolve(memberDir, 'docs/m.md'));
+        didOpen(h, memberUri, 1, memberDoc);
+
+        const response = await request(h, 'textDocument/rename', {
+          textDocument: { uri: memberUri },
+          position: at(3, 10),
+          newName: 'docs.new-member-id',
+        });
+
+        assert.ok(response.error, 'Rename on member doc must return error');
+        assert.match(
+          response.error!.message ?? '',
+          /belongs to federated member 'member-a' \(trust: readonly\)/,
+        );
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T16: rename on home document with intra-repo referrers succeeds', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t16-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+
+      const targetDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.home-id
+  kind: guide
+  status: active
+---
+# Target
+`;
+      const referrerDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.home-ref
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: docs.home-id
+      reason: internal ref
+---
+# Referrer
+`;
+      writeFileSync(resolve(homeDir, 'docs/target.md'), targetDoc);
+      writeFileSync(resolve(homeDir, 'docs/ref.md'), referrerDoc);
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const targetUri = uri(h, 'docs/target.md');
+        didOpen(h, targetUri, 1, targetDoc);
+
+        const response = await request(h, 'textDocument/rename', {
+          textDocument: { uri: targetUri },
+          position: at(3, 10),
+          newName: 'docs.renamed-id',
+        });
+
+        assert.ok(!response.error, 'Intra-home rename must not error');
+        assert.ok(response.result, 'WorkspaceEdit returned');
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T16b: member document depends_on @home//docs.a rejects rename of home docs.a', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t16b-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+
+      const homeDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.a
+  kind: guide
+  status: active
+---
+# Home Doc A
+`;
+      const memberDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.member-doc
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@home//docs.a"
+      reason: "needs home doc"
+---
+# Member Doc
+`;
+      writeFileSync(resolve(homeDir, 'docs/a.md'), homeDoc);
+      writeFileSync(resolve(memberDir, 'docs/m.md'), memberDoc);
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const homeUri = pathUri(resolve(homeDir, 'docs/a.md'));
+        const memberUri = pathUri(resolve(memberDir, 'docs/m.md'));
+        didOpen(h, homeUri, 1, homeDoc);
+        didOpen(h, memberUri, 1, memberDoc);
+
+        const response = await request(h, 'textDocument/rename', {
+          textDocument: { uri: homeUri },
+          position: at(3, 8),
+          newName: 'docs.a-renamed',
+        });
+
+        assert.ok(response.error, 'Rename must be refused when member envelopes @home//docs.a');
+        assert.match(
+          response.error!.message ?? '',
+          /@member-a\/\/docs\/m\.md.*trust: readonly/,
+        );
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T16c: member document intra-repo bare id reference does not block renaming home doc with same id', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t16c-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+
+      // Both home and member have a document with id "docs.shared-name".
+      // In member, a doc refers to docs.shared-name with a bare id (its own internal doc).
+      const homeDoc = `---
+mdlineage:
+  schema: 1
+  id: docs.shared-name
+  kind: guide
+  status: active
+---
+# Home Doc
+`;
+      const memberDoc1 = `---
+mdlineage:
+  schema: 1
+  id: docs.shared-name
+  kind: guide
+  status: active
+---
+# Member Doc 1
+`;
+      const memberDoc2 = `---
+mdlineage:
+  schema: 1
+  id: docs.member-referencing
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: docs.shared-name
+      reason: "member internal reference"
+---
+# Member Doc 2
+`;
+      writeFileSync(resolve(homeDir, 'docs/home.md'), homeDoc);
+      writeFileSync(resolve(memberDir, 'docs/m1.md'), memberDoc1);
+      writeFileSync(resolve(memberDir, 'docs/m2.md'), memberDoc2);
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const homeUri = pathUri(resolve(homeDir, 'docs/home.md'));
+        didOpen(h, homeUri, 1, homeDoc);
+
+        const response = await request(h, 'textDocument/rename', {
+          textDocument: { uri: homeUri },
+          position: at(3, 10),
+          newName: 'docs.shared-name-renamed',
+        });
+
+        assert.ok(!response.error, 'Rename should succeed because member bare id reference is internal to member');
+        assert.ok(response.result?.changes, 'WorkspaceEdit returned');
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T17: circular federation reports MDL901 via showMessage and falls back to home-only', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t17-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+      writeFileSync(
+        resolve(memberDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  home-alias:
+    local:
+      path: ../home
+`,
+      );
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+
+        // Wait for showMessage notifications
+        const showMessage = await waitFor(
+          h,
+          (m) =>
+            m.method === 'window/showMessage' &&
+            String((m.params as { message?: string })?.message ?? '').includes('MDL901'),
+        );
+        assert.ok(showMessage, 'window/showMessage received MDL901 notification');
+
+        // Member file didOpen: since memberDir is outside home root and unmounted,
+        // it cannot be mapped to any index key and publishDiagnostics is not sent to it.
+        const memberUri = pathUri(resolve(memberDir, 'docs/m.md'));
+        didOpen(h, memberUri, 1, '# Unmounted member\n');
+        await new Promise((r) => setTimeout(r, 200));
+        // The member document produces no publishDiagnostics since it is not under home and mounts is empty
+        assert.equal(diagnosticsFor(h, memberUri).length, 0);
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
     }
   });
 });

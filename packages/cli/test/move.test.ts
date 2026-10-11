@@ -15,6 +15,7 @@ import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig } from '@mdlineage/validator';
 import { executeMove, planMove, Workspace } from '../src/move.js';
+import { UsageError } from '../src/paths.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const cliBin = resolve(repoRoot, 'packages', 'cli', 'dist', 'main.js');
@@ -349,6 +350,32 @@ describe('mdlineage move — usage errors (exit 2, no stack)', () => {
       assert.match(out.stderr, /destination already exists: b\.md/);
       assert.equal(readFileSync(join(ws.root, 'a.md'), 'utf8'), '# a\n');
       assert.equal(readFileSync(join(ws.root, 'b.md'), 'utf8'), '# b\n');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('T22: planMove throws UsageError when moving from or into federated member', () => {
+    const ws = scratchWorkspace({ 'a.md': '# a\n' });
+    try {
+      const config = loadConfig(undefined, ws.root).config;
+      const workspace = new Workspace(ws.root, config, [['a.md', '# a\n']]);
+      assert.throws(
+        () => planMove('@member//docs/x.md', 'docs/y.md', workspace, today()),
+        (err: unknown) => {
+          assert.ok(err instanceof UsageError);
+          assert.match(err.message, /refusing to move from federated member 'member'/);
+          return true;
+        }
+      );
+      assert.throws(
+        () => planMove('docs/x.md', '@member//docs/y.md', workspace, today()),
+        (err: unknown) => {
+          assert.ok(err instanceof UsageError);
+          assert.match(err.message, /refusing to move into federated member 'member'/);
+          return true;
+        }
+      );
     } finally {
       ws.cleanup();
     }

@@ -50,11 +50,19 @@ import {
   scanBoundary,
   stripBom,
   parseFrontmatter,
+  resolveFederations,
+  createFederatedIndex,
+  filterUniverseByInclude,
+  applyExternalScopePolicy,
+  scopeOfPath,
+  defaultConfig,
   type Config,
   type Diagnostic,
   type DocPath,
   type Baseline,
   type LineMap,
+  type ResolvedFederation,
+  type FederatedMemberMount,
 } from '@mdlineage/validator';
 import {
   ProposalQueue,
@@ -95,8 +103,10 @@ export interface McpServerContext {
   readonly root: string;
   /** Config as loaded for `root`. */
   readonly config: Config;
-  /** Config diagnostics (MDL900) for the run; attached to each tool's answer. */
+  /** Config diagnostics (MDL900/MDL9xx) for the run; attached to each tool's answer. */
   readonly configDiagnostics: readonly ConfigDiagnosticReport[];
+  /** Resolved federation plan or null. */
+  readonly federation: ResolvedFederation | null;
 }
 
 export interface ConfigDiagnosticReport {
@@ -111,10 +121,27 @@ export interface ConfigDiagnosticReport {
  */
 export function createContext(root: string, configFile?: string): McpServerContext {
   const loaded = loadConfig(configFile, configFile ? undefined : root);
+  const resolvedRoot = resolve(root);
+  const declaringDir = loaded.config.source ? dirname(loaded.config.source) : resolvedRoot;
+  const fed = resolveFederations(loaded.config, declaringDir);
+
+  const allDiagnostics = [
+    ...loaded.diagnostics.map((d) => ({ code: d.code, severity: d.severity, message: d.message })),
+    ...fed.diagnostics.map((d) => ({ code: d.code, severity: d.severity, message: d.message })),
+  ];
+
+  let effectiveConfig = loaded.config;
+  let federation: ResolvedFederation | null = fed.federation;
+  if (fed.diagnostics.some((d) => d.severity === 'error')) {
+    federation = null;
+    effectiveConfig = defaultConfig();
+  }
+
   return {
-    root: resolve(root),
-    config: loaded.config,
-    configDiagnostics: loaded.diagnostics.map((d) => ({ code: d.code, severity: d.severity, message: d.message })),
+    root: resolvedRoot,
+    config: effectiveConfig,
+    configDiagnostics: allDiagnostics,
+    federation,
   };
 }
 
@@ -564,6 +591,53 @@ function registerValidateDocument(server: McpServer, context: McpServerContext):
   );
 }
 
+interface BuiltUniverseAndIndex {
+  readonly universe: { documents: Map<string, string>; knownPaths: readonly string[] };
+  readonly index: ReturnType<typeof createWorkspaceIndex>;
+  readonly homeIndex: ReturnType<typeof createWorkspaceIndex>;
+  readonly mounts: Map<string, FederatedMemberMount & { plan: ResolvedFederation['members'][number] }>;
+}
+
+function buildFederatedIndex(context: McpServerContext, scopeFilter?: Set<string> | null): BuiltUniverseAndIndex {
+  const universe = scanWorkspaceUniverse(context.root, context.config);
+  const homeDocuments = new Map<DocPath, string>();
+  for (const [path, content] of universe.documents) {
+    if (scopeFilter && !scopeFilter.has(path)) continue;
+    homeDocuments.set(path as DocPath, content);
+  }
+  const homeIndex = createWorkspaceIndex(homeDocuments, context.config, universe.knownPaths);
+
+  const mounts = new Map<string, FederatedMemberMount & { plan: ResolvedFederation['members'][number] }>();
+  if (context.federation) {
+    for (const memberPlan of context.federation.members) {
+      const memberUniverse = scanWorkspaceUniverse(memberPlan.root, memberPlan.config);
+      const filteredUniverse = filterUniverseByInclude(memberUniverse, memberPlan.include);
+      const memberIndex = createWorkspaceIndex(
+        filteredUniverse.documents,
+        memberPlan.config,
+        filteredUniverse.knownPaths,
+      );
+      mounts.set(memberPlan.scope, {
+        plan: memberPlan,
+        index: memberIndex,
+        alias: memberPlan.alias,
+        scope: memberPlan.scope,
+      });
+    }
+  }
+
+  const index =
+    context.federation && mounts.size > 0
+      ? createFederatedIndex(
+          homeIndex,
+          mounts,
+          { missingScopes: new Set(context.federation.missingScopes) },
+        )
+      : homeIndex;
+
+  return { universe, index, homeIndex, mounts };
+}
+
 /**
  * `validate_repository(paths?)` — the workspace channel, cross-file codes included.
  *
@@ -583,7 +657,7 @@ function registerValidateRepository(server: McpServer, context: McpServerContext
     {
       title: 'Validate the repository',
       description:
-        'Validate every Markdown document in the workspace: single-document diagnostics plus the cross-file codes (MDL301 duplicate id, MDL302 unresolved target, MDL305 forbidden cycle, MDL401/MDL402 links and anchors). ' +
+        'Validate Markdown documents across the repository (or whole federation when federations are configured). Cross-file codes (MDL301 duplicate id, MDL302 unresolved target, MDL305 forbidden cycle, MDL307 ambiguous wildcard, MDL401/MDL402 links and anchors) are validated. Member diagnostics are sovereignty-capped to warning. ' +
         'A committed baseline suppresses accepted debt. Optional `paths` restricts the pass to a subset.',
       inputSchema: {
         paths: z
@@ -594,23 +668,17 @@ function registerValidateRepository(server: McpServer, context: McpServerContext
       annotations: { readOnlyHint: true },
     },
     async ({ paths }) => {
-      const universe = scanWorkspaceUniverse(context.root, context.config);
       const scope = paths ? new Set(paths.map((p) => resolvePath(p, context.root))) : null;
-      const indexFiles = new Map<DocPath, string>();
-      for (const [path, content] of universe.documents) {
-        if (scope && !scope.has(path)) continue;
-        indexFiles.set(path, content);
-      }
-      const index = createWorkspaceIndex(indexFiles, context.config, universe.knownPaths);
+      const { index, homeIndex } = buildFederatedIndex(context, scope);
 
-      // The baseline is applied by matching (code, path) pairs, so the count of
-      // what it covers needs the un-suppressed set too: compute both, report the
-      // reported set, and say how many the baseline took.
-      const gitClocks = await gitClocksForIndex(index, context.root);
-      const all = validateWorkspace(index, { gitClocks });
+      const gitClocks = await gitClocksForIndex(homeIndex, context.root);
+      const all = applyExternalScopePolicy(validateWorkspace(index, { gitClocks }));
       const baseline = loadBaseline(context.root);
-      const reported = baseline ? validateWorkspace(index, { baseline, gitClocks }) : all;
+      const reported = baseline ? applyExternalScopePolicy(validateWorkspace(index, { baseline, gitClocks })) : all;
       const suppressed = baseline ? all.length - reported.length : 0;
+
+      const memberScopes = context.federation ? context.federation.members.map((m) => m.scope) : [];
+      const missingScopes = context.federation ? [...context.federation.missingScopes] : [];
 
       return asJson({
         root: context.root,
@@ -618,6 +686,7 @@ function registerValidateRepository(server: McpServer, context: McpServerContext
         baseline: baseline ? { applied: true, suppressed } : null,
         diagnostics: reported.map((d) => toToolDiagnostic(d, d.path)),
         configDiagnostics: context.configDiagnostics,
+        federation: context.federation ? { members: memberScopes, missingScopes } : null,
       });
     },
   );
@@ -674,25 +743,70 @@ function registerListDocumentIds(server: McpServer, context: McpServerContext): 
         query: z.string().min(1).optional().describe('Substring to match against id, path or kind (case-insensitive).'),
         kind: z.string().min(1).optional().describe('Only documents of this kind.'),
         status: z.string().min(1).optional().describe('Only documents with this status.'),
+        scope: z
+          .string()
+          .min(1)
+          .optional()
+          .describe("Which repository to list: 'home' (default), a federation scope name, or '*' for the whole federation."),
       },
       annotations: { readOnlyHint: true },
     },
-    ({ query, kind, status }) => {
-      const universe = scanWorkspaceUniverse(context.root, context.config);
-      const index = createWorkspaceIndex(universe.documents, context.config, universe.knownPaths);
+    ({ query, kind, status, scope }) => {
+      const requestedScope = scope ?? 'home';
+      const { universe, index, mounts } = buildFederatedIndex(context);
+
+      const knownScopes = ['home', ...mounts.keys()];
+      if (requestedScope !== 'home' && requestedScope !== '*' && !mounts.has(requestedScope)) {
+        return asJson({
+          error: `unknown federation scope '${requestedScope}'`,
+          knownScopes,
+        });
+      }
+
       const needle = query?.toLowerCase();
-      const out: Array<{ id: string; path: string; kind: string | null; status: string | null }> = [];
+      const out: Array<{ id: string; path: string; kind: string | null; status: string | null; repositoryRoot?: string }> = [];
+
       for (const path of index.paths()) {
+        const pathScope = scopeOfPath(path);
+        if (requestedScope === 'home' && pathScope !== 'home') continue;
+        if (requestedScope !== '*' && requestedScope !== 'home' && pathScope !== requestedScope) continue;
+
         const entry = index.entryOf(path);
         if (!entry) continue;
-        const metadata = entryMetadata(entry, universe.documents.get(path) ?? '', context.config);
+
+        let content = '';
+        if (pathScope === 'home') {
+          content = universe.documents.get(path) ?? '';
+        } else {
+          const m = mounts.get(pathScope);
+          const match = /^@([a-z0-9][a-z0-9-]*)\/\/(.+)$/.exec(path);
+          if (m && match && match[2]) {
+            try {
+              content = readFileSync(resolve(m.plan.root, match[2]), 'utf8');
+            } catch {
+              content = '';
+            }
+          }
+        }
+
+        const metadata = entryMetadata(entry, content, context.config);
         if (kind && metadata.kind !== kind) continue;
         if (status && metadata.status !== status) continue;
         if (needle) {
           const haystack = [entry.id ?? '', path, metadata.kind ?? ''].join(' ').toLowerCase();
           if (!haystack.includes(needle)) continue;
         }
-        out.push({ id: entry.id ?? '', path, kind: metadata.kind, status: metadata.status });
+
+        const item: { id: string; path: string; kind: string | null; status: string | null; repositoryRoot?: string } = {
+          id: entry.id ?? '',
+          path,
+          kind: metadata.kind,
+          status: metadata.status,
+        };
+        if (requestedScope !== 'home') {
+          item.repositoryRoot = pathScope === 'home' ? context.root : mounts.get(pathScope)?.plan.root;
+        }
+        out.push(item);
       }
       out.sort((a, b) => a.id.localeCompare(b.id) || a.path.localeCompare(b.path));
       return asJson({ count: out.length, documents: out });
@@ -714,22 +828,78 @@ function registerResolveRelationTarget(server: McpServer, context: McpServerCont
     {
       title: 'Resolve a relation target',
       description:
-        'Resolve a document id to the file path(s) that claim it. Returns every claimant (a duplicate id is reported as multiple hits), and a target no document claims is reported as zero hits. Use before writing a relation target.',
+        'Resolve a document id or federation envelope (@scope//id, @*//id) to the file path(s) that claim it. Bare ids resolve within the home repository; use @*// to search the whole federation. Returns claimant path(s), repository root(s), referrers and resolution status. Use before writing a relation target.',
       inputSchema: {
-        id: z.string().min(1).describe('The document id to resolve (a relation target is an id, not a path).'),
+        id: z.string().min(1).describe('The document id or scoped envelope target to resolve (e.g. docs.x, @member//docs.x, @*//docs.x).'),
       },
       annotations: { readOnlyHint: true },
     },
     ({ id }) => {
-      const universe = scanWorkspaceUniverse(context.root, context.config);
-      const index = createWorkspaceIndex(universe.documents, context.config, universe.knownPaths);
-      const paths = index.idToPaths(id);
+      const { index, mounts } = buildFederatedIndex(context);
+      // Route via resolveRelationTarget (contextPath '.' represents root of home)
+      const resolutionOutcome = index.resolveRelationTarget
+        ? index.resolveRelationTarget(id, '.' as DocPath)
+        : ({ kind: 'resolved', paths: index.idToPaths(id) } as const);
+
+      let paths: readonly DocPath[] = [];
+      let resolution: 'unique' | 'unresolved' | 'ambiguous' | 'unknown-scope' | 'missing-scope';
+
+      if (resolutionOutcome.kind === 'resolved') {
+        paths = resolutionOutcome.paths;
+        resolution = paths.length === 1 ? 'unique' : paths.length === 0 ? 'unresolved' : 'ambiguous';
+      } else if (resolutionOutcome.kind === 'ambiguous') {
+        paths = resolutionOutcome.candidates;
+        resolution = 'ambiguous';
+      } else if (resolutionOutcome.kind === 'unknown-scope') {
+        resolution = 'unknown-scope';
+      } else if (resolutionOutcome.kind === 'missing-scope') {
+        resolution = 'missing-scope';
+      } else {
+        resolution = 'unresolved';
+      }
+
+      const scopeOfTarget = id.startsWith('@') ? (id.match(/^@([a-z][a-z0-9-]*|\*)\/\//)?.[1] ?? 'bare') : 'bare';
+      const referrers = index.referrersOf(id);
+
+      // Build repositoryRoot / repositories info
+      if (resolution === 'ambiguous' && paths.length > 1) {
+        const repoMap = new Map<string, DocPath[]>();
+        for (const p of paths) {
+          const sc = scopeOfPath(p);
+          const list = repoMap.get(sc) ?? [];
+          list.push(p);
+          repoMap.set(sc, list);
+        }
+        const repositories = [...repoMap.entries()].map(([sc, pList]) => ({
+          scope: sc,
+          root: sc === 'home' ? context.root : mounts.get(sc)?.plan.root ?? context.root,
+          paths: pList,
+        }));
+        return asJson({
+          id,
+          scope: scopeOfTarget,
+          hits: paths.length,
+          paths,
+          repositories,
+          referrers,
+          resolution,
+        });
+      }
+
+      let repositoryRoot: string | undefined = undefined;
+      if (paths.length > 0) {
+        const firstScope = scopeOfPath(paths[0]!);
+        repositoryRoot = firstScope === 'home' ? context.root : mounts.get(firstScope)?.plan.root;
+      }
+
       return asJson({
         id,
+        scope: scopeOfTarget,
         hits: paths.length,
         paths,
-        referrers: index.referrersOf(id),
-        resolution: paths.length === 1 ? 'unique' : paths.length === 0 ? 'unresolved' : 'ambiguous',
+        repositoryRoot,
+        referrers,
+        resolution,
       });
     },
   );

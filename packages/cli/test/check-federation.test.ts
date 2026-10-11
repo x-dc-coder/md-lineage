@@ -578,4 +578,173 @@ mdlineage:
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('T10: regression nail: home wildcard target with ambiguous member matches exits 1', () => {
+    // Re-verify T10 as requested in brief test matrix
+    const tmp = mkdtempSync(join(tmpdir(), 'mdl-cli-t10-'));
+    try {
+      const homeDir = join(tmp, 'home');
+      const memberADir = join(tmp, 'member-a');
+      const memberBDir = join(tmp, 'member-b');
+      mkdirSync(join(homeDir, 'docs'), { recursive: true });
+      mkdirSync(join(memberADir, 'docs'), { recursive: true });
+      mkdirSync(join(memberBDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        join(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+  member-b:
+    local:
+      path: ../member-b
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(homeDir, 'docs', 'index.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home-idx
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@*//docs.dup"
+      reason: wildcard ambig
+---
+# Home Doc
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(memberADir, 'docs', 'dup.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.dup
+  kind: guide
+  status: active
+---
+# Member A Dup
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(memberBDir, 'docs', 'dup.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.dup
+  kind: guide
+  status: active
+---
+# Member B Dup
+`,
+        'utf8'
+      );
+
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], homeDir);
+      assert.equal(out.status, 1, 'T10: ambiguous wildcard in home exits 1');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T11: member-to-member MDL305 cycle is capped to warning and exits 0', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mdl-cli-t11-'));
+    try {
+      const homeDir = join(tmp, 'home');
+      const memberADir = join(tmp, 'member-a');
+      const memberBDir = join(tmp, 'member-b');
+      mkdirSync(join(homeDir, 'docs'), { recursive: true });
+      mkdirSync(join(memberADir, 'docs'), { recursive: true });
+      mkdirSync(join(memberBDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        join(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+  member-b:
+    local:
+      path: ../member-b
+`,
+        'utf8'
+      );
+      // Clean home doc
+      writeFileSync(
+        join(homeDir, 'docs', 'index.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home-idx
+  kind: guide
+  status: active
+---
+# Home Doc
+`,
+        'utf8'
+      );
+      // Member A supersedes Member B
+      writeFileSync(
+        join(memberADir, 'docs', 'a.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.a
+  kind: guide
+  status: active
+  relations:
+    - type: supersedes
+      target: "@member-b//docs.b"
+      reason: cross cycle
+---
+# Member A
+`,
+        'utf8'
+      );
+      // Member B supersedes Member A
+      writeFileSync(
+        join(memberBDir, 'docs', 'b.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.b
+  kind: guide
+  status: active
+  relations:
+    - type: supersedes
+      target: "@member-a//docs.a"
+      reason: cross cycle
+---
+# Member B
+`,
+        'utf8'
+      );
+
+      // Check with text output
+      const outText = runCli(['check', '.', '--no-baseline'], homeDir);
+      assert.equal(outText.status, 0, 'T11: pure member cycle is capped to warning so exit code is 0');
+      assert.ok(outText.stdout.includes('MDL305 warning'), 'stdout must mention MDL305 warning');
+      assert.ok(outText.stdout.includes('@member-'), 'path must be scoped');
+
+      // Check with json output
+      const outJson = runCli(['check', '.', '--no-baseline', '--format', 'json'], homeDir);
+      assert.equal(outJson.status, 0);
+      const json = parseJson(outJson.stdout);
+      const memberReport = json.reports.find((r) => r.path.startsWith('@member-'));
+      assert.ok(memberReport, 'Scoped member report must exist');
+      const mdl305 = memberReport.diagnostics.find((d) => d.code === 'MDL305');
+      assert.ok(mdl305, 'MDL305 diagnostic must exist');
+      assert.equal(mdl305.severity, 'warning', 'Severity must be capped to warning');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });

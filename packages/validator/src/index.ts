@@ -41,6 +41,7 @@ export {
   isExternalPath,
   scopedPath,
   parseScopedTarget,
+  scopeOfPath,
   type ScopedTarget,
   filterUniverseByInclude,
   applyExternalScopePolicy,

@@ -1808,6 +1808,66 @@ describe('mdlineage fix', () => {
     }
   });
 
+  it('T23: fix write refuses to write into federated member (read-only guard)', async () => {
+    const { applyFixesToFiles } = await import('../src/fix.js');
+    const { loadConfig } = await import('@mdlineage/validator');
+    const ws = scratchWorkspace({ 'a.md': brokenDoc() });
+    try {
+      const config = loadConfig(undefined, ws.root).config;
+      const memberFilePath = '@member-a//docs/m.md';
+      // In dry-run mode, write is false: guard is not triggered, fixes are planned
+      const dryResult = applyFixesToFiles(
+        [{ path: join(ws.root, 'a.md'), asGiven: memberFilePath }],
+        config,
+        false,
+      );
+      assert.ok(dryResult.fixed > 0, 'dry-run plans fixes without refusal');
+      assert.equal(dryResult.failed, 0, 'dry-run does not fail');
+
+      // In write mode (write = true), file with scoped path (@member-a//...) triggers write guard
+      // Note: file.path must be readable so stripBom succeeds, but scopeOfPath(file.path) must be member-a.
+      // In scratchWorkspace, we can create a subfolder with brokenDoc
+      const memberDir = join(ws.root, 'member-a');
+      mkdirSync(memberDir, { recursive: true });
+      const memberLocalPath = join(memberDir, 'm.md');
+      writeFileSync(memberLocalPath, brokenDoc());
+
+      // Pass an object where path triggers scopeOfPath !== home
+      // In applyFixesToFiles:
+      // content = stripBom(readFileSync(file.path, 'utf8'));
+      // ...
+      // const scope = scopeOfPath(file.path);
+      // To satisfy readFileSync and scopeOfPath, we can mock or test the guard direct path:
+      // Notice scopeOfPath checks /^@([a-z0-9][a-z0-9-]*)\/\//
+      // If file.path is '@member-a//docs/m.md', readFileSync fails.
+      // But if we test with a file that exists or we pass an existing file with a path containing the envelope:
+      // In Linux, can a file path start with '@member-a//'? On filesystem, '@member-a//m.md' is a relative path!
+      // If we create a directory named '@member-a' in ws.root:
+      const atMemberDir = join(ws.root, '@member-a');
+      mkdirSync(atMemberDir, { recursive: true });
+      const atMemberFile = join(atMemberDir, 'm.md');
+      writeFileSync(atMemberFile, brokenDoc());
+
+      // Now '@member-a//m.md' can be read relative to ws.root if cwd is ws.root!
+      const prevCwd = process.cwd();
+      process.chdir(ws.root);
+      try {
+        const writeResult = applyFixesToFiles(
+          [{ path: '@member-a//m.md', asGiven: '@member-a//m.md' }],
+          config,
+          true,
+        );
+        assert.ok(writeResult.fixed > 0, 'fixes planned for envelope file');
+        assert.ok(writeResult.failed > 0, 'write mode refuses external scope and increments failed count');
+        assert.equal(writeResult.written, 0, 'nothing written to member');
+      } finally {
+        process.chdir(prevCwd);
+      }
+    } finally {
+      ws.cleanup();
+    }
+  });
+
   it('an enum value with one case-insensitive vocabulary match is normalized', () => {
     const ws = scratchWorkspace({
       'mdlineage.config.yaml': 'configVersion: 1\nvocabulary:\n  kinds: [policy, guide]\n',

@@ -372,6 +372,7 @@ federations:
     const entry = proxy.entryOf('member-a/docs/x.md');
     assert.ok(entry);
     assert.equal(entry.path, '@member-a//docs/x.md');
+    assert.notEqual(entry.path, '@undefined//docs/x.md', 'entry.path must use member scope, never @undefined//');
   });
 
   it('case 12: home repository entry takes priority over member alias collision', () => {

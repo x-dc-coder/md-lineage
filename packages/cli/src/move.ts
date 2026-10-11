@@ -24,7 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { posix } from 'node:path';
 import { cwd as processCwd } from 'node:process';
-import { loadConfig, stripBom, type Config } from '@mdlineage/validator';
+import { loadConfig, stripBom, scopeOfPath, type Config } from '@mdlineage/validator';
 import { UsageError, expandMarkdownPaths } from './paths.js';
 import { repositoryRoot } from './git.js';
 import {
@@ -128,6 +128,13 @@ export function todayUtc(now: Date = new Date()): string {
 
 /** Plan one move against a workspace snapshot. Pure: no byte is written. */
 export function planMove(src: DocPath, dst: DocPath, workspace: Workspace, today: string): MovePlan {
+  for (const p of [src, dst] as const) {
+    const scope = scopeOfPath(p);
+    if (scope !== 'home') {
+      throw new UsageError(`refusing to ${p === src ? 'move from' : 'move into'} federated member '${scope}' (${p}); federation is read-only`);
+    }
+  }
+
   const srcContent = workspace.documents.get(src) ?? '';
   const rebased = rebaseLinks(srcContent, src, dst);
   const refreshed = refreshUpdatedAt(rebased.content, workspace.config.metadata.key, today);

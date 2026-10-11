@@ -30,8 +30,10 @@ import {
   createFederatedIndex,
   validateWorkspace,
   validateDocumentSync,
+  updateFile,
   parseScopedTarget,
   applyExternalScopePolicy,
+  scopeOfPath,
   type DocPath,
   type FederatedMemberMount,
 } from '../src/index.js';
@@ -802,5 +804,323 @@ mdlineage:
     assert.ok(mdl302, 'Dangling bare id must report MDL302');
     assert.equal(mdl302.severity, 'error', 'Dangling bare id must remain error');
     assert.equal(mdl308, undefined, 'Dangling bare id must never be downgraded to MDL308');
+  });
+
+  // -------------------------------------------------------------------------
+  // Phase 2 PR-b Tests: T1 - T9
+  // -------------------------------------------------------------------------
+
+  it('T1 & T2: pure member-to-member cycle is capped to warning and anchored on member path', () => {
+    const config = defaultConfig();
+    const homeIndex = createWorkspaceIndex({}, config);
+    const memberACycle = createWorkspaceIndex(
+      {
+        'docs/a.md': `---
+mdlineage:
+  id: docs.a
+  kind: guide
+  status: active
+  relations:
+    - type: supersedes
+      target: "@member-b//docs.b"
+      reason: cross loop A to B
+---
+# A
+`,
+      },
+      config
+    );
+    const memberBCycle = createWorkspaceIndex(
+      {
+        'docs/b.md': `---
+mdlineage:
+  id: docs.b
+  kind: guide
+  status: active
+  relations:
+    - type: supersedes
+      target: "@member-a//docs.a"
+      reason: cross loop B to A
+---
+# B
+`,
+      },
+      config
+    );
+
+    const mounts = new Map<string, FederatedMemberMount>([
+      ['member-a', { scope: 'member-a', index: memberACycle, alias: 'member-a' }],
+      ['member-b', { scope: 'member-b', index: memberBCycle, alias: 'member-b' }],
+    ]);
+    const proxy = createFederatedIndex(homeIndex, mounts);
+    const rawDiags = validateWorkspace(proxy);
+    const rawMdl305 = rawDiags.find((d) => d.code === 'MDL305');
+    assert.ok(rawMdl305, 'T1: Raw validateWorkspace reports MDL305');
+    const rawCycle = (rawMdl305.data as { cycle?: readonly string[] })?.cycle;
+    assert.ok(rawCycle?.includes('@member-a//docs.a'));
+    assert.ok(rawCycle?.includes('@member-b//docs.b'));
+    assert.ok(rawMdl305.message.includes('@member-a//docs.a'));
+
+    // T2: policy capping
+    const capped = applyExternalScopePolicy(rawDiags);
+    const cappedMdl305 = capped.find((d) => d.code === 'MDL305');
+    assert.ok(cappedMdl305, 'MDL305 present after policy');
+    assert.equal(cappedMdl305.severity, 'warning', 'T2: pure member cycle is capped to warning');
+    assert.ok(cappedMdl305.path.startsWith('@member-'), 'Anchored on member path');
+  });
+
+  it('T3: home document participating in cycle with @home// retains error severity and anchors on home', () => {
+    const config = defaultConfig();
+    // Home doc supersedes member doc
+    const homeIndex = createWorkspaceIndex(
+      {
+        'docs/home.md': `---
+mdlineage:
+  id: docs.home
+  kind: guide
+  status: active
+  relations:
+    - type: supersedes
+      target: "@member//docs.member"
+      reason: home to member
+---
+# Home Doc
+`,
+      },
+      config
+    );
+    // Member doc supersedes home doc using @home//docs.home
+    const memberIndex = createWorkspaceIndex(
+      {
+        'docs/m.md': `---
+mdlineage:
+  id: docs.member
+  kind: guide
+  status: active
+  relations:
+    - type: supersedes
+      target: "@home//docs.home"
+      reason: member to home
+---
+# Member Doc
+`,
+      },
+      config
+    );
+
+    const mounts = new Map<string, FederatedMemberMount>([
+      ['member', { scope: 'member', index: memberIndex, alias: 'member' }],
+    ]);
+    const proxy = createFederatedIndex(homeIndex, mounts);
+    const rawDiags = validateWorkspace(proxy);
+    const rawMdl305 = rawDiags.find((d) => d.code === 'MDL305');
+    assert.ok(rawMdl305, 'T3: cycle with home is detected');
+    assert.equal(rawMdl305.path, 'docs/home.md', 'T3: Anchor must be the home path');
+
+    const capped = applyExternalScopePolicy(rawDiags);
+    const cappedMdl305 = capped.find((d) => d.code === 'MDL305');
+    assert.ok(cappedMdl305, 'MDL305 present after policy');
+    assert.equal(cappedMdl305.severity, 'error', 'T3: Home-participating cycle retains error severity');
+    assert.equal(cappedMdl305.path, 'docs/home.md');
+  });
+
+  it('T4: home active document depends on deprecated member document reports MDL306 warning with scoped targetPath', () => {
+    const config = defaultConfig();
+    const homeIndex = createWorkspaceIndex(
+      {
+        'docs/home.md': `---
+mdlineage:
+  id: docs.home
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@member//docs.dep"
+      reason: need old stuff
+---
+# Home Doc
+`,
+      },
+      config
+    );
+    const memberIndex = createWorkspaceIndex(
+      {
+        'docs/dep.md': `---
+mdlineage:
+  id: docs.dep
+  kind: guide
+  status: deprecated
+---
+# Deprecated Member Doc
+`,
+      },
+      config
+    );
+    const mounts = new Map<string, FederatedMemberMount>([
+      ['member', { scope: 'member', index: memberIndex, alias: 'member' }],
+    ]);
+    const proxy = createFederatedIndex(homeIndex, mounts);
+    const diags = validateWorkspace(proxy);
+    const mdl306 = diags.find((d) => d.code === 'MDL306');
+    assert.ok(mdl306, 'T4: MDL306 must be reported');
+    assert.equal(mdl306.severity, 'warning');
+    assert.equal(mdl306.path, 'docs/home.md');
+    const data = mdl306.data as { targetPath?: string } | undefined;
+    assert.equal(data?.targetPath, '@member//docs/dep.md');
+  });
+
+  it('T5: member document depends on another member deprecated document reports MDL306 warning', () => {
+    const config = defaultConfig();
+    const homeIndex = createWorkspaceIndex({}, config);
+    const memberA = createWorkspaceIndex(
+      {
+        'docs/a.md': `---
+mdlineage:
+  id: docs.a
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@member-b//docs.dep"
+      reason: need dep in b
+---
+# A
+`,
+      },
+      config
+    );
+    const memberB = createWorkspaceIndex(
+      {
+        'docs/dep.md': `---
+mdlineage:
+  id: docs.dep
+  kind: guide
+  status: deprecated
+---
+# Dep
+`,
+      },
+      config
+    );
+    const mounts = new Map<string, FederatedMemberMount>([
+      ['member-a', { scope: 'member-a', index: memberA, alias: 'member-a' }],
+      ['member-b', { scope: 'member-b', index: memberB, alias: 'member-b' }],
+    ]);
+    const proxy = createFederatedIndex(homeIndex, mounts);
+    const diags = applyExternalScopePolicy(validateWorkspace(proxy));
+    const mdl306 = diags.find((d) => d.code === 'MDL306');
+    assert.ok(mdl306, 'T5: MDL306 reported for member-to-member');
+    assert.equal(mdl306.severity, 'warning');
+    assert.equal(mdl306.path, '@member-a//docs/a.md');
+  });
+
+  it('T6 & T7: proxy.referrersOf handles envelope target and updates lazily', () => {
+    const config = defaultConfig();
+    const homeIndex = createWorkspaceIndex(
+      {
+        'docs/home.md': `---
+mdlineage:
+  id: docs.home
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@member//docs.x"
+      reason: ref x
+---
+# Home
+`,
+      },
+      config
+    );
+    const memberIndex = createWorkspaceIndex(
+      {
+        'docs/x.md': `---
+mdlineage:
+  id: docs.x
+  kind: guide
+  status: active
+---
+# X
+`,
+      },
+      config
+    );
+    const mounts = new Map<string, FederatedMemberMount>([
+      ['member', { scope: 'member', index: memberIndex, alias: 'member' }],
+    ]);
+    const proxy = createFederatedIndex(homeIndex, mounts);
+
+    // T6: referrersOf with envelope
+    const refs = proxy.referrersOf('@member//docs.x');
+    assert.deepEqual(refs, ['docs/home.md'], 'T6: home doc referencing @member//docs.x must be found');
+
+    // T7: lazy derivation after updateFile on homeIndex
+    updateFile(
+      homeIndex,
+      'docs/home.md' as DocPath,
+      `---
+mdlineage:
+  id: docs.home
+  kind: guide
+  status: active
+---
+# Home Clean
+`
+    );
+    const refsAfter = proxy.referrersOf('@member//docs.x');
+    assert.deepEqual(refsAfter, [], 'T7: referrer vanishes after updateFile without stale cache');
+  });
+
+  it('T8: proxy.referrersOf finds cross-member referrers with envelope', () => {
+    const config = defaultConfig();
+    const homeIndex = createWorkspaceIndex({}, config);
+    const memberA = createWorkspaceIndex(
+      {
+        'docs/a.md': `---
+mdlineage:
+  id: docs.a
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@member-b//docs.x"
+      reason: cross ref
+---
+# A
+`,
+      },
+      config
+    );
+    const memberB = createWorkspaceIndex(
+      {
+        'docs/x.md': `---
+mdlineage:
+  id: docs.x
+  kind: guide
+  status: active
+---
+# X
+`,
+      },
+      config
+    );
+    const mounts = new Map<string, FederatedMemberMount>([
+      ['member-a', { scope: 'member-a', index: memberA, alias: 'member-a' }],
+      ['member-b', { scope: 'member-b', index: memberB, alias: 'member-b' }],
+    ]);
+    const proxy = createFederatedIndex(homeIndex, mounts);
+
+    const refs = proxy.referrersOf('@member-b//docs.x');
+    assert.deepEqual(refs, ['@member-a//docs/a.md'], 'T8: cross-member referrer found as scoped path');
+  });
+
+  it('T9: scopeOfPath unit assertions', () => {
+    assert.equal(scopeOfPath('docs/a.md'), 'home');
+    assert.equal(scopeOfPath('@member//docs/a.md'), 'member');
+    assert.equal(scopeOfPath('@custom-scope//deep/path.md'), 'custom-scope');
+    assert.equal(scopeOfPath('@home//docs/a.md'), 'home');
+    assert.equal(scopeOfPath('invalid@scope//doc.md'), 'home');
+    assert.equal(scopeOfPath('@//doc.md'), 'home');
   });
 });

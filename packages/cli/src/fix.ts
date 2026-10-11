@@ -31,6 +31,7 @@ import {
   parseFrontmatter,
   buildLineMap,
   stripBom,
+  scopeOfPath,
 } from '@mdlineage/validator';
 import { buildProposals, applyProposalToContent, diffOf, type MetadataProposal } from '@mdlineage/mcp-server';
 import { expandMarkdownPaths } from './paths.js';
@@ -49,6 +50,80 @@ interface PlannedFix {
   readonly code: string;
   /** One-line human explanation, shown in the dry-run report. */
   readonly detail: string;
+}
+
+export function applyFixesToFiles(
+  files: Array<{ path: string; asGiven: string }>,
+  config: ReturnType<typeof loadConfig>['config'],
+  write: boolean,
+): { fixed: number; written: number; failed: number; readonly_: number } {
+  let fixed = 0;
+  let written = 0;
+  let failed = 0;
+  let readonly_ = 0;
+
+  for (const file of files) {
+    let content: string;
+    try {
+      // The atomic write-back does not restore a BOM: it is treated as
+      // removable noise, matching how editors on Windows save UTF-8.
+      content = stripBom(readFileSync(file.path, 'utf8'));
+    } catch (error) {
+      process.stderr.write(
+        `mdlineage: cannot read ${file.asGiven}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      failed += 1;
+      continue;
+    }
+
+    const planned = planFixes(content, file.asGiven, config);
+    if (planned === null) {
+      // A safe repair that leaves the front matter unparseable is a bug in the
+      // pass, not a property of the document: writing it would corrupt the file.
+      process.stderr.write(
+        `mdlineage: cannot apply fixes to ${file.asGiven}: the patched front matter no longer parses as YAML\n`,
+      );
+      failed += 1;
+      continue;
+    }
+    const { fixed: patched, fixes } = planned;
+    if (fixes.length === 0) continue;
+    fixed += fixes.length;
+    for (const fix of fixes) process.stdout.write(`${file.asGiven}:${fix.at}: [${fix.code}] ${fix.detail}\n`);
+    for (const line of diffOf(content, patched).split('\n')) {
+      if (line.length > 0) process.stdout.write(`  ${line}\n`);
+    }
+
+    if (!write) continue;
+
+    const scope = scopeOfPath(file.path);
+    if (scope !== 'home') {
+      process.stderr.write(
+        `mdlineage: refusing to write into federated member '${scope}' (${file.path}); federation is read-only\n`,
+      );
+      failed += 1;
+      continue;
+    }
+
+    try {
+      accessSync(file.path, fsConstants.W_OK);
+    } catch {
+      process.stderr.write(`mdlineage: skipping read-only file: ${file.asGiven}\n`);
+      readonly_ += 1;
+      continue;
+    }
+    try {
+      writeFileAtomic(file.path, patched);
+      written += 1;
+    } catch (error) {
+      process.stderr.write(
+        `mdlineage: cannot write ${file.asGiven}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      failed += 1;
+    }
+  }
+
+  return { fixed, written, failed, readonly_ };
 }
 
 /** `mdlineage fix [paths...]`: plan, report, and — with --write — apply. */
@@ -87,62 +162,7 @@ export function runFix(args: string[], values: FixValues): number {
   const configFailed = loaded.diagnostics.some((d) => d.severity === 'error');
   const write = values.write === true;
 
-  let fixed = 0;
-  let written = 0;
-  let failed = 0;
-  let readonly_ = 0;
-
-  for (const file of files) {
-    let content: string;
-    try {
-      // The atomic write-back does not restore a BOM: it is treated as
-      // removable noise, matching how editors on Windows save UTF-8.
-      content = stripBom(readFileSync(file.path, 'utf8'));
-    } catch (error) {
-      process.stderr.write(
-        `mdlineage: cannot read ${file.asGiven}: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-      failed += 1;
-      continue;
-    }
-
-    const planned = planFixes(content, file.asGiven, loaded.config);
-    if (planned === null) {
-      // A safe repair that leaves the front matter unparseable is a bug in the
-      // pass, not a property of the document: writing it would corrupt the file.
-      process.stderr.write(
-        `mdlineage: cannot apply fixes to ${file.asGiven}: the patched front matter no longer parses as YAML\n`,
-      );
-      failed += 1;
-      continue;
-    }
-    const { fixed: patched, fixes } = planned;
-    if (fixes.length === 0) continue;
-    fixed += fixes.length;
-    for (const fix of fixes) process.stdout.write(`${file.asGiven}:${fix.at}: [${fix.code}] ${fix.detail}\n`);
-    for (const line of diffOf(content, patched).split('\n')) {
-      if (line.length > 0) process.stdout.write(`  ${line}\n`);
-    }
-
-    if (!write) continue;
-
-    try {
-      accessSync(file.path, fsConstants.W_OK);
-    } catch {
-      process.stderr.write(`mdlineage: skipping read-only file: ${file.asGiven}\n`);
-      readonly_ += 1;
-      continue;
-    }
-    try {
-      writeFileAtomic(file.path, patched);
-      written += 1;
-    } catch (error) {
-      process.stderr.write(
-        `mdlineage: cannot write ${file.asGiven}: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-      failed += 1;
-    }
-  }
+  const { fixed, written, failed, readonly_ } = applyFixesToFiles(files, loaded.config, write);
 
   const summary = write
     ? `mdlineage fix: ${fixed} fix${fixed === 1 ? '' : 'es'} in ${written} file${written === 1 ? '' : 's'}` +

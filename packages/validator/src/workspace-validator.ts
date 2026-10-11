@@ -42,7 +42,7 @@ import { resolveLinkPath } from './workspace-index.js';
 import type { Baseline } from './baseline.js';
 import { suppressWithBaseline } from './baseline.js';
 import { checkHostLink } from './host-links.js';
-import { scopedPath } from './federation.js';
+import { scopedPath, isExternalPath } from './federation.js';
 
 /** A read-only empty neighbour list, reused for every node without edges. */
 const EMPTY_PATHS: readonly string[] = Object.freeze([]);
@@ -510,8 +510,14 @@ function mdl305(index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
           for (const p of pList) paths.push(p);
         }
       }
-      paths.sort();
-      const anchorPath = paths[0];
+      // Sovereignty anchoring (Issue #4 Phase 2): if the cycle involves
+      // any home repository document, report on the lexicographically smallest
+      // home path so it remains a home error and is not capped.
+      // A pure member-to-member cycle anchors on the smallest scoped path,
+      // which is then capped to warning by applyExternalScopePolicy.
+      const homePaths = paths.filter((p) => !isExternalPath(p)).sort();
+      const externalPaths = paths.filter((p) => isExternalPath(p)).sort();
+      const anchorPath = homePaths[0] ?? externalPaths[0];
       if (!anchorPath) continue;
       const entry = index.entryOf(anchorPath);
       if (!entry) continue;

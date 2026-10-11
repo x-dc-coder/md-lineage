@@ -1852,3 +1852,274 @@ describe('Phase 2 — proposeDocumentId and MDL003 Front Matter generation', () 
     }
   });
 });
+
+describe('MCP server — federation (Phase 2 PR-b: T18-T21)', () => {
+  it('T18: validate_repository validates federation and caps member errors', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-t18-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+      writeFileSync(
+        resolve(homeDir, 'docs/index.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home
+  kind: guide
+  status: active
+---
+# Home
+`,
+      );
+      writeFileSync(
+        resolve(memberDir, 'docs/broken.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.broken
+---
+# Broken
+`,
+      );
+
+      const h = await harness(homeDir);
+      try {
+        const { payload } = await callTool(h, 'validate_repository', {});
+        const answer = payload as {
+          files: number;
+          diagnostics: Array<{ code: string; path: string; severity: string }>;
+          federation: { members: string[]; missingScopes: string[] };
+        };
+
+        assert.equal(answer.files, 2);
+        assert.deepEqual(answer.federation.members, ['member-a']);
+        const memberDiag = answer.diagnostics.find((d) => d.path.startsWith('@member-a//'));
+        assert.ok(memberDiag, 'Must report scoped member diagnostic');
+        assert.equal(memberDiag.code, 'MDL102');
+        assert.equal(memberDiag.severity, 'warning', 'Member error must be capped to warning');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T19: resolve_relation_target resolves envelope target to member repositoryRoot', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-t19-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+      writeFileSync(
+        resolve(memberDir, 'docs/x.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.x
+  kind: guide
+  status: active
+---
+# X
+`,
+      );
+
+      const h = await harness(homeDir);
+      try {
+        const { payload } = await callTool(h, 'resolve_relation_target', { id: '@member-a//docs.x' });
+        const answer = payload as {
+          id: string;
+          paths: string[];
+          repositoryRoot: string;
+          resolution: string;
+        };
+
+        assert.equal(answer.resolution, 'unique');
+        assert.deepEqual(answer.paths, ['@member-a//docs/x.md']);
+        assert.equal(answer.repositoryRoot, resolve(memberDir));
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T20: resolve_relation_target reports ambiguous wildcard with repositories list', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-t20-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberADir = resolve(tmp, 'member-a');
+      const memberBDir = resolve(tmp, 'member-b');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberADir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberBDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+  member-b:
+    local:
+      path: ../member-b
+`,
+      );
+      writeFileSync(
+        resolve(memberADir, 'docs/dup.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.dup
+  kind: guide
+  status: active
+---
+# A
+`,
+      );
+      writeFileSync(
+        resolve(memberBDir, 'docs/dup.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.dup
+  kind: guide
+  status: active
+---
+# B
+`,
+      );
+
+      const h = await harness(homeDir);
+      try {
+        const { payload } = await callTool(h, 'resolve_relation_target', { id: '@*//docs.dup' });
+        const answer = payload as {
+          resolution: string;
+          hits: number;
+          repositories: Array<{ scope: string; root: string; paths: string[] }>;
+        };
+
+        assert.equal(answer.resolution, 'ambiguous');
+        assert.equal(answer.hits, 2);
+        assert.equal(answer.repositories.length, 2);
+        assert.ok(answer.repositories.some((r) => r.scope === 'member-a' && r.root === resolve(memberADir)));
+        assert.ok(answer.repositories.some((r) => r.scope === 'member-b' && r.root === resolve(memberBDir)));
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('T21: list_document_ids filters by scope parameter', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-t21-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+      writeFileSync(
+        resolve(homeDir, 'docs/home.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home
+  kind: guide
+  status: active
+---
+# Home
+`,
+      );
+      writeFileSync(
+        resolve(memberDir, 'docs/member.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.member
+  kind: guide
+  status: active
+---
+# Member
+`,
+      );
+
+      const h = await harness(homeDir);
+      try {
+        // Default: home only
+        const defaultRes = (await callTool(h, 'list_document_ids', {})).payload as {
+          count: number;
+          documents: Array<{ id: string; path: string }>;
+        };
+        assert.equal(defaultRes.count, 1);
+        assert.equal(defaultRes.documents[0]!.id, 'docs.home');
+
+        // Scope '*': whole federation
+        const starRes = (await callTool(h, 'list_document_ids', { scope: '*' })).payload as {
+          count: number;
+          documents: Array<{ id: string; path: string }>;
+        };
+        assert.equal(starRes.count, 2);
+        assert.ok(starRes.documents.some((d) => d.id === 'docs.home'));
+        assert.ok(starRes.documents.some((d) => d.id === 'docs.member' && d.path === '@member-a//docs/member.md'));
+
+        // Scope 'member-a': only member
+        const memRes = (await callTool(h, 'list_document_ids', { scope: 'member-a' })).payload as {
+          count: number;
+          documents: Array<{ id: string; path: string; repositoryRoot?: string }>;
+        };
+        assert.equal(memRes.count, 1);
+        assert.equal(memRes.documents[0]!.id, 'docs.member');
+        assert.equal(memRes.documents[0]!.repositoryRoot, resolve(memberDir));
+
+        // Unknown scope: error + knownScopes
+        const errRes = (await callTool(h, 'list_document_ids', { scope: 'ghost' })).payload as {
+          error: string;
+          knownScopes: string[];
+        };
+        assert.match(errRes.error, /unknown federation scope 'ghost'/);
+        assert.ok(errRes.knownScopes.includes('home'));
+        assert.ok(errRes.knownScopes.includes('member-a'));
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

@@ -34,6 +34,18 @@ export function isExternalPath(path: string): boolean {
   return /^@[a-z][a-z0-9-]*\/\//.test(path);
 }
 
+/**
+ * The federation scope a path belongs to: 'home' for unscoped coordinates
+ * and '@home//…', the scope name for '@scope//…'. Write guards use it to
+ * refuse any write that would land in a read-only federated member.
+ */
+export function scopeOfPath(path: string): 'home' | string {
+  const m = /^@([a-z0-9][a-z0-9-]*)\/\//.exec(path);
+  if (!m) return 'home';
+  const name = m[1] ?? 'home';
+  return name === 'home' ? 'home' : name;
+}
+
 /** Format a scoped path coordinate. */
 export function scopedPath(scope: string, memberPath: string): string {
   return `@${scope}//${memberPath}`;
@@ -268,6 +280,12 @@ class FederatedIndexImpl implements WorkspaceIndex {
       if (scopeHits === 1) return { kind: 'resolved', paths: allPaths };
       return { kind: 'unresolved', missingScopes: [...this.missingScopes] };
     }
+    if (scope === 'home') {
+      const paths = this.home.idToPaths(id);
+      return paths.length > 0
+        ? { kind: 'resolved', paths }
+        : { kind: 'unresolved', missingScopes: [] };
+    }
     if (this.missingScopes.has(scope)) return { kind: 'missing-scope', scope };
     const mount = this.members.get(scope);
     if (!mount) return { kind: 'unknown-scope', scope };
@@ -414,18 +432,69 @@ class FederatedIndexImpl implements WorkspaceIndex {
     return false;
   }
 
+  /**
+   * Find documents whose relations reference `id` (bare or scoped envelope).
+   *
+   * Design rationale:
+   * Lazy derivation — the federated proxy is strictly read-only and does not
+   * maintain a dedicated reverse index cache for cross-repository queries,
+   * avoiding cache invalidation complexity and stale data risks.
+   *
+   * Query cost:
+   * O(home + Σ member documents) full scan across the federation for scoped
+   * queries, scanning live relations of home and each mounted member.
+   */
   referrersOf(id: string): readonly DocPath[] {
-    const homeRefs = this.home.referrersOf(id);
-    const result: DocPath[] = [...homeRefs];
-    const scopes = [...this.members.keys()].sort();
-    for (const scope of scopes) {
-      const mount = this.members.get(scope);
-      if (!mount) continue;
-      for (const p of mount.index.referrersOf(id)) {
-        result.push(scopedPath(scope, p) as DocPath);
+    const { scope, id: bare } = parseScopedTarget(id);
+    const result: DocPath[] = [];
+
+    if (scope === 'bare') {
+      result.push(...this.home.referrersOf(bare));
+      const scopes = [...this.members.keys()].sort();
+      for (const s of scopes) {
+        const mount = this.members.get(s);
+        if (!mount) continue;
+        for (const p of mount.index.referrersOf(bare)) {
+          result.push(scopedPath(s, p) as DocPath);
+        }
+      }
+      return [...new Set(result)].sort();
+    }
+
+    // Scoped target query (@scope//id or @home//id)
+    // 1. Scan home live relations for explicit target match
+    for (const p of this.home.paths()) {
+      const entry = this.home.entryOf(p);
+      if (entry?.relations.some((r) => r.target === id)) {
+        result.push(p);
       }
     }
-    return result;
+
+    // 2. Scan each member for explicit scoped target match and for bare id matches
+    // if target belongs to that member.
+    const scopes = [...this.members.keys()].sort();
+    for (const s of scopes) {
+      const mount = this.members.get(s);
+      if (!mount) continue;
+
+      // Cross-member scoped target declaration in this member (e.g. memberA -> @memberB//x)
+      for (const p of mount.index.paths()) {
+        const entry = mount.index.entryOf(p);
+        if (entry?.relations.some((r) => r.target === id)) {
+          result.push(scopedPath(s, p) as DocPath);
+        }
+      }
+
+      // If the scoped target query is for this member (@s//id), member internal
+      // bare referrers of that id also count as referrers of the scoped entity.
+      if (s === scope) {
+        for (const p of mount.index.referrersOf(bare)) {
+          result.push(scopedPath(s, p) as DocPath);
+        }
+      }
+    }
+
+    return [...new Set(result)].sort();
   }
 
   linkReferrersOf(path: DocPath): readonly DocPath[] {
