@@ -1853,6 +1853,225 @@ describe('Phase 2 — proposeDocumentId and MDL003 Front Matter generation', () 
   });
 });
 
+describe('MCP server — validate_repository filters', () => {
+  it('M1: severityThreshold: error drops warning and keeps error; default keeps both', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-filter-m1-'));
+    mkdirSync(resolve(root, 'docs'), { recursive: true });
+    // MDL302 (error) + MDL602 (warning, CRLF file)
+    writeFileSync(
+      resolve(root, 'docs', 'a.md'),
+      '---\r\nmdlineage:\r\n  schema: 1\r\n  id: docs.a\r\n  kind: policy\r\n  status: active\r\n  relations:\r\n    - type: depends_on\r\n      target: docs.nonexistent\r\n      reason: Needed.\r\n---\r\n\r\n# A\r\n',
+    );
+    try {
+      const h = await harness(root);
+      try {
+        const errorOnly = (await callTool(h, 'validate_repository', { severityThreshold: 'error' })).payload as {
+          diagnostics: Array<{ code: string; severity: string }>;
+          filter: { severityThreshold: string | null; external: string };
+        };
+        const all = (await callTool(h, 'validate_repository', {})).payload as {
+          diagnostics: Array<{ code: string; severity: string }>;
+          filter: { severityThreshold: string | null; external: string };
+        };
+
+        const errorCodes = errorOnly.diagnostics.map((d) => d.code);
+        assert.ok(errorCodes.includes('MDL302'), 'MDL302 error must be kept');
+        assert.ok(!errorCodes.includes('MDL602'), 'MDL602 warning must be filtered out');
+        assert.equal(errorOnly.filter.severityThreshold, 'error');
+        assert.equal(errorOnly.filter.external, 'include');
+
+        const allCodes = all.diagnostics.map((d) => d.code);
+        assert.ok(allCodes.includes('MDL302'));
+        assert.ok(allCodes.includes('MDL602'));
+        assert.equal(all.filter.severityThreshold, null);
+        assert.equal(all.filter.external, 'include');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('M2: severityThreshold: warning honors configured severity override down to hint', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-filter-m2-'));
+    mkdirSync(resolve(root, 'docs'), { recursive: true });
+    writeFileSync(
+      resolve(root, 'mdlineage.config.yaml'),
+      'configVersion: 1\ndiagnostics:\n  MDL602: hint\n',
+    );
+    writeFileSync(
+      resolve(root, 'docs', 'a.md'),
+      '---\r\nmdlineage:\r\n  schema: 1\r\n  id: docs.a\r\n  kind: policy\r\n  status: active\r\n  relations:\r\n    - type: depends_on\r\n      target: docs.nonexistent\r\n      reason: Needed.\r\n---\r\n\r\n# A\r\n',
+    );
+    try {
+      const h = await harness(root);
+      try {
+        const res = (await callTool(h, 'validate_repository', { severityThreshold: 'warning' })).payload as {
+          diagnostics: Array<{ code: string; severity: string }>;
+        };
+        const codes = res.diagnostics.map((d) => d.code);
+        assert.ok(codes.includes('MDL302'), 'error kept under warning threshold');
+        assert.ok(!codes.includes('MDL602'), 'hint MDL602 dropped under warning threshold');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('M3: external: exclude drops federation member diagnostics', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-filter-m3-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        'configVersion: 1\nfederations:\n  member-a:\n    local:\n      path: ../member-a\n',
+      );
+      writeFileSync(
+        resolve(homeDir, 'docs/index.md'),
+        '---\nmdlineage:\n  schema: 1\n  id: docs.home\n  kind: guide\n  status: active\n---\n# Home\n',
+      );
+      writeFileSync(
+        resolve(memberDir, 'docs/broken.md'),
+        '---\nmdlineage:\n  schema: 1\n  id: docs.broken\n---\n# Broken\n',
+      );
+
+      const h = await harness(homeDir);
+      try {
+        const excluded = (await callTool(h, 'validate_repository', { external: 'exclude' })).payload as {
+          diagnostics: Array<{ path: string }>;
+          filter: { external: string };
+        };
+        assert.equal(excluded.filter.external, 'exclude');
+        assert.ok(!excluded.diagnostics.some((d) => d.path.startsWith('@member-a//')), 'member diagnostics must be excluded');
+
+        const included = (await callTool(h, 'validate_repository', { external: 'include' })).payload as {
+          diagnostics: Array<{ path: string }>;
+        };
+        assert.ok(included.diagnostics.some((d) => d.path.startsWith('@member-a//')), 'member diagnostics kept by default/include');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('M4: combined filters: severityThreshold: warning + external: exclude', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-filter-m4-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        'configVersion: 1\ndiagnostics:\n  MDL602: hint\nfederations:\n  member-a:\n    local:\n      path: ../member-a\n',
+      );
+      // Home has MDL302 (error) and MDL602 (hint)
+      writeFileSync(
+        resolve(homeDir, 'docs/index.md'),
+        '---\r\nmdlineage:\r\n  schema: 1\r\n  id: docs.home\r\n  kind: guide\r\n  status: active\r\n  relations:\r\n    - type: depends_on\r\n      target: docs.missing\r\n      reason: r\r\n---\r\n# Home\r\n',
+      );
+      // Member has broken front matter (capped to warning)
+      writeFileSync(
+        resolve(memberDir, 'docs/broken.md'),
+        '---\nmdlineage:\n  schema: 1\n  id: docs.broken\n---\n# Broken\n',
+      );
+
+      const h = await harness(homeDir);
+      try {
+        const res = (await callTool(h, 'validate_repository', {
+          severityThreshold: 'warning',
+          external: 'exclude',
+        })).payload as {
+          diagnostics: Array<{ code: string; path: string }>;
+        };
+        assert.ok(!res.diagnostics.some((d) => d.path.startsWith('@member-a//')), 'member dropped');
+        assert.ok(!res.diagnostics.some((d) => d.code === 'MDL602'), 'hint dropped');
+        assert.ok(res.diagnostics.some((d) => d.code === 'MDL302'), 'home error kept');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('M5: baseline suppression count and files count remain invariant under filtering', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-filter-m5-'));
+    mkdirSync(resolve(root, 'docs'), { recursive: true });
+    writeFileSync(
+      resolve(root, 'docs/a.md'),
+      '---\r\nmdlineage:\r\n  schema: 1\r\n  id: docs.a\r\n  kind: policy\r\n  status: active\r\n  relations:\r\n    - type: supersedes\r\n      target: docs.missing\r\n      reason: Accepted debt.\r\n---\r\n\r\n# A\r\n',
+    );
+    writeFileSync(
+      resolve(root, '.mdlineage-baseline.json'),
+      JSON.stringify({
+        version: 1,
+        generatedAt: '2026-04-18T00:00:00.000Z',
+        codes: {
+          MDL302: ['docs/a.md'],
+        },
+      }),
+    );
+    try {
+      const h = await harness(root);
+      try {
+        const def = (await callTool(h, 'validate_repository', {})).payload as {
+          files: number;
+          baseline: { applied: boolean; suppressed: number };
+          filter: { severityThreshold: string | null; external: string };
+        };
+        const filtered = (await callTool(h, 'validate_repository', { severityThreshold: 'error' })).payload as {
+          files: number;
+          baseline: { applied: boolean; suppressed: number };
+          filter: { severityThreshold: string | null; external: string };
+        };
+
+        assert.equal(def.files, filtered.files, 'files count is workspace universe size');
+        assert.equal(def.baseline.suppressed, filtered.baseline.suppressed, 'baseline suppressed count is invariant to output filtering');
+        assert.equal(def.baseline.suppressed, 1);
+        assert.deepEqual(def.filter, { severityThreshold: null, external: 'include' });
+        assert.deepEqual(filtered.filter, { severityThreshold: 'error', external: 'include' });
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('M6: tools/list advertises optional severityThreshold and external schemas', async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-filter-m6-'));
+    try {
+      const h = await harness(root);
+      try {
+        const tools = await h.client.listTools();
+        const tool = tools.tools.find((t) => t.name === 'validate_repository');
+        assert.ok(tool, 'validate_repository must be registered');
+        const props = (tool.inputSchema as { properties?: Record<string, unknown>; required?: string[] }).properties ?? {};
+        assert.ok(props.severityThreshold, 'severityThreshold must be declared in properties');
+        assert.ok(props.external, 'external must be declared in properties');
+        // Both filters are optional: the protocol contract must not pin callers
+        // to passing them (defaults return the unfiltered, backward-compatible set).
+        const required = (tool.inputSchema as { required?: string[] }).required ?? [];
+        assert.ok(!required.includes('severityThreshold'), 'severityThreshold must be optional');
+        assert.ok(!required.includes('external'), 'external must be optional');
+      } finally {
+        await h.close();
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('MCP server — federation (Phase 2 PR-b: T18-T21)', () => {
   it('T18: validate_repository validates federation and caps member errors', async () => {
     const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-mcp-t18-'));

@@ -55,6 +55,7 @@ import {
   filterUniverseByInclude,
   applyExternalScopePolicy,
   scopeOfPath,
+  isExternalPath,
   defaultConfig,
   type Config,
   type Diagnostic,
@@ -638,6 +639,13 @@ function buildFederatedIndex(context: McpServerContext, scopeFilter?: Set<string
   return { universe, index, homeIndex, mounts };
 }
 
+const SEVERITY_RANK = {
+  error: 3,
+  warning: 2,
+  information: 1,
+  hint: 0,
+} as const;
+
 /**
  * `validate_repository(paths?)` — the workspace channel, cross-file codes included.
  *
@@ -658,16 +666,25 @@ function registerValidateRepository(server: McpServer, context: McpServerContext
       title: 'Validate the repository',
       description:
         'Validate Markdown documents across the repository (or whole federation when federations are configured). Cross-file codes (MDL301 duplicate id, MDL302 unresolved target, MDL305 forbidden cycle, MDL307 ambiguous wildcard, MDL401/MDL402 links and anchors) are validated. Member diagnostics are sovereignty-capped to warning. ' +
-        'A committed baseline suppresses accepted debt. Optional `paths` restricts the pass to a subset.',
+        'A committed baseline suppresses accepted debt. Optional `paths` restricts the pass to a subset. ' +
+        "Optional `severityThreshold` and `external` filter the returned `diagnostics` array only (config diagnostics are never filtered). Defaults return all severities and include federation members. Federation member diagnostics are sovereignty-capped to warning prior to filtering, so threshold 'error' drops all member diagnostics.",
       inputSchema: {
         paths: z
           .array(z.string().min(1))
           .optional()
           .describe('Restrict the pass to these paths (relative to the root or absolute). Omit for the whole workspace.'),
+        severityThreshold: z
+          .enum(['error', 'warning', 'information', 'hint'])
+          .optional()
+          .describe('Minimum severity to keep (error > warning > information > hint). Omit to return every severity (default, backward compatible).'),
+        external: z
+          .enum(['include', 'exclude'])
+          .optional()
+          .describe("Federation member diagnostics ('@scope//' paths): 'include' (default) keeps them; 'exclude' drops them so only the home repository reports."),
       },
       annotations: { readOnlyHint: true },
     },
-    async ({ paths }) => {
+    async ({ paths, severityThreshold, external }) => {
       const scope = paths ? new Set(paths.map((p) => resolvePath(p, context.root))) : null;
       const { index, homeIndex } = buildFederatedIndex(context, scope);
 
@@ -677,6 +694,15 @@ function registerValidateRepository(server: McpServer, context: McpServerContext
       const reported = baseline ? applyExternalScopePolicy(validateWorkspace(index, { baseline, gitClocks })) : all;
       const suppressed = baseline ? all.length - reported.length : 0;
 
+      let filtered = reported;
+      if (severityThreshold !== undefined) {
+        const minRank = SEVERITY_RANK[severityThreshold];
+        filtered = filtered.filter((d) => SEVERITY_RANK[d.severity] >= minRank);
+      }
+      if (external === 'exclude') {
+        filtered = filtered.filter((d) => !isExternalPath(d.path));
+      }
+
       const memberScopes = context.federation ? context.federation.members.map((m) => m.scope) : [];
       const missingScopes = context.federation ? [...context.federation.missingScopes] : [];
 
@@ -684,7 +710,11 @@ function registerValidateRepository(server: McpServer, context: McpServerContext
         root: context.root,
         files: index.size,
         baseline: baseline ? { applied: true, suppressed } : null,
-        diagnostics: reported.map((d) => toToolDiagnostic(d, d.path)),
+        filter: {
+          severityThreshold: severityThreshold ?? null,
+          external: external ?? 'include',
+        },
+        diagnostics: filtered.map((d) => toToolDiagnostic(d, d.path)),
         configDiagnostics: context.configDiagnostics,
         federation: context.federation ? { members: memberScopes, missingScopes } : null,
       });
