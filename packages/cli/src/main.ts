@@ -23,7 +23,7 @@ import { parseArgs } from 'node:util';
 import { cwd as processCwd } from 'node:process';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
-import { resolve, relative, dirname } from 'node:path';
+import { resolve, relative, dirname, sep } from 'node:path';
 import {
   checkFiles,
   renderText,
@@ -473,7 +473,13 @@ async function runChanged(options: ChangedRunOptions): Promise<number> {
     return 0;
   }
 
-  const files: ExpandedPath[] = paths.map((path) => ({ path, asGiven: relative(root, path) || path }));
+  // 索引键/报告键锚定运行目录（runPaths 的词汇表）：--changed 用 git 根枚举
+  // 变更文件，但键拼写若也取 git 根相对，链接归一化与 knownPaths（均锚定
+  // cwd）会错位，嵌套 home 下跨仓别名与仓内相对链接双双误报 MDL401。
+  const files: ExpandedPath[] = paths.map((path) => ({
+    path,
+    asGiven: relative(options.cwd, path).split(sep).join('/') || path,
+  }));
   for (const file of files) {
     if (readWorktree(file.path) === null) {
       process.stderr.write(`mdlineage: cannot read changed file: ${file.asGiven}\n`);

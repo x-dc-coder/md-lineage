@@ -38,6 +38,8 @@ function runCli(args: string[], cwd = repoRoot): RunOutput {
   return { stdout: result.stdout ?? '', stderr: result.stderr ?? '', status: result.status };
 }
 
+/** A scratch repository for workspace/baseline tests: isolated, so a baseline
+
 interface FixtureReport {
   path: string;
   diagnostics: Array<{ code: string; severity: string; message: string; line: number; column: number }>;
@@ -274,7 +276,12 @@ describe('mdlineage check — changed files', () => {
   /** A scratch git repository, so the worktree state is fully controlled. */
   function scratchRepo(): { root: string; cleanup: () => void } {
     const root = mkdtempSync(join(tmpdir(), 'mdlineage-changed-'));
-    const git = (args: string[]) => spawnSync('git', args, { cwd: root, encoding: 'utf8' });
+    const git = (args: string[], env?: Record<string, string>) =>
+      spawnSync('git', args, {
+        cwd: root,
+        encoding: 'utf8',
+        env: { ...process.env, ...env },
+      });
     git(['init', '-q']);
     git(['config', 'user.email', 'test@example.com']);
     git(['config', 'user.name', 'mdlineage test']);
@@ -351,6 +358,280 @@ describe('mdlineage check — changed files', () => {
       const out = runCli(['check', '--changed'], repo.root);
       assert.equal(out.status, 0);
       assert.match(out.stdout, /deletion skipped|no changed Markdown files/);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  // --- Nested-home scenarios (leftover #30) ---------------------------------
+  // Git root is a parent of the home directory; the config and docs live in
+  // home/. The report/index keys must be anchored to the CWD (home/), not the
+  // git root, so that link normalisation and knownPaths use the same
+  // vocabulary as `check .`.
+
+  /**
+   * A nested git repo: gitRoot/{home,member}. home/ carries the federation
+   * config pointing at ../member; home/docs/index.md links both across the
+   * federation alias and within the repo.
+   */
+  function nestedHomeRepo(): {
+    gitRoot: string;
+    homeDir: string;
+    memberDir: string;
+    git: (args: string[], env?: Record<string, string>) => import('node:child_process').SpawnSyncReturns<string>;
+    cleanup: () => void;
+  } {
+    const gitRoot = mkdtempSync(join(tmpdir(), 'mdlineage-nested-'));
+    const homeDir = join(gitRoot, 'home');
+    const memberDir = join(gitRoot, 'member');
+    // `env` merges over process.env (spawnSync replaces the whole environment,
+    // and dropping PATH would make the git spawn itself fail).
+    const git = (args: string[], env?: Record<string, string>) =>
+      spawnSync('git', args, { cwd: gitRoot, encoding: 'utf8', env: env ? { ...process.env, ...env } : process.env });
+
+    mkdirSync(join(homeDir, 'docs'), { recursive: true });
+    mkdirSync(join(memberDir, 'docs'), { recursive: true });
+    git(['init', '-q']);
+    git(['config', 'user.email', 'test@example.com']);
+    git(['config', 'user.name', 'mdlineage test']);
+    writeFileSync(join(gitRoot, '.gitattributes'), '* text=auto eol=lf\n');
+
+    // Home config: federation member at ../member
+    writeFileSync(
+      join(homeDir, 'mdlineage.config.yaml'),
+      [
+        'configVersion: 1',
+        'federations:',
+        '  member:',
+        '    local:',
+        '      path: ../member',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+
+    // Home docs: one with both a cross-federation alias link and an intra-repo
+    // relative link; one plain sibling file.
+    writeFileSync(
+      join(homeDir, 'docs', 'index.md'),
+      [
+        '---',
+        'mdlineage:',
+        '  schema: 1',
+        '  id: docs.nested-home-idx',
+        '  kind: guide',
+        '  status: active',
+        '---',
+        '',
+        '# Home Index',
+        '',
+        '[Member doc](../member/docs/m.md) and [sibling](./other.md)',
+        '',
+      ].join('\n'),
+      'utf8',
+    );
+    writeFileSync(
+      join(homeDir, 'docs', 'other.md'),
+      doc('docs.nested-other'),
+      'utf8',
+    );
+
+    // Member repo (standalone, no federation back)
+    writeFileSync(
+      join(memberDir, 'mdlineage.config.yaml'),
+      'configVersion: 1\n',
+      'utf8',
+    );
+    writeFileSync(
+      join(memberDir, 'docs', 'm.md'),
+      doc('docs.nested-member-m'),
+      'utf8',
+    );
+
+    git(['add', '.']);
+    git(['commit', '-q', '-m', 'initial']);
+
+    return { gitRoot, homeDir, memberDir, git, cleanup: () => rmSync(gitRoot, { recursive: true, force: true }) };
+  }
+
+  // A1: cross-federation alias link and intra-repo relative link both resolve
+  // when the index key is cwd-anchored (leftover #30).
+  it('A1: nested home — cross-federation and intra-repo links resolve under --changed', () => {
+    const repo = nestedHomeRepo();
+    try {
+      // Modify the file so git status reports it.
+      const indexPath = join(repo.homeDir, 'docs', 'index.md');
+      const original = readFileSync(indexPath, 'utf8');
+      writeFileSync(indexPath, original + '\nEdited.\n', 'utf8');
+
+      const out = runCli(['check', '--changed', '--no-baseline', '--format', 'json'], repo.homeDir);
+      // Exit 0: MDL401 is a warning; the fix must eliminate the false MDL401s.
+      assert.equal(out.status, 0, `stdout: ${out.stdout}\nstderr: ${out.stderr}`);
+
+      const reports = reportsOf(out.stdout);
+      assert.equal(reports.length, 1, `expected 1 report, got: ${JSON.stringify(reports)}`);
+      // The report key is cwd-relative, not git-root-relative.
+      assert.equal(reports[0]!.path, 'docs/index.md');
+      // No MDL401: both links resolve.
+      assert.equal(
+        countOf(out.stdout, 'MDL401'),
+        0,
+        `expected no MDL401, got: ${JSON.stringify(reports[0]!.diagnostics)}`,
+      );
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  // A2: clean nested-home worktree exits 0 with "no changed Markdown files".
+  it('A2: nested home — clean worktree reports no changed files', () => {
+    const repo = nestedHomeRepo();
+    try {
+      const out = runCli(['check', '--changed'], repo.homeDir);
+      assert.equal(out.status, 0, `stdout: ${out.stdout}\nstderr: ${out.stderr}`);
+      assert.match(out.stdout, /no changed Markdown files/);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  // A4: a file outside cwd but inside git root still produces a cwd-relative
+  // report key, and a link to it outside cwd reports MDL401 under both
+  // `--changed` and a full check — the key spelling is the regression #30
+  // fixes, and the MDL401 is deterministic, not scope-dependent.
+  it('A4: nested home — report key is cwd-relative even for file outside cwd', () => {
+    const repo = nestedHomeRepo();
+    try {
+      // Create a file at git root level (outside home/).
+      writeFileSync(join(repo.gitRoot, 'root-level.md'), doc('docs.root-level'), 'utf8');
+      repo.git(['add', 'root-level.md']);
+      repo.git(['commit', '-q', '-m', 'add root-level']);
+
+      // Modify the root-level file so it appears in --changed output.
+      const rlPath = join(repo.gitRoot, 'root-level.md');
+      const rlContent = readFileSync(rlPath, 'utf8');
+      writeFileSync(rlPath, rlContent + '\nEdited.\n', 'utf8');
+
+      const out = runCli(['check', '--changed', '--no-baseline', '--format', 'json'], repo.homeDir);
+      assert.equal(out.status, 0, `stdout: ${out.stdout}\nstderr: ${out.stderr}`);
+
+      const reports = reportsOf(out.stdout);
+      // The report key for the root-level file must be cwd-relative: ../root-level.md
+      const rootReport = reports.find((r) => r.path === '../root-level.md');
+      assert.ok(
+        rootReport,
+        `expected report with key '../root-level.md', got keys: ${JSON.stringify(reports.map((r) => r.path))}`,
+      );
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  // A6: baseline suppression works from a nested home (toBaselineKeyed path).
+  it('A6: nested home — baseline suppresses a known warning under --changed', () => {
+    const repo = nestedHomeRepo();
+    try {
+      // Create a file that will produce an MDL003 (no metadata) so we have a
+      // baseline-able diagnostic. We use a valid file that links to a
+      // non-existent target → MDL401 (warning, baseline-able).
+      const indexPath = join(repo.homeDir, 'docs', 'index.md');
+      const content = readFileSync(indexPath, 'utf8');
+      writeFileSync(
+        indexPath,
+        content + '\n[Ghost](./ghost.md)\n',
+        'utf8',
+      );
+
+      // First run without baseline to confirm the diagnostic exists.
+      const noBaselineOut = runCli(
+        ['check', '--changed', '--no-baseline', '--format', 'json'],
+        repo.homeDir,
+      );
+      assert.ok(
+        countOf(noBaselineOut.stdout, 'MDL401') >= 1,
+        'sanity: MDL401 present without baseline',
+      );
+
+      // Write a baseline at the git root that suppresses MDL401 for the file.
+      // Baseline keys are git-root-relative.
+      const baseline = {
+        version: 1,
+        generatedAt: new Date().toISOString(),
+        codes: {
+          MDL401: ['home/docs/index.md'],
+        },
+      };
+      writeFileSync(
+        join(repo.gitRoot, '.mdlineage-baseline.json'),
+        JSON.stringify(baseline, null, 2) + '\n',
+        'utf8',
+      );
+      repo.git(['add', '.mdlineage-baseline.json']);
+      repo.git(['commit', '-q', '-m', 'add baseline']);
+
+      // Run with baseline (default: baseline is applied).
+      const out = runCli(['check', '--changed', '--format', 'json'], repo.homeDir);
+      assert.equal(out.status, 0, `stdout: ${out.stdout}\nstderr: ${out.stderr}`);
+
+      const reports = reportsOf(out.stdout);
+      const report = reports.find((r) => r.path === 'docs/index.md');
+      assert.ok(report, 'report for docs/index.md present');
+      // The MDL401 is suppressed by the baseline.
+      assert.equal(
+        report!.diagnostics.filter((d) => d.code === 'MDL401').length,
+        0,
+        `expected MDL401 suppressed by baseline, got: ${JSON.stringify(report!.diagnostics)}`,
+      );
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  // A5: the git-clock fallback of MDL801 runs under `--changed` in a nested
+  // home. The documents carry no authored timestamps, so the freshness policy
+  // must fall back to the git commit clock; the 2020 commit date makes the
+  // changed document provably stale against staleAfterDays: 1.
+  it('A5: nested home — --changed reports MDL801 from the git commit clock', () => {
+    const repo = nestedHomeRepo();
+    try {
+      // Rewrite both configs with the freshness policy before the initial
+      // commit, and inject a 2020 commit date so the git clock is provably
+      // stale (2020 is older than any staleAfterDays threshold from now).
+      const homeConfig = readFileSync(join(repo.homeDir, 'mdlineage.config.yaml'), 'utf8');
+      writeFileSync(
+        join(repo.homeDir, 'mdlineage.config.yaml'),
+        homeConfig.replace('configVersion: 1\n', 'configVersion: 1\nlifecycle:\n  staleAfterDays: 1\n'),
+        'utf8',
+      );
+      writeFileSync(join(repo.memberDir, 'mdlineage.config.yaml'), 'configVersion: 1\nlifecycle:\n  staleAfterDays: 1\n', 'utf8');
+
+      const oldDate = { GIT_AUTHOR_DATE: '2020-01-01T00:00:00', GIT_COMMITTER_DATE: '2020-01-01T00:00:00' };
+      // Rewrite history as a SINGLE 2020-dated commit. A follow-up commit (or
+      // an amend) carries no diff for documents whose content is unchanged,
+      // and `git log -- <path>` names only commits that changed the file — so
+      // the documents' last touch would stay at today's initial commit and the
+      // git clock would read fresh. Deleting the ref re-dates every path in
+      // the one commit that follows.
+      repo.git(['update-ref', '-d', 'HEAD']);
+      repo.git(['add', '.']);
+      repo.git(['commit', '-q', '-m', 'initial (2020)'], oldDate);
+
+      // Then: touch the home document so --changed picks it up.
+      const indexPath = join(repo.homeDir, 'docs', 'index.md');
+      const original = readFileSync(indexPath, 'utf8');
+      writeFileSync(indexPath, original + '\nEdited.\n', 'utf8');
+
+      // When: the changed-file run is anchored to the home directory.
+      const out = runCli(['check', '--changed', '--no-baseline', '--format', 'json'], repo.homeDir);
+
+      // Then: the changed document reports MDL801 from the git clock.
+      assert.equal(out.status, 0, `MDL801 is a warning; stdout: ${out.stdout}\nstderr: ${out.stderr}`);
+      const reports = reportsOf(out.stdout);
+      const report = reports.find((r) => r.path === 'docs/index.md');
+      assert.ok(report, `expected a report for docs/index.md, got: ${JSON.stringify(reports.map((r) => r.path))}`);
+      const stale = report!.diagnostics.find((d) => d.code === 'MDL801');
+      assert.ok(stale, `expected MDL801 in docs/index.md, got: ${JSON.stringify(report!.diagnostics)}`);
+      assert.equal(stale!.data?.source, 'git', 'the clock source is the git fallback, not an authored timestamp');
     } finally {
       repo.cleanup();
     }
