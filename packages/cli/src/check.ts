@@ -240,7 +240,7 @@ export async function checkFiles(
     const homeIndex = createWorkspaceIndex(indexFiles, config, knownPaths);
     let index = homeIndex;
 
-    if (federation && federation.members.length > 0) {
+    if (federation && (federation.members.length > 0 || federation.missingScopes.length > 0)) {
       const mounts = new Map<string, FederatedMemberMount>();
       for (const plan of federation.members) {
         const universe = scanWorkspaceUniverse(plan.root, plan.config);
@@ -248,7 +248,9 @@ export async function checkFiles(
         const memberIdx = createWorkspaceIndex(filtered.documents, plan.config, filtered.knownPaths);
         mounts.set(plan.scope, { scope: plan.scope, index: memberIdx, alias: plan.alias });
       }
-      index = createFederatedIndex(homeIndex, mounts);
+      index = createFederatedIndex(homeIndex, mounts, {
+        missingScopes: new Set(federation.missingScopes),
+      });
     }
 
     const gitClocks = await gitClocksForIndex(homeIndex, options.cwd);

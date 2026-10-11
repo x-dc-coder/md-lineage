@@ -129,6 +129,13 @@ export interface WorkspaceIndex {
    * resolve across federation boundaries).
    */
   idToPathsIn?(id: string, contextPath: DocPath): readonly DocPath[];
+  /**
+   * Optional federation-aware relation-target routing: parses the @scope//id
+   * envelope and applies the three-level rule (bare = own repository, scoped =
+   * exact scope, @* = whole federation). Absent on ordinary indexes; the
+   * federation proxy implements it. PR-a (Issue #4 Phase 2).
+   */
+  resolveRelationTarget?(target: string, contextPath: DocPath): RelationTargetResolution;
   ids(): IterableIterator<string>;
   entryOf(path: DocPath): DocEntry | null;
   /** Paths whose relations point at `id`; empty for unknown ids. */
@@ -162,6 +169,14 @@ export interface WorkspaceIndex {
    */
   caseInsensitiveLookup?(path: DocPath): DocPath | null;
 }
+
+/** Outcome of routing one relation target through the index (see resolveRelationTarget). */
+export type RelationTargetResolution =
+  | { readonly kind: 'resolved'; readonly paths: readonly DocPath[] }
+  | { readonly kind: 'unresolved'; readonly missingScopes: readonly string[] }
+  | { readonly kind: 'unknown-scope'; readonly scope: string }
+  | { readonly kind: 'missing-scope'; readonly scope: string }
+  | { readonly kind: 'ambiguous'; readonly candidates: readonly DocPath[] };
 
 /** Result of an incremental update: who must be re-validated. */
 export interface UpdateResult {

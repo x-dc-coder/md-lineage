@@ -8,7 +8,7 @@
 
 import { relative, sep } from 'node:path';
 import type { Config } from './config.js';
-import type { DocEntry, DocPath, RelationEntry, WorkspaceIndex } from './workspace-index.js';
+import type { DocEntry, DocPath, RelationEntry, WorkspaceIndex, RelationTargetResolution } from './workspace-index.js';
 import type { WorkspaceUniverse } from './workspace-scan.js';
 import { matchesPattern } from './path-filter.js';
 
@@ -37,6 +37,25 @@ export function isExternalPath(path: string): boolean {
 /** Format a scoped path coordinate. */
 export function scopedPath(scope: string, memberPath: string): string {
   return `@${scope}//${memberPath}`;
+}
+
+/** A relation target split into its optional federation envelope and the id. */
+export interface ScopedTarget {
+  /** 'bare' when the target carries no scope or wildcard prefix. */
+  readonly scope: 'bare' | string;
+  readonly id: string;
+}
+
+/**
+ * Split a relation target into its federation envelope and id. Never throws:
+ * a target the schema rejected (MDL103) still arrives here from direct
+ * callers (LSP/MCP/tests), and anything envelope-shaped but malformed is
+ * reported as the bare spelling it carries — resolution then simply fails.
+ */
+export function parseScopedTarget(target: string): ScopedTarget {
+  const match = /^@([a-z][a-z0-9-]*|\*)\/\/(.+)$/.exec(target);
+  if (!match) return { scope: 'bare', id: target };
+  return { scope: match[1] ?? '*', id: match[2] ?? target };
 }
 
 export interface FederatedMemberMount {
@@ -105,12 +124,18 @@ export function applyExternalScopePolicy<
 class FederatedIndexImpl implements WorkspaceIndex {
   private readonly home: WorkspaceIndex;
   private readonly members: ReadonlyMap<string, FederatedMemberMount>;
+  private readonly missingScopes: ReadonlySet<string>;
   /** Sorted by alias length descending for greedy match. */
   private readonly sortedMounts: readonly FederatedMemberMount[];
 
-  constructor(home: WorkspaceIndex, members: ReadonlyMap<string, FederatedMemberMount>) {
+  constructor(
+    home: WorkspaceIndex,
+    members: ReadonlyMap<string, FederatedMemberMount>,
+    options?: { readonly missingScopes?: ReadonlySet<string> }
+  ) {
     this.home = home;
     this.members = members;
+    this.missingScopes = options?.missingScopes ?? new Set<string>();
     this.sortedMounts = [...members.values()].sort((a, b) => b.alias.length - a.alias.length);
   }
 
@@ -209,6 +234,47 @@ class FederatedIndexImpl implements WorkspaceIndex {
 
     // Otherwise contextPath is in home repository
     return this.home.idToPaths(id);
+  }
+
+  resolveRelationTarget(target: string, contextPath: DocPath): RelationTargetResolution {
+    const { scope, id } = parseScopedTarget(target);
+    if (scope === 'bare') {
+      const paths = this.idToPathsIn(id, contextPath);
+      return paths.length > 0
+        ? { kind: 'resolved', paths }
+        : { kind: 'unresolved', missingScopes: [] };
+    }
+    if (scope === '*') {
+      const allPaths: DocPath[] = [];
+      let scopeHits = 0;
+
+      const homeHits = this.home.idToPaths(id);
+      if (homeHits.length > 0) {
+        scopeHits++;
+        for (const p of homeHits) allPaths.push(p);
+      }
+
+      for (const [s, mount] of this.members.entries()) {
+        const memberHits = mount.index.idToPaths(id);
+        if (memberHits.length > 0) {
+          scopeHits++;
+          for (const p of memberHits) {
+            allPaths.push(scopedPath(s, p) as DocPath);
+          }
+        }
+      }
+
+      if (scopeHits >= 2) return { kind: 'ambiguous', candidates: allPaths };
+      if (scopeHits === 1) return { kind: 'resolved', paths: allPaths };
+      return { kind: 'unresolved', missingScopes: [...this.missingScopes] };
+    }
+    if (this.missingScopes.has(scope)) return { kind: 'missing-scope', scope };
+    const mount = this.members.get(scope);
+    if (!mount) return { kind: 'unknown-scope', scope };
+    const paths = mount.index.idToPaths(id).map((p) => scopedPath(scope, p) as DocPath);
+    return paths.length > 0
+      ? { kind: 'resolved', paths }
+      : { kind: 'unresolved', missingScopes: [] };
   }
 
   entryOf(path: DocPath): DocEntry | null {
@@ -427,7 +493,8 @@ class FederatedIndexImpl implements WorkspaceIndex {
  */
 export function createFederatedIndex(
   home: WorkspaceIndex,
-  members: ReadonlyMap<string, FederatedMemberMount>
+  members: ReadonlyMap<string, FederatedMemberMount>,
+  options?: { readonly missingScopes?: ReadonlySet<string> }
 ): WorkspaceIndex {
-  return new FederatedIndexImpl(home, members);
+  return new FederatedIndexImpl(home, members, options);
 }

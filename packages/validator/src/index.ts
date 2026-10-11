@@ -40,6 +40,8 @@ export {
   foldAliasPrefix,
   isExternalPath,
   scopedPath,
+  parseScopedTarget,
+  type ScopedTarget,
   filterUniverseByInclude,
   applyExternalScopePolicy,
   createFederatedIndex,
@@ -84,7 +86,7 @@ export { getSchemaValidator, validateAgainstSchema, resolveErrorRange } from './
 export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset, collectAnchors, collectHeadingTexts, extractSamePageLinks } from './document-validator.js';
 export { Slugger, slugifyHeading } from './slugger.js';
 export type { ValidateInput, ValidateResult } from './index-types.js';
-export type { WorkspaceIndex, DocEntry, DocPath, RelationEntry, LinkEntry, UpdateResult } from './workspace-index.js';
+export type { WorkspaceIndex, DocEntry, DocPath, RelationEntry, LinkEntry, UpdateResult, RelationTargetResolution } from './workspace-index.js';
 export {
   createWorkspaceIndex,
   updateFile,

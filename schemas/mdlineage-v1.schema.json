@@ -92,9 +92,9 @@
         },
         "target": {
           "type": "string",
-          "pattern": "^[a-z0-9]+(?:[.-][a-z0-9]+)*$",
+          "pattern": "^(?:@(?:[a-z][a-z0-9-]*|\\*)//)?[a-z0-9]+(?:[.-][a-z0-9]+)*$",
           "maxLength": 128,
-          "description": "MDL103 — the relation target, a stable document ID (never a file path). Resolution to exactly one known document is MDL302 (workspace layer). Pattern source of truth: same v1 default as `id`, overridable only via a schemaFile copy of this schema."
+          "description": "MDL103 — the relation target, a stable document ID (never a file path). Resolution to exactly one known document is MDL302 (workspace layer). Pattern source of truth: same v1 default as `id`, overridable only via a schemaFile copy of this schema. Envelope grammar scoped envelope `@scope//id` routes to that federation scope; `@*//id` searches the whole federation (MDL307 when ambiguous). Envelope grammar scope segment matches `^[a-z][a-z0-9-]*$`; unknown scopes are MDL302 at the workspace layer."
         },
         "reason": {
           "type": "string",

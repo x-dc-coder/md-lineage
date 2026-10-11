@@ -126,6 +126,20 @@
       "description": "An active document references a deprecated target via a blocking relation. Only covers relation types in lifecycle.blockingRelations (defaults to depends_on, implements, refines; deliberately excludes supersedes)."
     },
     {
+      "code": "MDL307",
+      "layer": "workspace-semantic",
+      "severity": "error",
+      "message": "Relation target is ambiguous across federation scopes",
+      "description": "A @*//id target resolves in more than one repository of the federation closure. Reported at the relation declaration; data.candidates lists every claiming document in scoped coordinates. Severity follows sovereignty: error in the declaring home repository, capped to warning when declared in a member."
+    },
+    {
+      "code": "MDL308",
+      "layer": "workspace-semantic",
+      "severity": "hint",
+      "message": "Relation target cannot be resolved: federated member missing",
+      "description": "A relation could have routed to a federation scope whose member repository is missing (missing: warn): an explicit @scope//id naming that scope, or a @*//id that resolves nowhere while declared members are missing. Reported per relation at its declaration; a hint because the run proceeds without that member and the author may not be able to fix the checkout."
+    },
+    {
       "code": "MDL401",
       "layer": "link",
       "severity": "warning",

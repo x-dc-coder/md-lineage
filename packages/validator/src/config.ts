@@ -141,6 +141,8 @@ export interface ResolvedFederation {
   readonly homeRoot: string;
   /** DFS pre-order across the whole federation closure (transitive members included). */
   readonly members: readonly FederationMemberPlan[];
+  /** Scopes declared but not mounted (member missing, missing: warn). Feeds MDL308. */
+  readonly missingScopes: readonly string[];
 }
 
 export interface FederationResolution {
@@ -156,7 +158,7 @@ export interface FederationResolution {
 export function resolveFederations(config: Config, homeRoot: string): FederationResolution {
   const diagnostics: ConfigDiagnostic[] = [];
   if (!config.federations || config.federations.size === 0) {
-    return { federation: { homeRoot, members: [] }, diagnostics: [] };
+    return { federation: { homeRoot, members: [], missingScopes: [] }, diagnostics: [] };
   }
 
   let realHome: string;
@@ -169,6 +171,7 @@ export function resolveFederations(config: Config, homeRoot: string): Federation
   const stack = new Set<string>([realHome]);
   const visited = new Map<string, string>(); // realpath -> scope
   const members: FederationMemberPlan[] = [];
+  const missingScopes = new Set<string>();
 
   function dfs(
     currentConfig: Config,
@@ -188,6 +191,7 @@ export function resolveFederations(config: Config, homeRoot: string): Federation
       const targetPath = resolve(currentDeclaringDir, memberConfig.localPath);
       let realMember: string;
       if (!existsSync(targetPath)) {
+        missingScopes.add(scope);
         diagnostics.push({
           code: 'MDL902',
           severity: memberConfig.missing === 'error' ? 'error' : 'warning',
@@ -324,7 +328,7 @@ export function resolveFederations(config: Config, homeRoot: string): Federation
     return { federation: null, diagnostics };
   }
 
-  return { federation: { homeRoot: realHome, members }, diagnostics };
+  return { federation: { homeRoot: realHome, members, missingScopes: [...missingScopes] }, diagnostics };
 }
 
 /** One federated member as declared in mdlineage.config.yaml (schema-facing shape). */
@@ -1358,6 +1362,8 @@ const DEFAULT_SEVERITIES: Readonly<Record<string, 'error' | 'warning' | 'informa
   MDL304: 'warning',
   MDL305: 'error',
   MDL306: 'warning',
+  MDL307: 'error',
+  MDL308: 'hint',
   MDL401: 'warning',
   MDL402: 'warning',
   MDL403: 'warning',

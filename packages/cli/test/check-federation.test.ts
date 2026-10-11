@@ -277,4 +277,305 @@ federations:
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  it('B16: scoped relation in home resolves across member end-to-end', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mdl-cli-b16-'));
+    try {
+      const homeDir = join(tmp, 'home');
+      const memberDir = join(tmp, 'member-a');
+      mkdirSync(join(homeDir, 'docs'), { recursive: true });
+      mkdirSync(join(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        join(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(homeDir, 'docs', 'index.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home-idx
+  kind: guide
+  status: active
+  relations:
+    - type: related_to
+      target: "@member-a//docs.fed-skills"
+---
+# Home Doc
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(memberDir, 'docs', 'skills.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.fed-skills
+  kind: guide
+  status: active
+---
+# Member Skills
+`,
+        'utf8'
+      );
+
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], homeDir);
+      assert.equal(out.status, 0, `check should exit 0, stderr: ${out.stderr}`);
+      const json = parseJson(out.stdout);
+      const homeReport = json.reports.find((r) => r.path === 'docs/index.md');
+      assert.ok(homeReport);
+      assert.equal(
+        homeReport.diagnostics.find((d) => d.code === 'MDL302'),
+        undefined,
+        'Scoped target should resolve without MDL302'
+      );
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('B17: home wildcard target with two member claiming id produces MDL307 and exits 1', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mdl-cli-b17-'));
+    try {
+      const homeDir = join(tmp, 'home');
+      const memberADir = join(tmp, 'member-a');
+      const memberBDir = join(tmp, 'member-b');
+      mkdirSync(join(homeDir, 'docs'), { recursive: true });
+      mkdirSync(join(memberADir, 'docs'), { recursive: true });
+      mkdirSync(join(memberBDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        join(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+  member-b:
+    local:
+      path: ../member-b
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(homeDir, 'docs', 'index.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home-idx
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@*//docs.dup"
+      reason: ambiguous wildcard
+---
+# Home Doc
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(memberADir, 'docs', 'a.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.dup
+  kind: guide
+  status: active
+---
+# Member A Dup
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(memberBDir, 'docs', 'b.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.dup
+  kind: guide
+  status: active
+---
+# Member B Dup
+`,
+        'utf8'
+      );
+
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], homeDir);
+      assert.equal(out.status, 1, 'MDL307 in home repository must fail with exit code 1');
+      const json = parseJson(out.stdout);
+      const homeReport = json.reports.find((r) => r.path === 'docs/index.md');
+      assert.ok(homeReport);
+      const mdl307 = homeReport.diagnostics.find((d) => d.code === 'MDL307');
+      assert.ok(mdl307, 'Must report MDL307');
+      assert.equal(mdl307.severity, 'error');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('B18: --no-federation causes envelope target to fail with MDL302', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mdl-cli-b18-'));
+    try {
+      const homeDir = join(tmp, 'home');
+      const memberDir = join(tmp, 'member-a');
+      mkdirSync(join(homeDir, 'docs'), { recursive: true });
+      mkdirSync(join(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        join(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(homeDir, 'docs', 'index.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home-idx
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: "@member-a//docs.fed-skills"
+      reason: envelope with no fed
+---
+# Home Doc
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(memberDir, 'docs', 'skills.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.fed-skills
+  kind: guide
+  status: active
+---
+# Member Skills
+`,
+        'utf8'
+      );
+
+      const out = runCli(['check', '.', '--no-federation', '--no-baseline', '--format', 'json'], homeDir);
+      assert.equal(out.status, 1, 'Unresolvable envelope target under --no-federation exits 1');
+      const json = parseJson(out.stdout);
+      const homeReport = json.reports.find((r) => r.path === 'docs/index.md');
+      assert.ok(homeReport);
+      const mdl302 = homeReport.diagnostics.find((d) => d.code === 'MDL302');
+      assert.ok(mdl302, 'Under --no-federation envelope target degrades to MDL302');
+      assert.equal(mdl302.severity, 'error');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('home dangling bare id with missing:warn member reports MDL302 error and exits 1', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mdl-cli-bare-dangling-'));
+    try {
+      const homeDir = join(tmp, 'home');
+      mkdirSync(join(homeDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        join(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  ghost-member:
+    local:
+      path: ../nonexistent-ghost
+    missing: warn
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(homeDir, 'docs', 'index.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home-idx
+  kind: guide
+  status: active
+  relations:
+    - type: related_to
+      target: docs.nonexistent
+---
+# Home Doc
+`,
+        'utf8'
+      );
+
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], homeDir);
+      assert.equal(out.status, 1, 'Dangling bare id must exit 1');
+      const json = parseJson(out.stdout);
+      const homeReport = json.reports.find((r) => r.path === 'docs/index.md');
+      assert.ok(homeReport);
+      const mdl302 = homeReport.diagnostics.find((d) => d.code === 'MDL302');
+      assert.ok(mdl302, 'Must report MDL302');
+      assert.equal(mdl302.severity, 'error');
+      const mdl308 = homeReport.diagnostics.find((d) => d.code === 'MDL308');
+      assert.equal(mdl308, undefined, 'Must not report MDL308 for bare id');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('home with only missing:warn member and @scope// target mounts proxy, reports MDL308 hint and exits 0', () => {
+    const tmp = mkdtempSync(join(tmpdir(), 'mdl-cli-all-missing-'));
+    try {
+      const homeDir = join(tmp, 'home');
+      mkdirSync(join(homeDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        join(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  ghost-member:
+    local:
+      path: ../nonexistent-ghost
+    missing: warn
+`,
+        'utf8'
+      );
+      writeFileSync(
+        join(homeDir, 'docs', 'index.md'),
+        `---
+mdlineage:
+  schema: 1
+  id: docs.home-idx
+  kind: guide
+  status: active
+  relations:
+    - type: related_to
+      target: "@ghost-member//docs.x"
+---
+# Home Doc
+`,
+        'utf8'
+      );
+
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], homeDir);
+      assert.equal(out.status, 0, 'MDL308 hint must exit 0');
+      const json = parseJson(out.stdout);
+      const homeReport = json.reports.find((r) => r.path === 'docs/index.md');
+      assert.ok(homeReport);
+      const mdl308 = homeReport.diagnostics.find((d) => d.code === 'MDL308');
+      assert.ok(mdl308, 'Must report MDL308 for missing-scope target');
+      assert.equal(mdl308.severity, 'hint');
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });

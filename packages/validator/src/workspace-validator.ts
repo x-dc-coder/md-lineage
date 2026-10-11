@@ -37,17 +37,33 @@ import type { Diagnostic } from './diagnostic.js';
 import { layerOf, severityOf } from './diagnostic.js';
 import type { LineMap } from './source-map.js';
 import { rangeAt } from './source-map.js';
-import type { DocEntry, DocPath, WorkspaceIndex } from './workspace-index.js';
+import type { DocEntry, DocPath, WorkspaceIndex, RelationTargetResolution } from './workspace-index.js';
 import { resolveLinkPath } from './workspace-index.js';
 import type { Baseline } from './baseline.js';
 import { suppressWithBaseline } from './baseline.js';
 import { checkHostLink } from './host-links.js';
+import { scopedPath } from './federation.js';
 
 /** A read-only empty neighbour list, reused for every node without edges. */
 const EMPTY_PATHS: readonly string[] = Object.freeze([]);
 
 function idsFor(index: WorkspaceIndex, id: string, contextPath: DocPath): readonly DocPath[] {
   return index.idToPathsIn ? index.idToPathsIn(id, contextPath) : index.idToPaths(id);
+}
+
+function resolveTarget(index: WorkspaceIndex, target: string, contextPath: DocPath): RelationTargetResolution {
+  if (index.resolveRelationTarget) return index.resolveRelationTarget(target, contextPath);
+  const paths = idsFor(index, target, contextPath);
+  return paths.length > 0 ? { kind: 'resolved', paths } : { kind: 'unresolved', missingScopes: [] };
+}
+
+function scopesOf(paths: readonly DocPath[]): readonly string[] {
+  const scopes = new Set<string>();
+  for (const p of paths) {
+    const m = /^@([a-z][a-z0-9-]*)\/\//.exec(p);
+    scopes.add(m && m[1] ? m[1] : 'home');
+  }
+  return [...scopes].sort();
 }
 
 /** Diagnostics carrying the file they belong to: the workspace report unit. */
@@ -108,7 +124,7 @@ export function validateWorkspace(
     }
     out.push(
       ...mdl301(entry, index, config),
-      ...mdl302(entry, index, config),
+      ...mdlTarget(entry, index, config),
       ...mdl306(entry, index, config),
       ...mdlSelfReference(entry, index, config),
     );
@@ -185,20 +201,88 @@ function mdl301(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
  * distinct ids (the second claim of either is MDL301-free) and a relation
  * spelled with different case is MDL302, not a match.
  */
-function mdl302(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
+function mdlTarget(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
   const out: WorkspaceDiagnostic[] = [];
   for (let i = 0; i < entry.relations.length; i++) {
     const rel = entry.relations[i];
     if (!rel) continue;
-    if (idsFor(index, rel.target, entry.path).length > 0) continue;
+    const res = resolveTarget(index, rel.target, entry.path);
+    if (res.kind === 'resolved') continue;
+
     const where = entry.offsets.relationStart(i) ?? entry.offsets.mdlineageStart;
-    out.push(
-      build('MDL302', `Relation target does not exist: ${rel.target}`, entry, where, config, {
-        type: rel.type,
-        target: rel.target,
-        index: i,
-      }),
-    );
+    if (res.kind === 'ambiguous') {
+      const scopes = scopesOf(res.candidates);
+      out.push(
+        build(
+          'MDL307',
+          `Relation target is ambiguous across federation scopes: ${rel.target} (found in ${scopes.join(', ')})`,
+          entry,
+          where,
+          config,
+          {
+            type: rel.type,
+            target: rel.target,
+            index: i,
+            candidates: res.candidates,
+          },
+        ),
+      );
+    } else if (res.kind === 'missing-scope') {
+      out.push(
+        build(
+          'MDL308',
+          `Cannot resolve ${rel.target}: federated member '${res.scope}' is missing (missing: warn)`,
+          entry,
+          where,
+          config,
+          {
+            type: rel.type,
+            target: rel.target,
+            index: i,
+            scope: res.scope,
+          },
+        ),
+      );
+    } else if (res.kind === 'unknown-scope') {
+      out.push(
+        build(
+          'MDL302',
+          `Relation target does not exist: ${rel.target} (unknown federation scope '${res.scope}')`,
+          entry,
+          where,
+          config,
+          {
+            type: rel.type,
+            target: rel.target,
+            index: i,
+          },
+        ),
+      );
+    } else if (res.kind === 'unresolved' && res.missingScopes.length > 0) {
+      out.push(
+        build(
+          'MDL308',
+          `Cannot resolve ${rel.target}: federated member is missing (missing: warn; declared scopes: ${res.missingScopes.join(', ')})`,
+          entry,
+          where,
+          config,
+          {
+            type: rel.type,
+            target: rel.target,
+            index: i,
+            missingScopes: res.missingScopes,
+          },
+        ),
+      );
+    } else {
+      out.push(
+        build('MDL302', `Relation target does not exist: ${rel.target}`, entry, where, config, {
+          type: rel.type,
+          target: rel.target,
+          index: i,
+        }),
+      );
+    }
   }
   return out;
 }
@@ -217,8 +301,9 @@ function mdl306(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
     const rel = entry.relations[i];
     if (!rel) continue;
     if (!config.lifecycle.blockingRelations.includes(rel.type)) continue;
-    const targetPaths = idsFor(index, rel.target, entry.path);
-    if (targetPaths.length === 0) continue;
+    const res = resolveTarget(index, rel.target, entry.path);
+    if (res.kind !== 'resolved') continue;
+    const targetPaths = res.paths;
 
     for (const targetPath of targetPaths) {
       const targetEntry = index.entryOf(targetPath);
@@ -279,8 +364,8 @@ function mdlSelfReference(entry: DocEntry, index: WorkspaceIndex, config: Config
     if (config.relations[rel.type]?.selfReference !== 'forbidden') continue;
     // Only a target that resolves to THIS document is a self-reference; a
     // dangling one is MDL302, and a target resolving elsewhere is not it.
-    const targets = idsFor(index, rel.target, entry.path);
-    if (!targets.includes(entry.path)) continue;
+    const res = resolveTarget(index, rel.target, entry.path);
+    if (res.kind !== 'resolved' || !res.paths.includes(entry.path)) continue;
     const where = entry.offsets.relationStart(i) ?? entry.offsets.mdlineageStart;
     out.push(
       build(
@@ -358,6 +443,13 @@ function mdl304(entry: DocEntry, config: Config): WorkspaceDiagnostic[] {
  * "cycle" well-defined, and an explicit frame stack keeps a long chain from
  * overflowing the call stack.
  */
+function nodeKeyOf(index: WorkspaceIndex, path: DocPath): string | null {
+  const id = index.pathToId(path);
+  if (id === null) return null;
+  const m = /^@([a-z][a-z0-9-]*)\/\//.exec(path);
+  return m && m[1] ? scopedPath(m[1], id) : id;
+}
+
 function mdl305(index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
   const forbiddenTypes: string[] = [];
   for (const [type, sw] of Object.entries(config.relations)) {
@@ -369,21 +461,37 @@ function mdl305(index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
 
   for (const type of forbiddenTypes) {
     // The graph is rebuilt per type: a loop mixing two types is not a cycle of
-    // either relation's semantics. Nodes are the ids that carry an edge of this
-    // type; edges are the ids those edges resolve to.
+    // either relation's semantics. Nodes are the scoped keys (bare id for home,
+    // @scope//id for member); edges are the scoped keys those edges resolve to.
     const graph = new Map<string, string[]>();
+    const nodePaths = new Map<string, DocPath[]>();
+
     for (const path of index.paths()) {
       const entry = index.entryOf(path);
       if (!entry || entry.id === null) continue;
+      const srcKey = nodeKeyOf(index, path);
+      if (srcKey === null) continue;
+
+      let pathsForNode = nodePaths.get(srcKey);
+      if (!pathsForNode) {
+        pathsForNode = [];
+        nodePaths.set(srcKey, pathsForNode);
+      }
+      pathsForNode.push(path);
+
       const edges: string[] = [];
       for (const rel of entry.relations) {
         if (rel.type !== type) continue;
-        for (const targetPath of idsFor(index, rel.target, entry.path)) {
-          const targetId = index.pathToId(targetPath);
-          if (targetId !== null) edges.push(targetId);
+        const res = resolveTarget(index, rel.target, entry.path);
+        if (res.kind !== 'resolved') continue;
+        for (const targetPath of res.paths) {
+          const targetKey = nodeKeyOf(index, targetPath);
+          if (targetKey !== null) edges.push(targetKey);
         }
       }
-      if (edges.length > 0) graph.set(entry.id, edges);
+      if (edges.length > 0) {
+        graph.set(srcKey, edges);
+      }
     }
 
     for (const component of stronglyConnectedComponents(graph)) {
@@ -396,8 +504,11 @@ function mdl305(index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
 
       // Every member path, sorted, so the anchor and `data.cycle` are stable.
       const paths: DocPath[] = [];
-      for (const id of component) {
-        for (const p of index.idToPaths(id)) paths.push(p);
+      for (const nodeKey of component) {
+        const pList = nodePaths.get(nodeKey);
+        if (pList) {
+          for (const p of pList) paths.push(p);
+        }
       }
       paths.sort();
       const anchorPath = paths[0];
@@ -686,9 +797,9 @@ function mdl402(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
     if (typeof rel.evidence !== 'string' || !rel.evidence.startsWith('#')) continue;
     const anchor = rel.evidence.slice(1);
     if (anchor === '') continue;
-    const targets = idsFor(index, rel.target, entry.path);
-    if (targets.length !== 1) continue;
-    const firstTarget = targets[0];
+    const res = resolveTarget(index, rel.target, entry.path);
+    if (res.kind !== 'resolved' || res.paths.length !== 1) continue;
+    const firstTarget = res.paths[0];
     if (!firstTarget) continue;
     const targetEntry = index.entryOf(firstTarget);
     if (!targetEntry || targetEntry.anchors.has(anchor)) continue;
