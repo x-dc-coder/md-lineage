@@ -4,8 +4,9 @@
  * Everything here is decidable from one file, which is why these codes are in
  * `invalid/` rather than `workspace/` (test/fixtures/README.md):
  *
- *   - MDL201: an evidence anchor does not resolve to a heading of the CURRENT
- *             document. Cross-file resolution is MDL402 and is not decided here.
+ *   - MDL201: an evidence anchor of a self-directed relation (bare own id)
+ *             does not resolve to a heading of the CURRENT document. Cross-file
+ *             and federated resolution is MDL402 and is not decided here.
  *   - MDL202: the same (type, target) pair — with evidence distinguishing one
  *             declaration from another — is declared more than once in one
  *             document.
@@ -58,21 +59,29 @@ export function validateDocumentSemantics(
 
   const relations = Array.isArray(mdlineage.relations) ? (mdlineage.relations as RelationLike[]) : [];
 
-  // MDL201: anchors must exist in the current document. Skip a value the schema
-  // layer already rejected as malformed (MDL103) — the registry assigns one
-  // diagnostic per problem, and a pattern failure is not a missing heading.
+  // MDL201: anchors must exist in the current document for relations targeting
+  // the current document (bare own id). Cross-document evidence belongs to MDL402.
+  // Skip a value the schema layer already rejected as malformed (MDL103) — the
+  // registry assigns one diagnostic per problem, and a pattern failure is not a missing heading.
+  const selfId = typeof mdlineage.id === 'string' ? mdlineage.id : null;
   const anchors = tree ? collectAnchors(tree) : null;
-  for (let i = 0; i < relations.length; i++) {
-    const rel = relations[i];
-    // A null item (e.g. `relations:\n  -`) already reported MDL103 at the
-    // schema layer; the semantic layer skips it rather than throwing.
-    if (!rel || typeof rel !== 'object') continue;
-    if (typeof rel.evidence !== 'string') continue;
-    if (!/^#\S+$/.test(rel.evidence)) continue;
-    const anchor = rel.evidence.slice(1);
-    if (anchors !== null && !anchors.has(anchor)) {
-      const where = relationOffsets.relationField(i, 'evidence') ?? relationOffsets.relationStart(i) ?? relationOffsets.mdlineageStart;
-      out.push(mdl201(anchor, where, lineMap, config));
+  // Without a usable id no relation can be self-targeting: MDL102/MDL103 have
+  // already reported the missing/malformed id, and the semantic layer never
+  // guesses an identity the document did not declare.
+  if (selfId !== null) {
+    for (let i = 0; i < relations.length; i++) {
+      const rel = relations[i];
+      // A null item (e.g. `relations:\n  -`) already reported MDL103 at the
+      // schema layer; the semantic layer skips it rather than throwing.
+      if (!rel || typeof rel !== 'object') continue;
+      if (rel.target !== selfId) continue;
+      if (typeof rel.evidence !== 'string') continue;
+      if (!/^#\S+$/.test(rel.evidence)) continue;
+      const anchor = rel.evidence.slice(1);
+      if (anchors !== null && !anchors.has(anchor)) {
+        const where = relationOffsets.relationField(i, 'evidence') ?? relationOffsets.relationStart(i) ?? relationOffsets.mdlineageStart;
+        out.push(mdl201(anchor, where, lineMap, config));
+      }
     }
   }
 

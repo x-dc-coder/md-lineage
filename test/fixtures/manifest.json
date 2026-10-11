@@ -198,7 +198,7 @@
       "layers": [
         "document-semantic"
       ],
-      "description": "evidence #no-such-heading is well formed (schema-valid) but resolves to no heading in the current document → MDL201 at the single-document semantic layer."
+      "description": "evidence #no-such-heading is well formed (schema-valid) but resolves to no heading in the current document (self-directed bare id) → MDL201 at the single-document semantic layer."
     },
     {
       "path": "invalid/e15-mixed-eol.md",
@@ -257,6 +257,26 @@
         "document-semantic"
       ],
       "description": "Closes the forbidden cycle; its own relations are schema-valid."
+    },
+    {
+      "path": "workspace/evidence-source.md",
+      "valid": true,
+      "expectedCodes": [],
+      "workspace": true,
+      "layers": [
+        "workspace-semantic"
+      ],
+      "description": "References evidence-target.md with a missing evidence anchor, producing MDL402 at the workspace layer."
+    },
+    {
+      "path": "workspace/evidence-target.md",
+      "valid": true,
+      "expectedCodes": [],
+      "workspace": true,
+      "layers": [
+        "document-semantic"
+      ],
+      "description": "Clean target for evidence-source.md without the requested anchor."
     }
   ]
 }

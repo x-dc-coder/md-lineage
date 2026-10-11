@@ -76,7 +76,7 @@ presence, duplicate relations) and are carried by `invalid/e10` (MDL202) and
 why they belong in `invalid/` rather than `workspace/`: the code comes from the
 single-document semantic layer, not from cross-file state. `workspace/` carries
 only cross-file codes: MDL301 (`dup-id-a` + `dup-id-b`), MDL302 (`dup-id-b`),
-MDL305 (`cycle-a` + `cycle-b`). MDL304's structural component is `e09`; its
+MDL305 (`cycle-a` + `cycle-b`), and MDL402 (`evidence-source` + `evidence-target`). MDL304's structural component is `e09`; its
 semantic component is the workspace layer.
 
 Deliberately uncovered codes:

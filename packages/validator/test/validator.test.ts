@@ -448,7 +448,7 @@ describe('MDL203 — same-page anchors', () => {
       '  status: active',
       '  relations:',
       '    - type: related_to',
-      '      target: docs.b',
+      '      target: docs.a',
       '      reason: x',
       '      evidence: "#sec"',
       '---',
@@ -588,7 +588,7 @@ describe('review round 1 hardening (M1-a adjudication)', () => {
     validateDocumentSync({ content: `---\nmdlineage:\n${fmBody}---\n${body}` });
   const rel = (evidence: string, header: string) =>
     doc(
-      '  schema: 1\n  id: a.b\n  kind: policy\n  status: active\n  relations:\n    - type: related_to\n      target: a.c\n' +
+      '  schema: 1\n  id: a.b\n  kind: policy\n  status: active\n  relations:\n    - type: related_to\n      target: a.b\n' +
         `      evidence: "#${evidence}"\n`,
       header,
     );

@@ -205,9 +205,10 @@ describe('mdlineage check — fixtures', () => {
 
   it('a directory expands to its Markdown files', () => {
     const out = runCli(['check', 'test/fixtures/workspace', '--no-baseline', '--format', 'json']);
-    assert.equal(reportsOf(out.stdout).length, 4, 'the four workspace fixtures');
+    assert.equal(reportsOf(out.stdout).length, 6, 'the workspace fixtures');
     // The set's own cross-file codes: MDL301/MDL302 from the dup-id pair,
-    // MDL305 once per strongly connected component (the cycle pair).
+    // MDL305 once per strongly connected component (the cycle pair),
+    // and MDL402 from the evidence pair.
     const codes = new Set<string>();
     for (const report of reportsOf(out.stdout)) {
       for (const d of report.diagnostics) codes.add(d.code);
@@ -215,6 +216,7 @@ describe('mdlineage check — fixtures', () => {
     assert.ok(codes.has('MDL301'), 'the duplicate-id pair reports MDL301');
     assert.ok(codes.has('MDL302'), 'dup-id-b reports the unresolved target');
     assert.ok(codes.has('MDL305'), 'the cycle pair reports MDL305 once');
+    assert.ok(codes.has('MDL402'), 'the evidence pair reports MDL402');
     assert.equal([...codes].filter((c) => c.startsWith('MDL3')).length, 3, 'no other workspace codes');
     assert.equal(countOf(out.stdout, 'MDL305'), 1, 'MDL305 is reported once per SCC');
     assert.equal(out.status, 1, 'the workspace codes are errors');
@@ -667,12 +669,13 @@ describe('mdlineage check — workspace mode', () => {
     const out = runCli(['check', 'test/fixtures/workspace', '--no-baseline', '--format', 'json']);
     const summary = parseJson(out.stdout).summary;
     assert.ok(summary, 'the JSON output carries a summary');
-    assert.equal(summary!.files, 4);
+    assert.equal(summary!.files, 6);
     assert.equal(summary!.errors, 4, 'MDL301 + MDL302 x2 + MDL305');
-    assert.equal(summary!.warnings, 0);
+    assert.equal(summary!.warnings, 1, 'MDL402 from evidence-source.md');
     assert.equal(summary!.byCode.find((c) => c.code === 'MDL305')!.count, 1);
     assert.equal(summary!.byCode.find((c) => c.code === 'MDL302')!.count, 2);
     assert.equal(summary!.byCode.find((c) => c.code === 'MDL301')!.count, 1);
+    assert.equal(summary!.byCode.find((c) => c.code === 'MDL402')!.count, 1);
     // byCode is sorted, so a reader's diff between two runs is stable.
     const codes = summary!.byCode.map((c) => c.code);
     assert.deepEqual([...codes].sort(), codes);

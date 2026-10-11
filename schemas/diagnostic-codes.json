@@ -67,7 +67,7 @@
       "layer": "document-semantic",
       "severity": "warning",
       "message": "Evidence anchor does not exist",
-      "description": "The evidence anchor does not resolve to a heading of the CURRENT document. Per docs/frontmatter-spec.md, an anchor resolving against another document is MDL402 instead."
+      "description": "An evidence anchor of a relation whose target names the current document (bare self-id) does not resolve to a heading of this document. Evidence on a relation targeting another document — or a federation member, addressed by @scope//id — resolves against that target and is reported by MDL402. Per docs/架构设计/元数据规范.md (front matter spec), evidence is resolved against the relation's target document."
     },
     {
       "code": "MDL202",
@@ -151,7 +151,7 @@
       "layer": "link",
       "severity": "warning",
       "message": "Markdown heading anchor does not exist",
-      "description": "An evidence anchor or link fragment resolves against another document and does not match a heading there. Cross-file anchor resolution is checked at the workspace layer."
+      "description": "An evidence anchor or link fragment resolves against another document and does not match a heading there. Cross-file anchor resolution is checked at the workspace layer. A self-directed evidence anchor (bare own id) is MDL201 and never appears here."
     },
     {
       "code": "MDL403",

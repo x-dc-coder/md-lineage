@@ -20,7 +20,7 @@ import { tmpdir } from 'node:os';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { defaultConfig, validateDocumentSync } from '../src/index.js';
+import { defaultConfig, validateDocumentSync, createFederatedIndex } from '../src/index.js';
 import { parseMarkdownSync } from '../src/index.js';
 import { collectHeadingTexts } from '../src/document-validator.js';
 import { createWorkspaceIndex, updateFile, removeFile, updateFiles, resolveLinkPath } from '../src/workspace-index.js';
@@ -817,7 +817,7 @@ describe('MDL203 — same-page anchors in the workspace pass', () => {
         'a.md',
         doc(
           'docs.a',
-          relations({ type: 'related_to', target: 'docs.b', reason: 'r', evidence: '#shared' }),
+          relations({ type: 'related_to', target: 'docs.a', reason: 'r', evidence: '#shared' }),
           body('# Real\n\n[link](#shared).\n'),
         ),
       ],
@@ -826,7 +826,7 @@ describe('MDL203 — same-page anchors in the workspace pass', () => {
     const { single, cross } = both(files);
     assert.equal(byCode(single, 'MDL201').length, 1, 'evidence is MDL201 in-document');
     assert.equal(byCode(single, 'MDL203').length, 1, 'the body link is MDL203');
-    assert.equal(byCode(cross, 'MDL402').length, 1, 'the same evidence is MDL402 against the target');
+    assert.equal(byCode(cross, 'MDL402').length, 0, 'self-directed evidence is guarded out of MDL402');
     assert.equal(byCode(cross, 'MDL203').length, 0, 'no cross-file duplicate of the body link');
   });
 });
@@ -1840,6 +1840,126 @@ describe('MDL306 — active document references deprecated target', () => {
     assert.equal(d201.length, 1);
     assert.equal(d201[0]!.range.start.line, 11);
     assert.equal(d201[0]!.range.start.column, 7);
+  });
+});
+
+describe('MDL201/MDL402 ownership — leftover #31', () => {
+  it('T1: cross-document with anchor missing on both sides reports only MDL402 (leftover #31 regression nail)', () => {
+    const a = doc('docs.a', relations({ type: 'related_to', target: 'docs.b', reason: 'r', evidence: '#missing-on-both' }), '# Heading In A\n');
+    const b = doc('docs.b', '', '# Heading In B\n');
+    const index = createWorkspaceIndex(new Map([['a.md', a], ['b.md', b]]), defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: true });
+
+    const d402 = byCode(all, 'MDL402');
+    const d201 = byCode(all, 'MDL201');
+    assert.equal(d402.length, 1, 'MDL402 must report cross-document missing anchor');
+    assert.equal(d201.length, 0, 'MDL201 must not report on cross-document relation');
+    assert.equal(d402[0]!.path, 'a.md');
+  });
+
+  it('T2: self-reference with anchor missing in own document reports MDL201 only (self guard prevents MDL402)', () => {
+    const a = doc('docs.a', relations({ type: 'related_to', target: 'docs.a', reason: 'r', evidence: '#missing-anchor' }), '# Real Heading\n');
+    const index = createWorkspaceIndex(new Map([['a.md', a]]), defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: true });
+
+    const d201 = byCode(all, 'MDL201');
+    const d402 = byCode(all, 'MDL402');
+    assert.equal(d201.length, 1, 'MDL201 must report missing self-directed anchor');
+    assert.equal(d402.length, 0, 'MDL402 self-guard must suppress duplicate report');
+    assert.equal(d201[0]!.path, 'a.md');
+  });
+
+  it('T3: cross-document with anchor present in target but missing in source is clean (no MDL201 false positive)', () => {
+    const a = doc('docs.a', relations({ type: 'related_to', target: 'docs.b', reason: 'r', evidence: '#target-heading' }), '# Only In A\n');
+    const b = doc('docs.b', '', '# Target Heading\n');
+    const index = createWorkspaceIndex(new Map([['a.md', a], ['b.md', b]]), defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: true });
+
+    const d201 = byCode(all, 'MDL201');
+    const d402 = byCode(all, 'MDL402');
+    assert.equal(d201.length, 0, 'must not report MDL201 when anchor exists in target');
+    assert.equal(d402.length, 0, 'must not report MDL402 when anchor exists in target');
+  });
+
+  it('T4: cross-document with anchor present in source but missing in target reports only MDL402', () => {
+    const a = doc('docs.a', relations({ type: 'related_to', target: 'docs.b', reason: 'r', evidence: '#source-heading' }), '# Source Heading\n');
+    const b = doc('docs.b', '', '# Other Target Heading\n');
+    const index = createWorkspaceIndex(new Map([['a.md', a], ['b.md', b]]), defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: true });
+
+    const d201 = byCode(all, 'MDL201');
+    const d402 = byCode(all, 'MDL402');
+    assert.equal(d201.length, 0, 'must not report MDL201 for cross-document target');
+    assert.equal(d402.length, 1, 'MDL402 must report because target lacks the heading');
+  });
+
+  it('T5: unresolvable target with pseudo anchor reports only MDL302 (no MDL201 noise)', () => {
+    const a = doc('docs.a', relations({ type: 'related_to', target: 'docs.nonexistent', reason: 'r', evidence: '#pseudo-anchor' }), '# Source Heading\n');
+    const index = createWorkspaceIndex(new Map([['a.md', a]]), defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: true });
+
+    const d302 = byCode(all, 'MDL302');
+    const d201 = byCode(all, 'MDL201');
+    const d402 = byCode(all, 'MDL402');
+    assert.equal(d302.length, 1, 'MDL302 reports dangling target');
+    assert.equal(d201.length, 0, 'MDL201 must stay silent when target is not self');
+    assert.equal(d402.length, 0, 'MDL402 stays silent when target resolution fails');
+  });
+
+  it('T6: document without id does not trigger MDL201 semantic anchor guessing', () => {
+    const noId = [
+      '---',
+      'mdlineage:',
+      '  schema: 1',
+      '  kind: guide',
+      '  status: draft',
+      '  relations:',
+      '    - type: related_to',
+      '      target: docs.something',
+      '      reason: r',
+      '      evidence: "#missing"',
+      '---',
+      '',
+      '# Heading',
+    ].join('\n');
+    const { diagnostics } = validateDocumentSync({ content: noId });
+    const d201 = diagnostics.filter((d) => d.code === 'MDL201');
+    assert.equal(d201.length, 0, 'missing id document must not report MDL201');
+  });
+
+  it('T7: federated target missing anchor reports only MDL402; single-document pass reports 0 MDL201', () => {
+    const homeDoc = doc(
+      'docs.home',
+      relations({ type: 'related_to', target: '"@member-a//docs.member"', reason: 'r', evidence: '#missing-anchor' }),
+      '# Home Heading\n',
+    );
+    const single = validateDocumentSync({ content: homeDoc });
+    assert.equal(single.diagnostics.filter((d) => d.code === 'MDL201').length, 0, 'single-doc layer reports no MDL201');
+
+    const memberDoc = doc('docs.member', '', '# Member Heading\n');
+    const homeIndex = createWorkspaceIndex(new Map([['home.md', homeDoc]]), defaultConfig());
+    const memberIndex = createWorkspaceIndex(new Map([['member.md', memberDoc]]), defaultConfig());
+    const federated = createFederatedIndex(homeIndex, new Map([['member-a', { scope: 'member-a', index: memberIndex, alias: 'member-a' }]]));
+    const all = validateWorkspace(federated, { includeSingleDocument: true });
+    const d402 = byCode(all, 'MDL402');
+    const d201 = byCode(all, 'MDL201');
+    assert.equal(d402.length, 1, 'MDL402 reports federated target missing anchor');
+    assert.equal(d201.length, 0, 'no MDL201 on federated target');
+  });
+
+  it('T8: envelope self-target (@home//own-id) missing anchor reports MDL402 (guard requires bare id)', () => {
+    const homeDoc = doc(
+      'docs.home',
+      relations({ type: 'related_to', target: '"@home//docs.home"', reason: 'r', evidence: '#missing-anchor' }),
+      '# Real Heading\n',
+    );
+    const homeIndex = createWorkspaceIndex(new Map([['home.md', homeDoc]]), defaultConfig());
+    const federated = createFederatedIndex(homeIndex, new Map());
+    const all = validateWorkspace(federated, { includeSingleDocument: true });
+    const d402 = byCode(all, 'MDL402');
+    const d201 = byCode(all, 'MDL201');
+    assert.equal(d201.length, 0, 'single-doc layer skipped envelope target as non-bare id');
+    assert.equal(d402.length, 1, 'MDL402 reports envelope self-target to guarantee every anchor is checked exactly once');
   });
 });
 

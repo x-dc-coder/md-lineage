@@ -6,7 +6,7 @@ mdlineage:
   status: draft
   relations:
     - type: related_to
-      target: docs.cache-policy
+      target: docs.missing-anchor
       reason: Anchor below does not exist in this document.
       evidence: "#no-such-heading"
 ---

@@ -789,9 +789,11 @@ function isExternal(url: string): boolean {
  * (Link fragments missing from their target are the same code, reported by
  * `mdl401` once the link's path resolves.)
  *
- * `evidence` resolves against the relation's TARGET document (frontmatter-spec:
+ * `evidence` resolves against the relation's TARGET document (元数据规范:
  * "The anchor is resolved against the relation's `target` document"), so the
- * in-document case belongs to MDL201 and never appears here. A target that
+ * in-document case (bare own id) belongs to MDL201 and is skipped by the self guard
+ * here. Envelope references resolving back to self (e.g. `@home//own-id`) are still
+ * checked by MDL402 so that every anchor is checked exactly once. A target that
  * resolves to zero or multiple documents is MDL302/MDL301's failure and is
  * skipped — one diagnostic per problem.
  */
@@ -805,6 +807,7 @@ function mdl402(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
     if (anchor === '') continue;
     const res = resolveTarget(index, rel.target, entry.path);
     if (res.kind !== 'resolved' || res.paths.length !== 1) continue;
+    if (res.paths[0] === entry.path && rel.target === entry.id) continue;
     const firstTarget = res.paths[0];
     if (!firstTarget) continue;
     const targetEntry = index.entryOf(firstTarget);
