@@ -10,7 +10,7 @@
 
 import { scanBoundary, stripBom, lineStarts } from './parse-frontmatter.js';
 import { parseMarkdownSync } from './parse-markdown.js';
-import { Slugger } from './slugger.js';
+import { Slugger, slugifyHeading } from './slugger.js';
 
 /** One retrieval unit: a heading-delimited span of one document. */
 export interface Section {
@@ -20,9 +20,11 @@ export interface Section {
   level: number;
   /**
    * GitHub anchor of the heading, duplicates suffixed `-n` exactly as
-   * evidence anchors spell them. The preamble carries the internal marker
-   * 'preamble': it has no GitHub anchor (nothing precedes the first heading),
-   * so this slug exists only to give the span a stable `(path, slug)` key.
+   * evidence anchors spell them. The preamble carries the literal marker
+   * '(preamble)': it has no GitHub anchor (nothing precedes the first
+   * heading), and GitHub slugs never contain parentheses, so the marker can
+   * never collide with a real heading named "Preamble" (which anchors as
+   * "preamble").
    */
   slug: string;
   /** Plain text of the section body (code blocks kept verbatim). */
@@ -98,13 +100,21 @@ function classify(code: number): CharClass {
 
 /**
  * Longest code-point prefix of `${title}\n${text}` whose `estimateTokens`
- * stays within the budget; the surviving prefix is mapped back to a prefix of
- * `text`. Cutting by code point (never mid-surrogate) keeps the truncated
- * text valid.
+ * stays within the budget, mapped back to prefixes of BOTH parts — an
+ * oversized heading is truncated exactly like an oversized body. Cutting by
+ * code point (never mid-surrogate) keeps both survivors valid; `kept` only
+ * ever advances by whole code points, so each split lands on a boundary.
+ *
+ * The section's SLUG is derived by the caller from the full, untruncated
+ * heading text: anchor alignment outranks title completeness (evidence
+ * anchors must keep resolving against the section the search returned).
  */
-function truncateToTokenBudget(title: string, text: string): { text: string; truncated: boolean } {
+function truncateToTokenBudget(
+  title: string,
+  text: string,
+): { title: string; text: string; truncated: boolean } {
   const whole = `${title}\n${text}`;
-  if (estimateTokens(whole) <= MAX_SECTION_TOKENS) return { text, truncated: false };
+  if (estimateTokens(whole) <= MAX_SECTION_TOKENS) return { title, text, truncated: false };
 
   let cjk = 0;
   let runs = 0;
@@ -129,10 +139,11 @@ function truncateToTokenBudget(title: string, text: string): { text: string; tru
     if (cjk + runs + Math.floor(others / 2) > MAX_SECTION_TOKENS) break;
     kept += ch.length;
   }
-  // The budgeted prefix includes the title line; strip that back off so only
-  // the body is cut. A title alone over budget leaves an empty body.
-  const bodyKept = Math.max(0, kept - (title.length + 1));
-  return { text: text.slice(0, bodyKept), truncated: true };
+  const titleKept = title.length <= kept ? title : title.slice(0, kept);
+  // The budgeted prefix spans `title + '\n' + text`; a title alone over
+  // budget leaves an empty body.
+  const bodyKept = kept > title.length ? Math.max(0, kept - (title.length + 1)) : 0;
+  return { title: titleKept, text: text.slice(0, bodyKept), truncated: true };
 }
 
 /**
@@ -177,6 +188,27 @@ export function extractSections(content: string): Section[] {
     return acc;
   }, []);
 
+  // Duplicate numbering parity with evidence anchors: `collectAnchors` feeds
+  // EVERY heading in the tree (nested ones inside blockquotes/lists included)
+  // to one Slugger in document order, so this walk must consume slugs the
+  // same way — while only TOP-LEVEL headings may open a section. A nested
+  // heading's slug is consumed and discarded, which is exactly what keeps
+  // `# Notes` / `> # Notes` / `# Notes` anchored as notes/notes-1/notes-2
+  // instead of the retrieval layer inventing its own numbering.
+  const slugByChildIndex = new Map<number, string>();
+  const walkHeadings = (node: unknown, topLevelIndex: number | null): void => {
+    if (typeof node !== 'object' || node === null) return;
+    const n = node as { type?: unknown; children?: unknown[] };
+    if (n.type === 'heading') {
+      const slug = slugger.slug(headingText(n));
+      if (topLevelIndex !== null) slugByChildIndex.set(topLevelIndex, slug);
+    }
+    if (Array.isArray(n.children)) {
+      for (const child of n.children) walkHeadings(child, null);
+    }
+  };
+  children.forEach((child, i) => walkHeadings(child, i));
+
   const firstHeading = headingIndices[0];
 
   if (firstHeading === undefined) {
@@ -184,7 +216,7 @@ export function extractSections(content: string): Section[] {
     const parts: string[] = [];
     appendBlocks(children, parts);
     sections.push(
-      buildSection('(preamble)', 0, 'preamble', parts.join(''), docLine(lineOf(children[0], 1)), lastDocLine),
+      buildSection('(preamble)', 0, '(preamble)', parts.join(''), docLine(lineOf(children[0], 1)), lastDocLine),
     );
     return sections;
   }
@@ -197,7 +229,7 @@ export function extractSections(content: string): Section[] {
       buildSection(
         '(preamble)',
         0,
-        'preamble',
+        '(preamble)',
         parts.join(''),
         docLine(lineOf(children[0], 1)),
         Math.max(docLine(lineOf(children[0], 1)), docLine(lineOf(next, 1)) - 1),
@@ -218,8 +250,11 @@ export function extractSections(content: string): Section[] {
     const endLine = nextHeading === undefined
       ? Math.max(startLine, lastDocLine)
       : Math.max(startLine, docLine(lineOf(children[nextHeading], startLine)) - 1);
+    // The slug comes from the FULL heading text (anchor parity, and B3 may
+    // truncate the title afterwards); it was already consumed above.
+    const slug = slugByChildIndex.get(i) ?? slugifyHeading(headingText(heading));
     sections.push(
-      buildSection(headingText(heading), heading.depth, slugger.slug(headingText(heading)), parts.join(''), startLine, endLine),
+      buildSection(headingText(heading), heading.depth, slug, parts.join(''), startLine, endLine),
     );
   }
   return sections;
@@ -233,8 +268,8 @@ function buildSection(
   startLine: number,
   endLine: number,
 ): Section {
-  const { text: kept, truncated } = truncateToTokenBudget(title, text);
-  return { title, level, slug, text: kept, startLine, endLine, truncated };
+  const { title: keptTitle, text: keptText, truncated } = truncateToTokenBudget(title, text);
+  return { title: keptTitle, level, slug, text: keptText, startLine, endLine, truncated };
 }
 
 /** 1-based start line of `node`, falling back to `fallback`. */
@@ -260,7 +295,15 @@ function appendBlocks(nodes: readonly unknown[], parts: string[]): void {
   }
 }
 
-/** Parents whose children are block-level (all other parents hold phrasing). */
+/**
+ * Parents whose children are block-level (all other parents hold phrasing).
+ *
+ * remark-parse here runs WITHOUT remark-gfm: tables parse as ordinary
+ * paragraphs with literal pipes (which BM25 handles fine), so `table` and
+ * `tableRow` cannot actually occur and `tableCell` is deliberately absent —
+ * if remark-gfm is ever enabled, add `tableCell` here and collect image alt
+ * text too (leftover #35 tracks the pair).
+ */
 const BLOCK_CHILDREN_TYPES = new Set(['root', 'blockquote', 'list', 'listItem', 'table', 'tableRow']);
 
 function blockChildren(node: unknown): boolean {
@@ -273,6 +316,13 @@ function appendNodeText(node: unknown, parts: string[], childBlocks: boolean): v
   const n = node as { type?: unknown; value?: unknown; children?: unknown[] };
   if (n.type === 'text' || n.type === 'inlineCode' || n.type === 'code') {
     if (typeof n.value === 'string' && n.value.length > 0) parts.push(n.value);
+    return;
+  }
+  // A hard break (two trailing spaces / backslash) separates words: emit one
+  // space so "foo  \nbar" reads as "foo bar" and the tokenizer yields two
+  // words instead of a fused "foobar".
+  if (n.type === 'break') {
+    parts.push(' ');
     return;
   }
   if (!Array.isArray(n.children)) return;

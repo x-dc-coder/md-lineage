@@ -6,7 +6,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { extractSections, estimateTokens } from '../src/index.js';
+import { extractSections, estimateTokens, parseMarkdownSync, collectAnchors } from '../src/index.js';
 
 test('extractSections — ATX headings split sections with document line spans', () => {
   const doc = 'intro text\n\n# Alpha\n\nalpha body\n\n## Beta\n\nbeta body\n';
@@ -16,7 +16,7 @@ test('extractSections — ATX headings split sections with document line spans',
   const [preamble, alpha, beta] = sections;
   assert.equal(preamble?.title, '(preamble)');
   assert.equal(preamble?.level, 0);
-  assert.equal(preamble?.slug, 'preamble');
+  assert.equal(preamble?.slug, '(preamble)');
   assert.equal(preamble?.startLine, 1);
   assert.equal(preamble?.endLine, 2);
   assert.equal(preamble?.text, 'intro text');
@@ -80,7 +80,7 @@ test('extractSections — no heading: the whole body is one preamble', () => {
   const [preamble] = sections;
   assert.equal(preamble?.title, '(preamble)');
   assert.equal(preamble?.level, 0);
-  assert.equal(preamble?.slug, 'preamble');
+  assert.equal(preamble?.slug, '(preamble)');
   assert.equal(preamble?.startLine, 1);
   assert.equal(preamble?.endLine, 3);
   assert.equal(preamble?.text, 'just a paragraph\nanother paragraph');
@@ -105,7 +105,7 @@ test('extractSections — front matter with preamble content before first headin
   const sections = extractSections(doc);
   assert.equal(sections.length, 2);
   const [preamble, heading] = sections;
-  assert.equal(preamble?.slug, 'preamble');
+  assert.equal(preamble?.slug, '(preamble)');
   // The dropped artifact `---` line is not part of the span: the preamble
   // starts at the lead paragraph (document line 4).
   assert.equal(preamble?.startLine, 4);
@@ -181,4 +181,51 @@ test('extractSections — section containing a nested sub-heading hierarchy spli
     sections.map((s) => [s.slug, s.startLine, s.endLine]),
     [['a', 5, 8], ['a1', 9, 11]],
   );
+});
+
+// ---------------------------------------------------------------------------
+// Review-round fixes (Issue #3 Phase 1).
+// ---------------------------------------------------------------------------
+
+test('extractSections — nested headings consume duplicate numbering like collectAnchors (B4)', () => {
+  const doc = '# Notes\n\nfirst\n\n> # Notes\n\nlast\n\n# Notes\n\ntail\n';
+  const sections = extractSections(doc);
+  // Only the two top-level headings open sections, but the blockquoted one
+  // consumed 'notes-1', so the third heading anchors as 'notes-2' — the same
+  // sequence collectAnchors produces for evidence validation.
+  assert.deepEqual(sections.map((s) => s.slug), ['notes', 'notes-2']);
+
+  const anchors = collectAnchors(parseMarkdownSync(doc) as never);
+  assert.deepEqual([...anchors].sort(), ['notes', 'notes-1', 'notes-2']);
+  for (const section of sections) {
+    assert.ok(anchors.has(section.slug), `slug ${section.slug} must exist in collectAnchors output`);
+  }
+});
+
+test('extractSections — preamble slug never collides with a "Preamble" heading (B5)', () => {
+  const doc = 'intro text\n\n# Preamble\n\nbody\n';
+  const sections = extractSections(doc);
+  assert.deepEqual(sections.map((s) => s.slug), ['(preamble)', 'preamble']);
+  assert.deepEqual(sections.map((s) => s.title), ['(preamble)', 'Preamble']);
+});
+
+test('extractSections — an oversized heading title is truncated within the 8K budget (B3)', () => {
+  const doc = `# ${'汉'.repeat(9000)}\n\nbody text\n`;
+  const sections = extractSections(doc);
+  const section = sections[0]!;
+  assert.equal(section.truncated, true);
+  // The title alone was over budget: it gets cut by code points, the body
+  // is empty, and the estimated title stays within the budget.
+  assert.ok(estimateTokens(section.title) <= 8192, `title tokens: ${estimateTokens(section.title)}`);
+  assert.ok([...section.title].length <= 9000);
+  assert.equal(section.text, '');
+  // The slug is derived from the FULL heading text (anchor parity): 9000 CJK
+  // characters slugify to themselves.
+  assert.ok([...section.slug].length === 9000);
+});
+
+test('extractSections — hard breaks separate words instead of fusing them (B7)', () => {
+  const doc = '# Breaks\n\nfoo  \nbar\n';
+  const sections = extractSections(doc);
+  assert.equal(sections[0]?.text, 'foo bar');
 });
