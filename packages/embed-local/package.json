@@ -1,0 +1,43 @@
+{
+  "name": "@mdlineage/embed-local",
+  "version": "0.3.0",
+  "description": "Optional local ONNX embedding and reranking for MDLineage (Issue #3 Phase 2). The CLI and MCP server load this package with a dynamic import.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "models.json",
+    "!dist/**/*.map",
+    "!dist/.tsbuildinfo"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x-dc-coder/md-lineage.git",
+    "directory": "packages/embed-local"
+  },
+  "scripts": {
+    "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
+    "test": "node ../../scripts/run-tests.mjs .",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "3.8.1",
+    "@mdlineage/retrieve": "*",
+    "onnxruntime-node": "1.21.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0"
+  },
+  "license": "MIT"
+}

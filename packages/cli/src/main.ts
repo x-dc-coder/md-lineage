@@ -45,7 +45,7 @@ import { runOrganize } from './organize.js';
 import { runManifestSeed } from './manifest.js';
 import { configValidate } from './config-validate.js';
 import { indexRebuild } from './index-rebuild.js';
-import { retrieveSearch } from './retrieve.js';
+import { retrieveSearch, retrieveSetup } from './retrieve.js';
 import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
@@ -84,6 +84,11 @@ Usage:
   mdlineage retrieve search <query>
                                     Section search over the workspace
                                     (read-only; exits 0 even when degraded)
+  mdlineage retrieve setup [--profile <id>] [--mirror <url>]
+                                    Download local ONNX models into
+                                    ~/.mdlineage/models (or MDLINEAGE_MODELS_DIR).
+                                    A profile with no published weight prints
+                                    export guidance and exits 0
 
 Roots — each command anchors "the workspace" differently, by design:
   check/fix/move/organize          the CWD: paths are resolved against it, and
@@ -130,6 +135,10 @@ Options:
   --rerank <N>                retrieve search: rerank the top N fused hits
                               (default 50; hybrid only)
   --no-rerank                 retrieve search: skip the reranker
+  --profile <id>              retrieve setup: one model profile (default: both
+                              0.6B profiles)
+  --mirror <url>              retrieve setup: Hugging Face endpoint (default:
+                              HF_ENDPOINT, else https://huggingface.co)
   --root <dir>                mcp: the workspace to index (default: the CWD)
   --help, -h                  Show this text
   --version, -v               Print the version
@@ -183,6 +192,8 @@ interface ParsedArgs {
     rerank?: string;
     'no-rerank'?: boolean;
     'bm25-only'?: boolean;
+    profile?: string;
+    mirror?: string;
     stdio?: boolean;
     root?: string;
     help?: boolean;
@@ -242,6 +253,8 @@ function readArgs(argv: string[]): ParsedArgs {
       rerank: { type: 'string' },
       'no-rerank': { type: 'boolean' },
       'bm25-only': { type: 'boolean' },
+      profile: { type: 'string' },
+      mirror: { type: 'string' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -609,9 +622,10 @@ async function runRetrieve(args: string[], values: ParsedArgs['values']): Promis
     process.stdout.write(`${HELP}\n`);
     return 0;
   }
+  if (sub === 'setup') return runRetrieveSetup(args.slice(1), values);
   if (sub !== 'search') {
     process.stderr.write(
-      `mdlineage: unknown retrieve subcommand '${sub ?? '(none)'}' (expected search)\n\n${HELP}\n`,
+      `mdlineage: unknown retrieve subcommand '${sub ?? '(none)'}' (expected search or setup)\n\n${HELP}\n`,
     );
     return 2;
   }
@@ -664,6 +678,19 @@ async function runRetrieve(args: string[], values: ParsedArgs['values']): Promis
  * `--bm25-only` is the lexical alias. Combining it with `--mode hybrid`
  * contradicts itself and is a usage error.
  */
+async function runRetrieveSetup(args: string[], values: ParsedArgs['values']): Promise<number> {
+  if (args.length > 0) {
+    process.stderr.write(`mdlineage: retrieve setup does not take a query\n\n${HELP}\n`);
+    return 2;
+  }
+  const modelDir = process.env.MDLINEAGE_MODELS_DIR;
+  return retrieveSetup({
+    ...(values.profile === undefined ? {} : { profile: values.profile }),
+    ...(values.mirror === undefined ? {} : { mirror: values.mirror }),
+    ...(modelDir === undefined ? {} : { modelDir }),
+  });
+}
+
 function parseRetrieveMode(values: ParsedArgs['values']): 'auto' | 'lexical' | 'hybrid' | null {
   if (values['bm25-only'] === true) {
     if (values.mode !== undefined && values.mode !== 'lexical') return null;

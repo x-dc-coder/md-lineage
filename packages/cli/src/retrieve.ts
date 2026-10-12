@@ -211,6 +211,67 @@ async function loadEmbedLocal(modelDir: string | undefined): Promise<LocalLoad> 
   }
 }
 
+export interface RetrieveSetupOptions {
+  readonly profile?: string;
+  readonly mirror?: string;
+  readonly modelDir?: string;
+}
+
+interface SetupReportShape {
+  readonly exitCode: 0 | 1 | 2;
+  readonly lines: readonly string[];
+}
+
+/**
+ * `mdlineage retrieve setup`. Downloads pinned weights, or prints export
+ * guidance for a profile that has no published file. A missing embed-local
+ * package is a usage failure (exit 2): setup cannot degrade to lexical.
+ */
+export async function retrieveSetup(options: RetrieveSetupOptions): Promise<number> {
+  const specifier = '@mdlineage/embed-local';
+  let imported: unknown;
+  try {
+    imported = await import(specifier);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const missing =
+      message.includes('ERR_MODULE_NOT_FOUND') ||
+      message.includes('Cannot find package') ||
+      message.includes('Cannot find module');
+    const reason = missing ? 'package is not installed' : message;
+    process.stderr.write(`mdlineage: embed-local-unavailable: ${reason}\n`);
+    return 2;
+  }
+  if (!isSetupCaller(imported)) {
+    process.stderr.write('mdlineage: embed-local-unavailable: setupLocalModels is missing\n');
+    return 2;
+  }
+  const report: unknown = await imported.setupLocalModels(options);
+  if (!isSetupReport(report)) {
+    process.stderr.write('mdlineage: embed-local-unavailable: setupLocalModels returned an unexpected report\n');
+    return 2;
+  }
+  const stream = report.exitCode === 0 ? process.stdout : process.stderr;
+  for (const line of report.lines) stream.write(`mdlineage: ${line}\n`);
+  return report.exitCode;
+}
+
+function isSetupCaller(value: unknown): value is {
+  setupLocalModels(options: RetrieveSetupOptions): Promise<unknown>;
+} {
+  return isRecord(value) && typeof value.setupLocalModels === 'function';
+}
+
+function isSetupReport(value: unknown): value is SetupReportShape {
+  if (!isRecord(value)) return false;
+  if (value.exitCode !== 0 && value.exitCode !== 1 && value.exitCode !== 2) return false;
+  return Array.isArray(value.lines) && value.lines.every((line) => typeof line === 'string');
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null;
+}
+
 /**
  * First ~100 characters of the body, whitespace collapsed to one line. The
  * cut is by CODE POINT: slicing UTF-16 units can split a surrogate pair and

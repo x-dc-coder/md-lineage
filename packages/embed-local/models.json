@@ -1,0 +1,55 @@
+{
+  "$comment": "SHA-256 pins are the digests of the files `mdlineage retrieve setup` wrote into the model cache. Refresh: delete the cached file, re-run setup, replace sha256 with the digest setup prints, and commit this file. An empty sha256 is not a pin: setup still downloads, and it does not fail the check. Do not invent a digest.",
+  "profiles": [
+    {
+      "id": "local:qwen3-0.6b",
+      "role": "embed",
+      "repo": "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+      "dtype": "q8",
+      "dim": 1024,
+      "pendingExport": false,
+      "onnxFile": "onnx/model_quantized.onnx",
+      "files": [
+        { "path": "config.json", "sha256": "66a10929782f3c9a3cd5dec90e2a95c60e05736134a63cd54479eeae80bed175" },
+        { "path": "tokenizer.json", "sha256": "def76fb086971c7867b829c23a26261e38d9d74e02139253b38aeb9df8b4b50a" },
+        { "path": "tokenizer_config.json", "sha256": "977648852447cb6587327ff3205b0a84cf2fc9f05621d6c8e88a497caafab2e1" },
+        { "path": "onnx/model_quantized.onnx", "sha256": "87cd124e0ef1fd1f223ebc283efccbaeac386d0b08344701c46975d0657b591f" }
+      ]
+    },
+    {
+      "id": "local:qwen3-reranker-0.6b",
+      "role": "rerank",
+      "repo": "n24q02m/Qwen3-Reranker-0.6B-ONNX",
+      "dtype": "int8",
+      "dim": 0,
+      "pendingExport": false,
+      "onnxFile": "onnx/model_yesno_quantized.onnx",
+      "files": [
+        { "path": "config.json", "sha256": "af5909d9cd23cabb646d90250ab8ebb97d3e994fe8d873c6109d52421f128f67" },
+        { "path": "tokenizer.json", "sha256": "8579e1ca7cc5d82a9e0202eed555529996f4ffe7f563c2979a0290cf3db452d3" },
+        { "path": "tokenizer_config.json", "sha256": "bc3e7cb4dad833a185d4bfbb4880562dc9b0cb101c47b8985078122a122d553a" },
+        { "path": "onnx/model_yesno_quantized.onnx", "sha256": "2bc0a77812a15ff6ead003370f36149139ae2c1bb1faf779b00c00886cd919ef" }
+      ]
+    },
+    {
+      "id": "local:qwen3-4b",
+      "role": "embed",
+      "repo": "Qwen/Qwen3-Embedding-4B",
+      "dtype": "q8",
+      "dim": 2560,
+      "pendingExport": true,
+      "onnxFile": "",
+      "files": []
+    },
+    {
+      "id": "local:qwen3-reranker-4b",
+      "role": "rerank",
+      "repo": "Qwen/Qwen3-Reranker-4B",
+      "dtype": "int8",
+      "dim": 0,
+      "pendingExport": true,
+      "onnxFile": "",
+      "files": []
+    }
+  ]
+}
