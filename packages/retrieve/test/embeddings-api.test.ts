@@ -205,28 +205,34 @@ test('embedTexts — proxy: configured proxy with a failed undici load degrades 
   }
 });
 
-test('embedTexts — proxy: a working undici install activates the dispatcher', async () => {
+test('embedTexts — proxy: a working undici install passes a per-request dispatcher', async () => {
   const previous = process.env.HTTPS_PROXY;
   process.env.HTTPS_PROXY = 'http://proxy.internal:3128';
   try {
-    const installed: unknown[] = [];
-    const { impl } = mockFetch([() => embeddingsResponse([0])]);
+    const globalCalls: unknown[] = [];
+    const { impl, calls } = mockFetch([() => embeddingsResponse([0])]);
     const result = await embedTexts(['x'], {
       base: 'https://gw.example.com',
       model: 'm',
       fetchImpl: impl,
       undiciLoader: async () => ({
         ProxyAgent: class {
+          readonly uri: string;
           constructor(uri: string) {
-            installed.push(uri);
+            this.uri = uri;
           }
         },
-        setGlobalDispatcher: (d: unknown) => installed.push(d),
+        // Present on purpose: the adapter must not install a process dispatcher.
+        setGlobalDispatcher: (dispatcher: unknown) => {
+          globalCalls.push(dispatcher);
+        },
       }),
     });
-    assert.equal(installed.length, 2);
-    assert.equal(installed[0], 'http://proxy.internal:3128');
+    assert.deepEqual(globalCalls, []);
+    const dispatcher = (calls[0]?.init as { dispatcher?: { uri?: string } } | undefined)?.dispatcher;
+    assert.equal(dispatcher?.uri, 'http://proxy.internal:3128');
     assert.deepEqual(result.degraded, ['proxy-active (http://proxy.internal:3128)']);
+    assert.equal(result.partial, false);
   } finally {
     if (previous === undefined) delete process.env.HTTPS_PROXY;
     else process.env.HTTPS_PROXY = previous;
@@ -321,4 +327,54 @@ test('embedTexts — a body stream that never ends is cut off by the timeout', a
   const elapsed = Date.now() - startedAt;
   // Order-of-magnitude probe: the budget is 100ms, not an unbounded hang.
   assert.ok(elapsed < 2000, `timeout took ${elapsed}ms`);
+});
+
+test('embedTexts — a later batch failure keeps the vectors already received', async () => {
+  const { impl, calls } = mockFetch([
+    () => embeddingsResponse([0]),
+    () => new Response('boom', { status: 500, headers: { 'retry-after': '0' } }),
+    () => new Response('boom again', { status: 500, headers: { 'retry-after': '0' } }),
+  ]);
+  const result = await embedTexts(['a', 'b'], {
+    base: 'https://gw.example.com',
+    model: 'm',
+    batchSize: 1,
+    fetchImpl: impl,
+  });
+  assert.equal(result.partial, true);
+  assert.deepEqual(result.embeddings, [[0, 1]]);
+  assert.match(result.degraded.join('\n'), /partial embeddings/);
+  // The failed batch is retried once, so the successful batch plus two failures.
+  assert.equal(calls.length, 3);
+});
+
+test('embedTexts — the batch loop deadline throws instead of waiting out the per-request timeout', async () => {
+  const impl = ((_url: RequestInfo | URL, init?: RequestInit) => {
+    return new Promise<Response>((_resolve, reject) => {
+      const signal = init?.signal;
+      const onAbort = () => {
+        const reason = signal?.reason instanceof Error ? signal.reason : new Error('aborted');
+        reject(reason);
+      };
+      if (signal?.aborted === true) onAbort();
+      else signal?.addEventListener('abort', onAbort);
+    });
+  }) as unknown as typeof fetch;
+  const startedAt = Date.now();
+  await assert.rejects(
+    embedTexts(['x'], {
+      base: 'https://gw.example.com',
+      model: 'm',
+      timeoutMs: 10_000,
+      deadlineMs: 40,
+      fetchImpl: impl,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof EmbeddingsError);
+      assert.match(error.message, /deadline exceeded after 40ms/);
+      return true;
+    },
+  );
+  const elapsed = Date.now() - startedAt;
+  assert.ok(elapsed < 2000, `deadline took ${elapsed}ms`);
 });

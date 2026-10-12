@@ -13,10 +13,15 @@
  *   - batches of at most 64 inputs, sequential (a rate-limited provider
  *     must not be hit with parallel bursts);
  *   - proxy awareness: HTTPS_PROXY / HTTP_PROXY / ALL_PROXY /
- *     MDLINEAGE_EMBED_PROXY select an undici ProxyAgent; `undici` is a
- *     peer-provided optional module (never a dependency), and when it is
- *     unavailable the request goes direct with a `degraded` note — a
- *     network/设备故障 must never fail a gate (the determinism iron rule).
+ *     MDLINEAGE_EMBED_PROXY select an undici ProxyAgent passed on that
+ *     request only (`fetch(url, { dispatcher })`, never
+ *     `setGlobalDispatcher` — a process-wide dispatcher poisons a
+ *     long-lived MCP server). `undici` is a peer-provided optional module
+ *     (never a dependency); when it is unavailable the request goes direct
+ *     with a `degraded` note;
+ *   - the batch loop has one deadline (default 120s). A later batch that
+ *     fails returns the vectors already received (`partial: true`) instead
+ *     of discarding them.
  */
 
 export interface EmbeddingsOptions {
@@ -31,13 +36,24 @@ export interface EmbeddingsOptions {
   fetchImpl?: typeof fetch;
   /** Loads the optional undici module; injectable for the same reason. */
   undiciLoader?: () => Promise<unknown>;
+  /**
+   * Wall-clock budget for the whole batch loop (default 120s). Exceeding it
+   * throws `EmbeddingsError`; a single batch failing inside the budget returns
+   * the vectors already in hand instead (see `partial`).
+   */
+  deadlineMs?: number;
 }
 
 export interface EmbeddingsResult {
-  /** One embedding per input, in input order. */
+  /**
+   * Embeddings in input order. When `partial` is true this is a prefix: a
+   * later batch failed and the vectors already received were kept.
+   */
   embeddings: number[][];
   /** Degradation notes; an empty array means everything worked as asked. */
   degraded: string[];
+  /** True when a later batch failed and earlier batches were returned. */
+  partial: boolean;
 }
 
 /** Any adapter failure after its retry budget (config, HTTP, parsing). */
@@ -49,6 +65,7 @@ export class EmbeddingsError extends Error {
 }
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_DEADLINE_MS = 120_000;
 const MAX_BATCH = 64;
 const FALLBACK_BACKOFF_MS = 500;
 
@@ -80,17 +97,46 @@ export async function embedTexts(inputs: readonly string[], options: EmbeddingsO
   const degraded: string[] = [];
   const fetchImpl = options.fetchImpl ?? fetch;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const deadlineMs = options.deadlineMs ?? DEFAULT_DEADLINE_MS;
   const batchSize = Math.max(1, Math.min(options.batchSize ?? MAX_BATCH, MAX_BATCH));
-
-  await activateProxyIfConfigured(env, options, degraded);
+  const dispatcher = await resolveProxyDispatcher(env, options, degraded);
 
   const embeddings: number[][] = [];
+  const started = Date.now();
   for (let start = 0; start < inputs.length; start += batchSize) {
+    const remaining = deadlineMs - (Date.now() - started);
+    if (remaining <= 0) {
+      throw new EmbeddingsError(`embeddings deadline exceeded after ${deadlineMs}ms`);
+    }
     const batch = inputs.slice(start, start + batchSize);
-    const data = await requestBatch({ base, apiKey, model, batch, timeoutMs, fetchImpl });
-    embeddings.push(...data);
+    try {
+      const data = await requestBatch({
+        base,
+        apiKey,
+        model,
+        batch,
+        // Cap this attempt at the time still inside the overall deadline so a
+        // hung request cannot outlive the budget.
+        timeoutMs: Math.min(timeoutMs, remaining),
+        fetchImpl,
+        ...(dispatcher === undefined ? {} : { dispatcher }),
+      });
+      embeddings.push(...data);
+    } catch (error) {
+      if (Date.now() - started >= deadlineMs - 15) {
+        throw new EmbeddingsError(`embeddings deadline exceeded after ${deadlineMs}ms`);
+      }
+      if (embeddings.length > 0) {
+        degraded.push(
+          `batch failed at input offset ${start}: ${errorMessage(error)}; returning ${embeddings.length} partial embeddings`,
+        );
+        return { embeddings, degraded, partial: true };
+      }
+      if (error instanceof EmbeddingsError) throw error;
+      throw new EmbeddingsError(`embeddings request failed: ${errorMessage(error)}`);
+    }
   }
-  return { embeddings, degraded };
+  return { embeddings, degraded, partial: false };
 }
 
 interface BatchRequest {
@@ -100,6 +146,8 @@ interface BatchRequest {
   batch: string[];
   timeoutMs: number;
   fetchImpl: typeof fetch;
+  /** Per-request undici dispatcher. Never installed on the process. */
+  dispatcher?: unknown;
 }
 
 /** One HTTP attempt plus the machinery of its timeout (headers AND body). */
@@ -165,12 +213,18 @@ async function postOnce(req: BatchRequest): Promise<Attempt> {
   }, req.timeoutMs);
   const headers: Record<string, string> = { 'content-type': 'application/json' };
   if (req.apiKey !== '') headers.authorization = `Bearer ${req.apiKey}`;
-  const response = await req.fetchImpl(`${req.base}/v1/embeddings`, {
+  const init: RequestInit = {
     method: 'POST',
     headers,
     body: JSON.stringify({ model: req.model, input: req.batch }),
     signal: controller.signal,
-  });
+  };
+  // Local to this call. `setGlobalDispatcher` would poison every later fetch
+  // in a long-lived MCP process (leftover #34). The dispatcher stays `unknown`
+  // so this package does not import undici; Object.assign attaches it without
+  // pretending the value is a typed Dispatcher.
+  if (req.dispatcher !== undefined) Object.assign(init, { dispatcher: req.dispatcher });
+  const response = await req.fetchImpl(`${req.base}/v1/embeddings`, init);
   return { response, controller, timer, timeout };
 }
 
@@ -242,18 +296,19 @@ function parseEmbeddingsResponse(payload: unknown, expectedCount: number): numbe
 }
 
 /**
- * Install the proxy dispatcher when an environment proxy is configured.
+ * Build a per-request proxy dispatcher when an environment proxy is set.
  * `undici` is loaded through a string specifier so it stays an optional peer
  * module: when the import fails the caller proceeds direct (degraded).
+ * The dispatcher is passed to that one `fetch` and is never installed globally.
  */
-async function activateProxyIfConfigured(
+async function resolveProxyDispatcher(
   env: EnvLike,
   options: EmbeddingsOptions,
   degraded: string[],
-): Promise<void> {
+): Promise<unknown> {
   const proxy =
     env.MDLINEAGE_EMBED_PROXY ?? env.HTTPS_PROXY ?? env.HTTP_PROXY ?? env.ALL_PROXY ?? '';
-  if (proxy === '') return;
+  if (proxy === '') return undefined;
 
   const loader =
     options.undiciLoader ??
@@ -263,29 +318,33 @@ async function activateProxyIfConfigured(
       const specifier = 'undici';
       return (await import(specifier)) as {
         ProxyAgent?: new (uri: string) => unknown;
-        setGlobalDispatcher?: (d: unknown) => void;
       };
     });
 
-  let mod: {
-    ProxyAgent?: new (uri: string) => unknown;
-    setGlobalDispatcher?: (d: unknown) => void;
-  };
+  let mod: { ProxyAgent?: new (uri: string) => unknown };
   try {
     mod = (await loader()) as typeof mod;
-  } catch {
-    degraded.push(`proxy-configured-but-undici-unavailable (${redactUrl(proxy)}): direct connection used`);
-    return;
+  } catch (error) {
+    if (error instanceof Error) {
+      degraded.push(`proxy-configured-but-undici-unavailable (${redactUrl(proxy)}): direct connection used`);
+      return undefined;
+    }
+    throw error;
   }
-  if (typeof mod.ProxyAgent !== 'function' || typeof mod.setGlobalDispatcher !== 'function') {
+  if (typeof mod.ProxyAgent !== 'function') {
     degraded.push(`proxy-configured-but-undici-incomplete (${redactUrl(proxy)}): direct connection used`);
-    return;
+    return undefined;
   }
   try {
-    mod.setGlobalDispatcher(new mod.ProxyAgent(proxy));
+    const dispatcher = new mod.ProxyAgent(proxy);
     degraded.push(`proxy-active (${redactUrl(proxy)})`);
-  } catch {
-    degraded.push(`proxy-setup-failed (${redactUrl(proxy)}): direct connection used`);
+    return dispatcher;
+  } catch (error) {
+    if (error instanceof Error) {
+      degraded.push(`proxy-setup-failed (${redactUrl(proxy)}): direct connection used`);
+      return undefined;
+    }
+    throw error;
   }
 }
 

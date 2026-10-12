@@ -42,7 +42,7 @@ function makeCorpus(): { workspace: string; outside: string } {
 test('retrieve search — out-of-tree symlink content never reaches the output (A1)', () => {
   const { workspace, outside } = makeCorpus();
   try {
-    const run = runCli(['retrieve', 'search', 'ZIRCONIUM_PAPAYA_SECRET_TOKEN', '--format', 'json'], workspace);
+    const run = runCli(['retrieve', 'search', '--mode', 'lexical', 'ZIRCONIUM_PAPAYA_SECRET_TOKEN', '--format', 'json'], workspace);
     assert.equal(run.status, 0);
     const parsed = JSON.parse(run.stdout) as {
       results: Array<{ path: string; snippet: string }>;
@@ -69,7 +69,7 @@ test('retrieve search — out-of-tree symlink content never reaches the output (
 test('retrieve search — normal documents keep retrieving after the guard (A1)', () => {
   const { workspace, outside } = makeCorpus();
   try {
-    const run = runCli(['retrieve', 'search', 'manifest', '--format', 'json'], workspace);
+    const run = runCli(['retrieve', 'search', '--mode', 'lexical', 'manifest', '--format', 'json'], workspace);
     assert.equal(run.status, 0);
     const parsed = JSON.parse(run.stdout) as { results: Array<{ path: string }>; degraded: string[] };
     assert.equal(parsed.results[0]?.path, 'docs/caching.md');
@@ -84,7 +84,7 @@ test('retrieve search — an explicit --config that cannot load exits 2 (B8)', (
   const { workspace, outside } = makeCorpus();
   try {
     const missing = join(tmpdir(), 'mdl-no-such-config.yaml');
-    const run = runCli(['retrieve', 'search', 'manifest', '--config', missing], workspace);
+    const run = runCli(['retrieve', 'search', '--mode', 'lexical', 'manifest', '--config', missing], workspace);
     assert.equal(run.status, 2);
     assert.ok(run.stderr.includes('cannot load config'));
   } finally {
@@ -100,7 +100,7 @@ test('retrieve search — snippet cuts at code points, never mid-surrogate (C2)'
     // 120 emoji: every code point is astral (surrogate pair in UTF-16).
     const emoji = '🚀'.repeat(120);
     writeFileSync(join(workspace, 'docs', 'emoji.md'), `# Emoji Doc\n\nalpha ${emoji} omega\n`, 'utf8');
-    const run = runCli(['retrieve', 'search', 'alpha omega', '--format', 'json'], workspace);
+    const run = runCli(['retrieve', 'search', '--mode', 'lexical', 'alpha omega', '--format', 'json'], workspace);
     assert.equal(run.status, 0);
     const parsed = JSON.parse(run.stdout) as { results: Array<{ snippet: string }> };
     const snippet = parsed.results[0]?.snippet ?? '';
@@ -121,7 +121,7 @@ test('retrieve search — no-match echo collapses query whitespace (C3)', () => 
     mkdirSync(join(workspace, 'docs'), { recursive: true });
     writeFileSync(join(workspace, 'docs', 'doc.md'), '# Doc\n\nbody\n', 'utf8');
     const multiline = 'zzz\n\t\tqqq   www';
-    const run = runCli(['retrieve', 'search', multiline], workspace);
+    const run = runCli(['retrieve', 'search', '--mode', 'lexical', multiline], workspace);
     assert.equal(run.status, 0);
     assert.ok(run.stdout.includes("'zzz qqq www'"));
     assert.ok(!run.stdout.includes('\t'));

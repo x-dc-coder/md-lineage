@@ -32,10 +32,14 @@ import {
 } from 'node:fs';
 import { dirname, join } from 'node:path';
 
-/** Model identity of a cache directory: one model+dtype+dim, one profile. */
+/**
+ * Model identity of a cache directory: one model+dtype+dim, one profile.
+ * `dtype` is the model's quantization tag (`q8`, or the legacy label `f32`).
+ * Blobs are always little-endian float32 regardless of that tag.
+ */
 export interface VectorProfile {
   model: string;
-  dtype: 'f32';
+  dtype: string;
   dim: number;
 }
 
@@ -58,10 +62,15 @@ export interface VectorMeta extends StoreManifest {
  * across editors and line-ending policies. This is THE convention the BM25
  * corpus string (`${title}\n${text}`) also uses; keep them in sync.
  */
-export function sectionKey(title: string, text: string): string {
+/** The normalized `title\\ntext` string both the cache key and the embedder see. */
+export function sectionCorpus(title: string, text: string): string {
   const normalizedTitle = title.normalize('NFC');
   const normalizedText = text.normalize('NFC').replace(/\r\n/g, '\n');
-  return createHash('sha256').update(`${normalizedTitle}\n${normalizedText}`, 'utf8').digest('hex');
+  return `${normalizedTitle}\n${normalizedText}`;
+}
+
+export function sectionKey(title: string, text: string): string {
+  return createHash('sha256').update(sectionCorpus(title, text), 'utf8').digest('hex');
 }
 
 /** Storage contract. Implementations must treat corruption as absence. */

@@ -25,11 +25,12 @@ interface RunOutput {
   status: number | null;
 }
 
-function runCli(args: string[], cwd: string): RunOutput {
+function runCli(args: string[], cwd: string, env?: Record<string, string>): RunOutput {
   const result = spawnSync(process.execPath, [cliBin, ...args], {
     cwd,
     encoding: 'utf8',
     windowsHide: true,
+    env: env === undefined ? process.env : { ...process.env, ...env },
   });
   return { stdout: result.stdout ?? '', stderr: result.stderr ?? '', status: result.status };
 }
@@ -87,9 +88,9 @@ function makeCorpus(): string {
 test('retrieve search — deterministic BM25 ranking over the fixture corpus', () => {
   const root = makeCorpus();
   try {
-    const first = runCli(['retrieve', 'search', 'BM25 检索'], root);
+    const first = runCli(['retrieve', 'search', '--mode', 'lexical', 'BM25 检索'], root);
     assert.equal(first.status, 0, `stderr: ${first.stderr}`);
-    const second = runCli(['retrieve', 'search', 'BM25 检索'], root);
+    const second = runCli(['retrieve', 'search', '--mode', 'lexical', 'BM25 检索'], root);
     // Byte-identical output across runs: the tie-break contract made audible.
     assert.equal(first.stdout, second.stdout);
 
@@ -109,7 +110,7 @@ test('retrieve search — deterministic BM25 ranking over the fixture corpus', (
 test('retrieve search — --format json shape', () => {
   const root = makeCorpus();
   try {
-    const run = runCli(['retrieve', 'search', 'RRF 融合', '--format', 'json', '--top', '5'], root);
+    const run = runCli(['retrieve', 'search', '--mode', 'lexical', 'RRF 融合', '--format', 'json', '--top', '5'], root);
     assert.equal(run.status, 0);
     const parsed = JSON.parse(run.stdout) as {
       query: string;
@@ -118,7 +119,7 @@ test('retrieve search — --format json shape', () => {
       degraded: string[];
     };
     assert.equal(parsed.query, 'RRF 融合');
-    assert.equal(parsed.mode, 'bm25');
+    assert.equal(parsed.mode, 'lexical');
     assert.deepEqual(parsed.degraded, []);
     assert.ok(parsed.results.length >= 1);
     assert.ok(parsed.results.length <= 5);
@@ -151,11 +152,11 @@ test('retrieve search — usage errors exit 2', () => {
 test('retrieve search — zero matches still exits 0, text and json', () => {
   const root = makeCorpus();
   try {
-    const text = runCli(['retrieve', 'search', 'zzz_no_such_token_qqq'], root);
+    const text = runCli(['retrieve', 'search', '--mode', 'lexical', 'zzz_no_such_token_qqq'], root);
     assert.equal(text.status, 0);
     assert.match(text.stdout, /no sections matched/);
 
-    const json = runCli(['retrieve', 'search', 'zzz_no_such_token_qqq', '--format', 'json'], root);
+    const json = runCli(['retrieve', 'search', '--mode', 'lexical', 'zzz_no_such_token_qqq', '--format', 'json'], root);
     assert.equal(json.status, 0);
     const parsed = JSON.parse(json.stdout) as { results: unknown[]; degraded: string[] };
     assert.deepEqual(parsed.results, []);
@@ -168,12 +169,48 @@ test('retrieve search — zero matches still exits 0, text and json', () => {
 test('retrieve search — --top limits the result count', () => {
   const root = makeCorpus();
   try {
-    const run = runCli(['retrieve', 'search', 'BM25 检索 缓存 向量', '--top', '1'], root);
+    const run = runCli(['retrieve', 'search', '--mode', 'lexical', 'BM25 检索 缓存 向量', '--top', '1'], root);
     assert.equal(run.status, 0);
     const resultLines = run.stdout.trim().split('\n').filter((l) => /^\d+\s/.test(l));
     assert.equal(resultLines.length, 1);
     assert.match(resultLines[0]!, /^1\s/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('retrieve search — unknown mode, bad rerank depth, and contradictory flags exit 2', () => {
+  const root = makeCorpus();
+  try {
+    assert.equal(runCli(['retrieve', 'search', 'x', '--mode', 'dense'], root).status, 2);
+    assert.equal(runCli(['retrieve', 'search', 'x', '--rerank', '0'], root).status, 2);
+    assert.equal(runCli(['retrieve', 'search', 'x', '--rerank', 'nope'], root).status, 2);
+    assert.equal(runCli(['retrieve', 'search', 'x', '--rerank', '10', '--no-rerank'], root).status, 2);
+    const conflict = runCli(['retrieve', 'search', 'x', '--mode', 'hybrid', '--bm25-only'], root);
+    assert.equal(conflict.status, 2);
+    assert.match(conflict.stderr, /--bm25-only cannot be combined/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('retrieve search — auto without a local model falls back to lexical and stays exit 0', () => {
+  const root = makeCorpus();
+  const modelDir = mkdtempSync(join(tmpdir(), 'mdl-models-empty-'));
+  try {
+    const run = runCli(['retrieve', 'search', 'BM25 检索', '--format', 'json'], root, {
+      MDLINEAGE_MODELS_DIR: modelDir,
+    });
+    assert.equal(run.status, 0, run.stderr);
+    const parsed = JSON.parse(run.stdout) as { mode: string; degraded: string[]; results: unknown[] };
+    assert.equal(parsed.mode, 'lexical');
+    assert.ok(parsed.results.length >= 1);
+    assert.ok(
+      parsed.degraded.some((note) => note.includes('falling back to lexical')),
+      parsed.degraded.join('\n'),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(modelDir, { recursive: true, force: true });
   }
 });

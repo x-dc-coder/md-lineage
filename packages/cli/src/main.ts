@@ -82,9 +82,8 @@ Usage:
                                     report stats and index-level diagnostics
                                     (nothing is persisted)
   mdlineage retrieve search <query>
-                                    Lexical (BM25) section search over the
-                                    workspace (read-only; exits 0 even when
-                                    degraded, per Issue #3's determinism rule)
+                                    Section search over the workspace
+                                    (read-only; exits 0 even when degraded)
 
 Roots — each command anchors "the workspace" differently, by design:
   check/fix/move/organize          the CWD: paths are resolved against it, and
@@ -121,8 +120,16 @@ Options:
   --plan                      organize: output the move plan (the default)
   --frail                     Any diagnostic fails the run, warnings included
   --top <N>                   retrieve search: results to print (default 20)
-  --bm25-only                 retrieve search: lexical-only (Phase 1 default;
-                              placeholder for the Phase 2 dense/rerank path)
+  --mode <auto|lexical|hybrid>
+                              retrieve search: auto (default) uses hybrid when
+                              @mdlineage/embed-local and its models are ready,
+                              otherwise lexical. lexical forces BM25. hybrid
+                              asks for dense retrieval and falls back to
+                              lexical when that is unavailable
+  --bm25-only                 retrieve search: force lexical mode
+  --rerank <N>                retrieve search: rerank the top N fused hits
+                              (default 50; hybrid only)
+  --no-rerank                 retrieve search: skip the reranker
   --root <dir>                mcp: the workspace to index (default: the CWD)
   --help, -h                  Show this text
   --version, -v               Print the version
@@ -172,6 +179,9 @@ interface ParsedArgs {
     report?: boolean;
     scope?: string;
     top?: string;
+    mode?: string;
+    rerank?: string;
+    'no-rerank'?: boolean;
     'bm25-only'?: boolean;
     stdio?: boolean;
     root?: string;
@@ -226,8 +236,11 @@ function readArgs(argv: string[]): ParsedArgs {
       scope: { type: 'string' },
       // `mdlineage retrieve search --top <N>`: how many hits to print.
       top: { type: 'string' },
-      // Phase 1 default behaviour; kept as an explicit flag so Phase 2 can
-      // turn the dense branch on without a breaking option change.
+      mode: { type: 'string' },
+      // `--rerank <N>` is the window depth. `--no-rerank` is a separate flag:
+      // a boolean `rerank` option would steal `--no-rerank` from the depth.
+      rerank: { type: 'string' },
+      'no-rerank': { type: 'boolean' },
       'bm25-only': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
@@ -589,7 +602,7 @@ async function runIndexCommand(args: string[], values: ParsedArgs['values']): Pr
   return await indexRebuild({ format, configFile: values.config, cwd: processCwd(), exclude: values.exclude ?? [] });
 }
 
-/** `mdlineage retrieve search <query>`: read-only lexical search (§Issue 3). */
+/** `mdlineage retrieve search <query>`: read-only section search (Issue #3). */
 async function runRetrieve(args: string[], values: ParsedArgs['values']): Promise<number> {
   const sub = args[0];
   if (values.help) {
@@ -612,13 +625,62 @@ async function runRetrieve(args: string[], values: ParsedArgs['values']): Promis
     process.stderr.write(`mdlineage: --top must be a positive integer, got '${values.top}'\n`);
     return 2;
   }
+  const mode = parseRetrieveMode(values);
+  if (mode === null) {
+    const conflict = values['bm25-only'] === true && values.mode !== undefined && values.mode !== 'lexical';
+    process.stderr.write(
+      conflict
+        ? `mdlineage: --bm25-only cannot be combined with --mode ${values.mode}\n`
+        : `mdlineage: retrieve search --mode must be auto, lexical, or hybrid\n`,
+    );
+    return 2;
+  }
+  const rerank = parseRerank(values);
+  if (rerank === null) {
+    process.stderr.write(`mdlineage: --rerank must be a positive integer (or pass --no-rerank)\n`);
+    return 2;
+  }
   const query = args.slice(1).join(' ').trim();
   if (query === '') {
     process.stderr.write(`mdlineage: retrieve search needs a query\n\n${HELP}\n`);
     return 2;
   }
+  const modelDir = process.env.MDLINEAGE_MODELS_DIR;
   // Retrieval is advisory: every non-usage failure degrades, never exits 1.
-  return retrieveSearch({ format, configFile: values.config, cwd: processCwd(), top, query });
+  return retrieveSearch({
+    format,
+    configFile: values.config,
+    cwd: processCwd(),
+    top,
+    query,
+    mode,
+    rerank: rerank.enabled,
+    rerankDepth: rerank.depth,
+    ...(modelDir === undefined ? {} : { modelDir }),
+  });
+}
+
+/**
+ * `--bm25-only` is the lexical alias. Combining it with `--mode hybrid`
+ * contradicts itself and is a usage error.
+ */
+function parseRetrieveMode(values: ParsedArgs['values']): 'auto' | 'lexical' | 'hybrid' | null {
+  if (values['bm25-only'] === true) {
+    if (values.mode !== undefined && values.mode !== 'lexical') return null;
+    return 'lexical';
+  }
+  const mode = values.mode ?? 'auto';
+  if (mode === 'auto' || mode === 'lexical' || mode === 'hybrid') return mode;
+  return null;
+}
+
+function parseRerank(values: ParsedArgs['values']): { enabled: boolean; depth: number } | null {
+  if (values['no-rerank'] === true && values.rerank !== undefined) return null;
+  if (values['no-rerank'] === true) return { enabled: false, depth: 50 };
+  if (values.rerank === undefined) return { enabled: true, depth: 50 };
+  const depth = Number(values.rerank);
+  if (!Number.isInteger(depth) || depth < 1) return null;
+  return { enabled: true, depth };
 }
 
 /** `mdlineage server`: the dedicated LSP (§10.1). Only stdio exists in M3-a. */

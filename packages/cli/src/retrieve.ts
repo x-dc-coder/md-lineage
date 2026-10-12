@@ -1,20 +1,27 @@
 /**
- * `mdlineage retrieve search <query>` (Issue #3 Phase 1).
+ * `mdlineage retrieve search <query>` (Issue #3).
  *
- * Read-only lexical search over the workspace: loadConfig →
- * scanWorkspaceUniverse → extractSections per document → BM25 → ranked
- * output. Phase 1 is BM25-only by definition (`--bm25-only` is the default
- * behaviour and the flag is a forward-compat placeholder); the dense branch
- * and reranker arrive in Phase 2.
+ * Read-only section search: loadConfig → scanWorkspaceUniverse →
+ * extractSections → lexical BM25, or hybrid (BM25 + dense + RRF + rerank)
+ * when `@mdlineage/embed-local` is installed and its models are ready.
+ * The embedder is loaded with a dynamic import so this package does not
+ * depend on the native runtime. A missing package or a missing model is a
+ * lexical result plus a `degraded` note, never a failing exit.
  *
- * Exit codes follow the issue's determinism iron rule: 0 = success
- * (including every degraded state), 2 = usage error. Retrieval can never
- * fail a gate — except an explicit `--config` the user pointed at a file
- * that cannot load, which is a usage mistake, not a retrieval failure.
+ * Exit codes follow the determinism iron rule: 0 = success (including every
+ * degraded state), 2 = usage error. An explicit `--config` that cannot load
+ * is a usage mistake, not a retrieval failure.
  */
 
 import { loadConfig, scanWorkspaceUniverse, extractSections } from '@mdlineage/validator';
-import { Bm25Index, isInTreeRealpath, type Bm25Doc } from '@mdlineage/retrieve';
+import {
+  FileVectorStore,
+  isInTreeRealpath,
+  searchCorpus,
+  type Bm25Doc,
+  type EmbeddingProvider,
+  type RerankProvider,
+} from '@mdlineage/retrieve';
 
 export interface RetrieveSearchOptions {
   format: 'text' | 'json';
@@ -22,17 +29,33 @@ export interface RetrieveSearchOptions {
   cwd: string;
   top: number;
   query: string;
+  /** `auto` uses hybrid when a local model is ready, otherwise lexical. */
+  mode: 'auto' | 'lexical' | 'hybrid';
+  /** False skips the reranker even when a local one is ready. */
+  rerank: boolean;
+  rerankDepth: number;
+  /**
+   * Model cache directory forwarded to embed-local. Unset asks the package
+   * for its default (`~/.mdlineage/models`).
+   */
+  modelDir?: string;
 }
 
 /** Rough snippet budget: ~100 characters of section body, single line. */
 const SNIPPET_LENGTH = 100;
 
+interface LocalRetrieval {
+  readonly ready: boolean;
+  readonly embedder: EmbeddingProvider | null;
+  readonly reranker: RerankProvider | null;
+  readonly degraded: readonly string[];
+}
+
+type LocalLoad = { ok: true; retrieval: LocalRetrieval } | { ok: false; reason: string };
+
 export async function retrieveSearch(options: RetrieveSearchOptions): Promise<number> {
   const loaded = loadConfig(options.configFile, options.configFile ? undefined : options.cwd);
   if (options.configFile !== undefined && loaded.diagnostics.some((d) => d.severity === 'error')) {
-    // An explicitly named config that fails to load is a usage error: the
-    // caller asked for THAT file, and silently falling back to defaults would
-    // search a differently-configured corpus than the one they named.
     for (const diag of loaded.diagnostics) {
       process.stderr.write(`mdlineage: ${diag.code} ${diag.severity} ${diag.message}\n`);
     }
@@ -50,9 +73,6 @@ export async function retrieveSearch(options: RetrieveSearchOptions): Promise<nu
   const universe = scanWorkspaceUniverse(options.cwd, loaded.config);
   const docs: Bm25Doc[] = [];
   for (const [path, content] of universe.documents) {
-    // Symlinked documents whose real location escapes the workspace are not
-    // corpus material: retrieval prints content, and an out-of-tree target
-    // would leak external bytes under an in-tree path.
     if (!isInTreeRealpath(options.cwd, path)) {
       const note = `skipped out-of-tree symlink: ${path}`;
       process.stderr.write(`mdlineage: ${note}\n`);
@@ -64,9 +84,33 @@ export async function retrieveSearch(options: RetrieveSearchOptions): Promise<nu
     }
   }
 
-  const index = new Bm25Index(docs);
-  const hits = index.search(options.query, options.top);
-  const results = hits.map((hit, i) => ({
+  const resolved = await resolveProviders(options);
+  for (const note of resolved.notes) {
+    process.stderr.write(`mdlineage: ${note}\n`);
+    degraded.push(note);
+  }
+  let outcome;
+  try {
+    outcome = await searchCorpus({
+      query: options.query,
+      sections: docs,
+      top: options.top,
+      mode: resolved.mode,
+      rerankDepth: options.rerankDepth,
+      ...(resolved.embedder === undefined ? {} : { embedder: resolved.embedder }),
+      ...(resolved.reranker === undefined ? {} : { reranker: resolved.reranker }),
+      ...(resolved.store === undefined ? {} : { store: resolved.store }),
+    });
+  } finally {
+    await resolved.embedder?.dispose();
+    await resolved.reranker?.dispose();
+  }
+  for (const note of outcome.degraded) {
+    process.stderr.write(`mdlineage: ${note}\n`);
+    degraded.push(note);
+  }
+
+  const results = outcome.hits.map((hit, i) => ({
     rank: i + 1,
     path: hit.path,
     slug: hit.slug,
@@ -77,29 +121,94 @@ export async function retrieveSearch(options: RetrieveSearchOptions): Promise<nu
 
   if (options.format === 'json') {
     process.stdout.write(
-      `${JSON.stringify(
-        {
-          query: options.query,
-          mode: 'bm25',
-          results,
-          degraded,
-        },
-        null,
-        2,
-      )}\n`,
+      `${JSON.stringify({ query: options.query, mode: outcome.mode, results, degraded }, null, 2)}\n`,
     );
   } else if (results.length === 0) {
-    // The query echoes into the terminal: collapse its whitespace so a
-    // multi-line or heavily indented query cannot scramble the output.
     const echo = options.query.replace(/\s+/g, ' ').trim();
     process.stdout.write(`mdlineage: no sections matched '${echo}'\n`);
   } else {
     for (const r of results) {
       process.stdout.write(`${r.rank}  ${r.path}#${r.slug}  ${r.score.toFixed(4)}  ${r.title}  ${r.snippet}\n`);
     }
-    process.stdout.write(`mdlineage: ${results.length} section${results.length === 1 ? '' : 's'} matched (bm25)\n`);
+    process.stdout.write(
+      `mdlineage: ${results.length} section${results.length === 1 ? '' : 's'} matched (${outcome.mode})\n`,
+    );
   }
   return 0;
+}
+
+interface ResolvedProviders {
+  readonly mode: 'lexical' | 'hybrid';
+  readonly notes: readonly string[];
+  readonly embedder?: EmbeddingProvider;
+  readonly reranker?: RerankProvider;
+  readonly store?: FileVectorStore;
+}
+
+async function resolveProviders(options: RetrieveSearchOptions): Promise<ResolvedProviders> {
+  if (options.mode === 'lexical') return { mode: 'lexical', notes: [] };
+
+  const loaded = await loadEmbedLocal(options.modelDir);
+  if (!loaded.ok) {
+    const reason = options.mode === 'hybrid' ? `hybrid-unavailable: ${loaded.reason}` : loaded.reason;
+    return { mode: 'lexical', notes: [reason] };
+  }
+  const retrieval = loaded.retrieval;
+  if (!retrieval.ready || retrieval.embedder === null) {
+    const notes =
+      retrieval.degraded.length > 0 ? [...retrieval.degraded] : ['models-not-ready: falling back to lexical'];
+    await retrieval.embedder?.dispose();
+    await retrieval.reranker?.dispose();
+    return { mode: 'lexical', notes };
+  }
+
+  const embedder = retrieval.embedder;
+  const reranker = options.rerank ? (retrieval.reranker ?? undefined) : undefined;
+  if (!options.rerank && retrieval.reranker !== null) {
+    await retrieval.reranker.dispose();
+  }
+  const store =
+    embedder.meta.dim > 0
+      ? new FileVectorStore(options.cwd, {
+          model: embedder.meta.model,
+          dtype: embedder.meta.dtype,
+          dim: embedder.meta.dim,
+        })
+      : undefined;
+  return {
+    mode: 'hybrid',
+    notes: [...retrieval.degraded],
+    embedder,
+    ...(reranker === undefined ? {} : { reranker }),
+    ...(store === undefined ? {} : { store }),
+  };
+}
+
+/**
+ * Load `@mdlineage/embed-local` if it is installed. A missing module is the
+ * normal lexical fallback, not an error: the specifier is a variable so
+ * TypeScript does not require the package to be resolvable at build time.
+ */
+async function loadEmbedLocal(modelDir: string | undefined): Promise<LocalLoad> {
+  const specifier = '@mdlineage/embed-local';
+  try {
+    const mod = (await import(specifier)) as {
+      openLocalRetrieval?: (options: { modelDir?: string }) => Promise<LocalRetrieval>;
+    };
+    if (typeof mod.openLocalRetrieval !== 'function') {
+      return { ok: false, reason: 'embed-local-unavailable: openLocalRetrieval is missing; falling back to lexical' };
+    }
+    const retrieval = await mod.openLocalRetrieval(modelDir === undefined ? {} : { modelDir });
+    return { ok: true, retrieval };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const missing =
+      message.includes('ERR_MODULE_NOT_FOUND') ||
+      message.includes('Cannot find package') ||
+      message.includes('Cannot find module');
+    if (missing) return { ok: false, reason: 'embed-local-unavailable: falling back to lexical' };
+    return { ok: false, reason: `embed-local-unavailable: ${message}; falling back to lexical` };
+  }
 }
 
 /**
