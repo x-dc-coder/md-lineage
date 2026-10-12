@@ -2,6 +2,7 @@
   "files": [],
   "references": [
     { "path": "packages/validator" },
+    { "path": "packages/retrieve" },
     { "path": "packages/remark-lint-mdlineage" },
     { "path": "packages/language-server" },
     { "path": "packages/mcp-server" },

@@ -1,0 +1,100 @@
+/**
+ * BM25 lexical index over sections (Issue #3 Phase 1: pure lexical branch).
+ *
+ * The corpus unit is the section and the indexed string is
+ * `${title}\n${text}` — the same string PR-3's `sectionKey(title, text)`
+ * hashes, so a cached vector, a lexical hit and an evidence anchor all
+ * describe the same span. k1 = 1.2, b = 0.75 (the canonical Robertson/Sparck
+ * Jones defaults); document frequency counts sections, not files.
+ *
+ * Ranking is byte-deterministic: equal scores are ordered by the `(path,
+ * slug)` lexicographic tie-break the issue mandates for the lexical branch.
+ */
+
+import { tokenize } from './tokenize.js';
+
+/** One indexable section: the retrieval view of a validator `Section`. */
+export interface Bm25Doc {
+  /** Workspace-relative document path (the tie-break's first key). */
+  path: string;
+  /** Section slug (the tie-break's second key). */
+  slug: string;
+  title: string;
+  text: string;
+}
+
+export interface Bm25Hit extends Bm25Doc {
+  /** BM25 score; only comparable within one index over one query. */
+  score: number;
+}
+
+const K1 = 1.2;
+const B = 0.75;
+
+interface IndexedDoc {
+  doc: Bm25Doc;
+  tf: Map<string, number>;
+  length: number;
+}
+
+export class Bm25Index {
+  private readonly docs: IndexedDoc[];
+  private readonly df = new Map<string, number>();
+  private readonly avgdl: number;
+
+  constructor(docs: readonly Bm25Doc[]) {
+    this.docs = docs.map((doc) => {
+      // The corpus string convention: title line then body — kept in sync
+      // with the vector cache key so lexical and dense see the same text.
+      const terms = tokenize(`${doc.title}\n${doc.text}`);
+      const tf = new Map<string, number>();
+      for (const term of terms) tf.set(term, (tf.get(term) ?? 0) + 1);
+      return { doc, tf, length: terms.length };
+    });
+    for (const indexed of this.docs) {
+      for (const term of indexed.tf.keys()) {
+        this.df.set(term, (this.df.get(term) ?? 0) + 1);
+      }
+    }
+    const total = this.docs.reduce((sum, d) => sum + d.length, 0);
+    this.avgdl = this.docs.length === 0 ? 0 : total / this.docs.length;
+  }
+
+  get size(): number {
+    return this.docs.length;
+  }
+
+  /**
+   * Rank sections for `query`. Okapi BM25 with the non-negative idf
+   * `ln(1 + (N - df + 0.5)/(df + 0.5))` (the Lucene variant: a term in every
+   * document must score 0, never below it).
+   */
+  search(query: string, limit?: number): Bm25Hit[] {
+    const queryTerms = [...new Set(tokenize(query))];
+    if (queryTerms.length === 0 || this.docs.length === 0) return [];
+    const n = this.docs.length;
+    const hits: Bm25Hit[] = [];
+    for (const indexed of this.docs) {
+      let score = 0;
+      for (const term of queryTerms) {
+        const tf = indexed.tf.get(term);
+        if (tf === undefined) continue;
+        const df = this.df.get(term) ?? 0;
+        const idf = Math.log(1 + (n - df + 0.5) / (df + 0.5));
+        // Zero-length documents cannot contain the term; guard anyway so the
+        // normalization never divides by zero.
+        const norm = indexed.length === 0 ? 0 : 1 - B + (B * indexed.length) / this.avgdl;
+        score += (idf * tf * (K1 + 1)) / (tf + K1 * norm);
+      }
+      if (score > 0) hits.push({ ...indexed.doc, score });
+    }
+    hits.sort(byScoreThenKey);
+    return limit === undefined ? hits : hits.slice(0, limit);
+  }
+}
+
+/** Score descending, then (path, slug) ascending: byte-stable output. */
+function byScoreThenKey(a: Bm25Hit, b: Bm25Hit): number {
+  if (a.score !== b.score) return b.score - a.score;
+  return a.path < b.path ? -1 : a.path > b.path ? 1 : a.slug < b.slug ? -1 : a.slug > b.slug ? 1 : 0;
+}

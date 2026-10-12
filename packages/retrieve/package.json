@@ -1,0 +1,40 @@
+{
+  "name": "@mdlineage/retrieve",
+  "version": "0.3.0",
+  "description": "Retrieval primitives for MDLineage: CJK-bigram + identifier tokenizer, BM25 lexical index and RRF rank fusion (Issue #3 Phase 1).",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "!dist/**/*.map",
+    "!dist/.tsbuildinfo"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/x-dc-coder/md-lineage.git",
+    "directory": "packages/retrieve"
+  },
+  "scripts": {
+    "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
+    "test": "node ../../scripts/run-tests.mjs .",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@mdlineage/validator": "*"
+  },
+  "devDependencies": {
+    "@types/node": "^20.19.0"
+  },
+  "license": "MIT"
+}
