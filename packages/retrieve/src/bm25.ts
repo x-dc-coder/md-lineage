@@ -41,10 +41,10 @@ export type LengthAccounting = 'token-total' | 'unique-terms';
 
 /**
  * Constructor default. On the 2026-10-12 comparison both accountings scored
- * Recall@10 100% and the same MRR@10, so the length norm stays the token
- * total (leftover #33). The report records the figures.
+ * Recall@10 100%, and unique-terms scored the higher MRR@10, so the length
+ * norm is the set size (leftover #33). The report records the figures.
  */
-export const DEFAULT_LENGTH_ACCOUNTING: LengthAccounting = 'token-total';
+export const DEFAULT_LENGTH_ACCOUNTING: LengthAccounting = 'unique-terms';
 
 interface IndexedDoc {
   doc: Bm25Doc;
@@ -58,8 +58,8 @@ export class Bm25Index {
   private readonly avgdl: number;
 
   /**
-   * Default is `token-total` (see `DEFAULT_LENGTH_ACCOUNTING`). Pass
-   * `unique-terms` to score with the set-size length norm. The comparison
+   * Default is `unique-terms` (see `DEFAULT_LENGTH_ACCOUNTING`). Pass
+   * `token-total` to score with the token-count length norm. The comparison
    * report records both Recall@10 and MRR@10 figures.
    */
   constructor(

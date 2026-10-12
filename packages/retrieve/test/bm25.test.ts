@@ -8,8 +8,9 @@
  *   b.md#bird: bird×4                           len 4
  *   c.md#fish: fish×2, cat×1                    len 3
  * N = 3, avgdl = 11/3, k1 = 1.2, b = 0.75, df(cat) = 2, df(dog) = 1.
- * The golden ranking pins `token-total`, which is also the constructor
- * default: on the 2026-10-12 comparison the two accountings tied (leftover #33).
+ * The golden ranking pins `token-total` by passing it explicitly. The
+ * constructor default is `unique-terms`: on the 2026-10-12 comparison it
+ * kept Recall@10 and raised MRR@10 (leftover #33).
  */
 
 import { test } from 'node:test';
@@ -51,7 +52,7 @@ test('bm25 — unique-terms length accounting scores a repeated token higher tha
   const byDefault = new Bm25Index(docs).search('alpha').find((hit) => hit.path === 'repeat.md')?.score;
   assert.ok(total !== undefined && unique !== undefined);
   assert.ok(unique > total);
-  assert.equal(byDefault, total);
+  assert.equal(byDefault, unique);
 });
 
 test('bm25 — tie-break is (path, slug) lexicographic, byte-stable', () => {
