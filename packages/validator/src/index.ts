@@ -86,6 +86,7 @@ export { parseMarkdown, parseMarkdownSync } from './parse-markdown.js';
 export { getSchemaValidator, validateAgainstSchema, resolveErrorRange } from './schema-validator.js';
 export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset, collectAnchors, collectHeadingTexts, extractSamePageLinks } from './document-validator.js';
 export { Slugger, slugifyHeading } from './slugger.js';
+export { extractSections, estimateTokens, type Section } from './sections.js';
 export type { ValidateInput, ValidateResult } from './index-types.js';
 export type { WorkspaceIndex, DocEntry, DocPath, RelationEntry, LinkEntry, UpdateResult, RelationTargetResolution } from './workspace-index.js';
 export {
