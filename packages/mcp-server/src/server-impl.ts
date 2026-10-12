@@ -75,6 +75,7 @@ import {
   type AcceptedProposal,
   type MetadataProposal,
 } from './proposals.js';
+import { RetrievalSession } from './search.js';
 
 export { resetProposalIds, ProposalQueue, buildProposals, applyProposalToContent, diffOf, proposeDocumentId };
 
@@ -108,6 +109,11 @@ export interface McpServerContext {
   readonly configDiagnostics: readonly ConfigDiagnosticReport[];
   /** Resolved federation plan or null. */
   readonly federation: ResolvedFederation | null;
+  /**
+   * Model cache forwarded to embed-local. Unset asks that package for its
+   * default (`MDLINEAGE_MODELS_DIR`, else `~/.mdlineage/models`).
+   */
+  readonly modelDir?: string;
 }
 
 export interface ConfigDiagnosticReport {
@@ -120,7 +126,7 @@ export interface ConfigDiagnosticReport {
  * Build the context for a root: config first, because every tool after it
  * depends on which config the repository actually has.
  */
-export function createContext(root: string, configFile?: string): McpServerContext {
+export function createContext(root: string, configFile?: string, modelDir?: string): McpServerContext {
   const loaded = loadConfig(configFile, configFile ? undefined : root);
   const resolvedRoot = resolve(root);
   const declaringDir = loaded.config.source ? dirname(loaded.config.source) : resolvedRoot;
@@ -143,6 +149,7 @@ export function createContext(root: string, configFile?: string): McpServerConte
     config: effectiveConfig,
     configDiagnostics: allDiagnostics,
     federation,
+    ...(modelDir === undefined || modelDir === '' ? {} : { modelDir }),
   };
 }
 
@@ -161,15 +168,25 @@ export function createMdlineageMcpServer(context: McpServerContext): {
         'followed by apply_metadata_patch to fill missing metadata — apply returns a diff and writes nothing ' +
         'unless it is called with write: true, which overwrites the document on disk with the reviewed text. ' +
         'A proposal over a document that was never saved writes that document into existence; one over a document ' +
-        'that has since been deleted or renamed is refused instead.',
+        'that has since been deleted or renamed is refused instead. ' +
+        'search_documents is read-only section search: hybrid when a local model is ready, otherwise lexical, ' +
+        'and the hits are candidates, never a gate.',
     },
   );
+
+  const retrieval = new RetrievalSession(context.root, context.modelDir);
+  // `McpServer` hides the protocol callback. The underlying server runs it
+  // when the transport closes, which is this process's end of life.
+  server.server.onclose = () => {
+    void retrieval.dispose();
+  };
 
   registerValidateDocument(server, context);
   registerValidateRepository(server, context);
   registerGetSchema(server);
   registerListDocumentIds(server, context);
   registerResolveRelationTarget(server, context);
+  registerSearchDocuments(server, context, retrieval);
   registerSuggestMetadata(server, context, queue);
   registerApplyMetadataPatch(server, context, queue);
   registerSchemaResources(server);
@@ -538,6 +555,43 @@ function asJson(payload: unknown): { content: Array<{ type: 'text'; text: string
   return { content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }] };
 }
 
+/**
+ * `search_documents(query, top_k?, mode?)` — read-only section search.
+ * Hybrid keeps one embed/rerank session for this server. Lexical never
+ * loads it. A missing model degrades and still returns hits.
+ */
+function registerSearchDocuments(server: McpServer, context: McpServerContext, retrieval: RetrievalSession): void {
+  server.registerTool(
+    'search_documents',
+    {
+      title: 'Search document sections',
+      description:
+        'Search Markdown sections in the workspace. `lexical` is BM25. `hybrid` (the default) uses a local ONNX ' +
+        'embedding and reranker when @mdlineage/embed-local and its models are installed, and otherwise falls back ' +
+        'to lexical. Results are candidates, not a gate. Nothing is written.',
+      inputSchema: {
+        query: z.string().min(1).describe('The search query.'),
+        top_k: z.number().int().positive().optional().describe('How many sections to return. Default 10.'),
+        mode: z
+          .enum(['lexical', 'hybrid'])
+          .optional()
+          .describe('lexical forces BM25. hybrid tries dense retrieval and falls back to lexical. Default hybrid.'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    async ({ query, top_k, mode }) => {
+      const result = await retrieval.search({
+        root: context.root,
+        config: context.config,
+        query,
+        top: top_k ?? 10,
+        mode: mode ?? 'hybrid',
+      });
+      return asJson(result);
+    },
+  );
+}
+
 /** Every §12 tool name, in the order the doc's table lists them. */
 export const TOOL_NAMES = [
   'validate_document',
@@ -545,6 +599,7 @@ export const TOOL_NAMES = [
   'get_schema',
   'list_document_ids',
   'resolve_relation_target',
+  'search_documents',
   'suggest_metadata',
   'apply_metadata_patch',
 ] as const;

@@ -110,7 +110,7 @@ describe('server --stdio (LSP)', () => {
 });
 
 describe('mcp --stdio (MCP)', () => {
-  it('initializes and lists exactly 7 tools', async () => {
+  it('initializes and lists exactly 8 tools', async () => {
     const { proc, rpc } = startService(['mcp', '--stdio']);
     try {
       const init = await rpc.request(
@@ -126,8 +126,9 @@ describe('mcp --stdio (MCP)', () => {
       rpc.send({ jsonrpc: '2.0', method: 'notifications/initialized' });
       const tools = await rpc.request({ jsonrpc: '2.0', id: 11, method: 'tools/list' }, 11);
       const names = tools.result.tools.map((t: { name: string }) => t.name);
-      assert.equal(names.length, 7);
+      assert.equal(names.length, 8);
       assert.ok(names.includes('validate_document'));
+      assert.ok(names.includes('search_documents'));
       assert.ok(names.includes('apply_metadata_patch'));
     } finally {
       kill(proc);

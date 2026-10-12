@@ -36,6 +36,7 @@
     "prepublishOnly": "npm run build"
   },
   "dependencies": {
+    "@mdlineage/retrieve": "*",
     "@mdlineage/validator": "*",
     "@modelcontextprotocol/sdk": "1.30.0",
     "zod": "^4.6.5"

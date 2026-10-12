@@ -147,14 +147,15 @@ describe('MCP server — tool surface', () => {
           'get_schema',
           'list_document_ids',
           'resolve_relation_target',
+          'search_documents',
           'suggest_metadata',
           'validate_document',
           'validate_repository',
         ],
-        'the seven §12 tools, and no others',
+        'the eight tools, and no others',
       );
       // A tool without an input schema would be unusable from a client; every
-      // one of the seven takes arguments.
+      // one of the eight takes arguments.
       for (const tool of listed.tools) {
         assert.equal(tool.inputSchema.type, 'object', `${tool.name} declares an object input schema`);
       }
@@ -189,6 +190,7 @@ describe('MCP server — tool surface', () => {
         'get_schema',
         'list_document_ids',
         'resolve_relation_target',
+        'search_documents',
         'suggest_metadata',
       ]) {
         assert.equal(byName.get(name)?.annotations?.readOnlyHint, true, `${name} stays read-only`);
