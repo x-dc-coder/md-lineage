@@ -17,3 +17,6 @@ packages/*/schemas/
 # local `npm pack` tarballs must never be committed
 packages/**/*.tgz
 *.tgz
+
+# local retrieval vector cache (derived data, always rebuildable)
+.mdlineage-cache/
