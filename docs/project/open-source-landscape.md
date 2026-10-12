@@ -4,8 +4,12 @@ mdlineage:
   id: docs.open-source-landscape
   kind: reference
   status: active
+  relations:
+    - type: depends_on
+      target: docs.architecture
+      reason: 对标分析以本项目系统架构的分层为参照系
   created_at: 2026-09-21
-  updated_at: 2026-10-01
+  updated_at: 2026-10-13
 ---
 
 # Open-source project landscape

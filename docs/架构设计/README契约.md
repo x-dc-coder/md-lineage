@@ -4,8 +4,15 @@ mdlineage:
   id: docs.specs.readme-contract
   kind: spec
   status: active
+  relations:
+    - type: depends_on
+      target: docs.dir-conventions
+      reason: README 门面规则与目录契约的布局规则联动生效
+    - type: depends_on
+      target: docs.frontmatter-spec
+      reason: 门面契约检查涉及的 Front Matter 字段语义以元数据规范为准
   created_at: 2026-10-02
-  updated_at: 2026-10-10
+  updated_at: 2026-10-13
 ---
 
 # README 门面与目录导航契约规范

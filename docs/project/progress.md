@@ -4,8 +4,15 @@ mdlineage:
   id: docs.progress
   kind: report
   status: active
+  relations:
+    - type: depends_on
+      target: docs.roadmap
+      reason: 里程碑表的结构与阶段命名对齐路线图的阶段定义
+    - type: depends_on
+      target: docs.open-source-landscape
+      reason: 实现决策中的借鉴来源引用开源项目景观调研
   created_at: 2026-09-21
-  updated_at: 2026-10-12
+  updated_at: 2026-10-13
 ---
 
 # Project progress tracker

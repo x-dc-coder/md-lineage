@@ -4,8 +4,12 @@ mdlineage:
   id: docs.vision
   kind: vision
   status: active
+  relations:
+    - type: depends_on
+      target: docs.architecture
+      reason: 愿景中的能力主张与系统架构的四层模型一一对应
   created_at: 2026-09-21
-  updated_at: 2026-10-01
+  updated_at: 2026-10-13
 ---
 
 # Product vision

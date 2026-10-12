@@ -4,8 +4,15 @@ mdlineage:
   id: docs.reviews.2026-09-21-round1-adjudication
   kind: report
   status: archived
+  relations:
+    - type: depends_on
+      target: docs.reviews.2026-09-21-round1-glm-5.3
+      reason: 仲裁结论逐条裁决 glm-5.3 评审报告的发现
+    - type: depends_on
+      target: docs.reviews.2026-09-21-round1-atria-dawn-preview
+      reason: 仲裁结论逐条裁决 Atria-Dawn-Preview 评审报告的发现
   created_at: 2026-09-21
-  updated_at: 2026-10-01
+  updated_at: 2026-10-13
 ---
 
 # Cross-review round 1 — adjudication record

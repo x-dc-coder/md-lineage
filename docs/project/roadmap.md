@@ -4,8 +4,15 @@ mdlineage:
   id: docs.roadmap
   kind: plan
   status: active
+  relations:
+    - type: depends_on
+      target: docs.progress
+      reason: 路线图各里程碑的完成状态以进度跟踪表为权威记录
+    - type: depends_on
+      target: docs.vision
+      reason: 阶段划分与优先级承接产品愿景的四支柱定义
   created_at: 2026-09-21
-  updated_at: 2026-10-01
+  updated_at: 2026-10-13
 ---
 
 # Initial roadmap
