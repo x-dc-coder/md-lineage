@@ -57,7 +57,7 @@ jobs:
       # A dry-run pack costs seconds and writes no artifacts.
       - name: Verify packages are packable (dry run)
         run: |
-          for p in validator cli language-server mcp-server remark-lint-mdlineage; do
+          for p in validator retrieve cli language-server mcp-server remark-lint-mdlineage; do
             npm pack -w "packages/$p" --dry-run
           done
 
