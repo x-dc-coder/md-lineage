@@ -27,7 +27,7 @@ test('bm25 — hand-computed golden ranking for "cat dog"', () => {
 
   // idf(cat) = ln(1 + (3-2+0.5)/(2+0.5))      = ln(1.6)
   // idf(dog) = ln(1 + (3-1+0.5)/(1+0.5))      = ln(8/3)
-  // a: norm = 0.25 + 0.75*4/(11/3) = 31/22
+  // a: norm = 0.25 + 0.75*4/(11/3) = 47/44
   //    cat: ln(1.6)*3*2.2/(3+1.2*31/22) = 0.7244735…
   //    dog: ln(8/3)*1*2.2/(1+1.2*31/22) = 0.9456506…
   //    total = 1.6701242694590301
@@ -56,10 +56,14 @@ test('bm25 — tie-break is (path, slug) lexicographic, byte-stable', () => {
   assert.ok(scores.every((s) => s === scores[0]));
 });
 
-test('bm25 — limit slices after sorting', () => {
+test('bm25 — limit slices after sorting; non-positive limits return nothing', () => {
   const index = new Bm25Index(CORPUS);
   assert.equal(index.search('cat dog', 1).length, 1);
   assert.equal(index.search('cat dog', 0).length, 0);
+  // A negative limit must not reach Array.slice (which would truncate from
+  // the end and return tail hits as if they were the top).
+  assert.equal(index.search('cat dog', -1).length, 0);
+  assert.equal(index.search('cat dog', -3).length, 0);
   assert.equal(index.size, 3);
 });
 
@@ -70,15 +74,15 @@ test('bm25 — empty query, symbol-only query and empty corpus', () => {
   assert.deepEqual(new Bm25Index([]).search('cat'), []);
 });
 
-test('bm25 — a term present in every document scores 0 (non-negative idf)', () => {
+test('bm25 — a term present in every document keeps a strictly positive idf', () => {
   const docs = [
     { path: 'a.md', slug: 's', title: 'shared', text: 'alpha' },
     { path: 'b.md', slug: 's', title: 'shared', text: 'beta' },
     { path: 'c.md', slug: 's', title: 'shared', text: 'gamma' },
   ];
-  // 'shared' (df = N) contributes ln(1+0.5/3.5) > 0 under the Lucene idf, so
-  // every document is returned; the ranking is driven by nothing else — all
-  // scores equal, tie-break path order.
+  // 'shared' (df = N) contributes ln(1 + 1/(2N)) > 0 under the Lucene idf
+  // (strictly positive, uncapped), so every document is returned; the
+  // ranking is driven by nothing else — all scores equal, tie-break path order.
   const hits = new Bm25Index(docs).search('shared');
   assert.deepEqual(hits.map((h) => h.path), ['a.md', 'b.md', 'c.md']);
 });

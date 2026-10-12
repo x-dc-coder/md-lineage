@@ -36,3 +36,24 @@ test('rrf — custom k and empty inputs', () => {
   assert.deepEqual(fuse([]), []);
   assert.deepEqual(fuse([[], []]), []);
 });
+
+// ---------------------------------------------------------------------------
+// Review-round fixes (Issue #3 Phase 1).
+// ---------------------------------------------------------------------------
+
+test('rrf — a duplicate key inside ONE ranking scores once, at first occurrence', () => {
+  const fused = fuse([['a', 'b', 'a']]);
+  assert.deepEqual(fused.map((f) => f.key), ['a', 'b']);
+  assert.ok(Math.abs(fused[0]!.score - 1 / 61) < 1e-12);
+  assert.ok(Math.abs(fused[1]!.score - 1 / 62) < 1e-12);
+});
+
+test('rrf — the same key MAY appear in different rankings (that is the point)', () => {
+  const fused = fuse([['a'], ['a']]);
+  assert.ok(Math.abs(fused[0]!.score - 2 / 61) < 1e-12);
+});
+
+test('rrf — k must be positive', () => {
+  assert.throws(() => fuse([['x']], -1), RangeError);
+  assert.throws(() => fuse([['x']], 0), RangeError);
+});

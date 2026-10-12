@@ -76,10 +76,19 @@ function isAsciiWordChar(ch: string): boolean {
 }
 
 function isCjkCode(code: number): boolean {
+  // URO + Ext A..G + Hiragana/Katakana + Hangul. The supplementary
+  // extensions (B through G, plus plane 3) keep rare-script documents from
+  // tokenizing as pure symbol noise.
   return (
     (code >= 0x4e00 && code <= 0x9fff) ||
     (code >= 0x3400 && code <= 0x4dbf) ||
-    (code >= 0x20000 && code <= 0x2a6dd) ||
+    (code >= 0x20000 && code <= 0x2a6dd) || // Ext B
+    (code >= 0x2a700 && code <= 0x2b739) || // Ext C
+    (code >= 0x2b740 && code <= 0x2b81d) || // Ext D
+    (code >= 0x2b820 && code <= 0x2cea1) || // Ext E
+    (code >= 0x2ceb0 && code <= 0x2ebe0) || // Ext F
+    (code >= 0x2ebf0 && code <= 0x2ee5d) || // Ext G
+    (code >= 0x30000 && code <= 0x3134a) || // Ext H/I (plane 3) + supplements
     (code >= 0x3040 && code <= 0x30ff) ||
     (code >= 0xac00 && code <= 0xd7a3)
   );
@@ -102,11 +111,16 @@ function flushCjkRun(run: string[], out: string[]): void {
  * frequency is the caller's (BM25's) business.
  */
 export function tokenize(text: string): string[] {
+  // NFC first, the same identity invariant `sectionKey` hashes under: a
+  // section stored with composed accents must tokenize identically to the
+  // visually equal decomposed spelling, or lexical and dense lookups drift
+  // apart for the same content.
+  const source = text.normalize('NFC');
   const out: string[] = [];
   let word = '';
   let cjkRun: string[] = [];
 
-  for (const ch of text) {
+  for (const ch of source) {
     if (isAsciiWordChar(ch)) {
       if (word.length === 0) flushCjkRun(cjkRun.splice(0), out);
       word += ch;

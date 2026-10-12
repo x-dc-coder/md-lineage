@@ -10,6 +10,7 @@ import { chmodSync, existsSync, readdirSync, readFileSync, statSync, writeFileSy
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 import {
   FileVectorStore,
   sectionKey,
@@ -44,8 +45,11 @@ test('sectionKey — NFC and LF normalization make visually equal sections equal
   assert.notEqual(sectionKey('A', 'x'), sectionKey('B', 'x'));
 });
 
-test('profileDirName — deterministic slug of model + dtype + dim', () => {
-  assert.equal(profileDirName(PROFILE), 'qwen-qwen3-embedding-0.6b-f32-d4');
+test('profileDirName — deterministic slug + lossless model hash + dtype + dim', () => {
+  // The slug alone is lossy; the first 8 hex of sha256(model) makes the
+  // directory name a lossless function of the profile identity.
+  const hash8 = createHash('sha256').update(PROFILE.model, 'utf8').digest('hex').slice(0, 8);
+  assert.equal(profileDirName(PROFILE), `qwen-qwen3-embedding-0.6b-${hash8}-f32-d4`);
 });
 
 test(
@@ -197,5 +201,71 @@ test(
   withRoot((root) => {
     const store = new FileVectorStore(root, PROFILE);
     assert.throws(() => store.put(sectionKey('T', 'x'), [1, 2, 3]));
+  }),
+);
+
+// ---------------------------------------------------------------------------
+// Review-round fixes (Issue #3 Phase 1).
+// ---------------------------------------------------------------------------
+
+test(
+  'corruption — a corrupted blob is rewritten by the next put, not missed forever (B2)',
+  withRoot((root) => {
+    const store = new FileVectorStore(root, PROFILE);
+    const hash = sectionKey('T', 'recompute');
+    store.put(hash, [3, 0, 4, 0]);
+    // Damage the blob (wrong byte length): reads report absence...
+    writeFileSync(store.blobPath(hash), Buffer.alloc(7));
+    assert.equal(store.has(hash), false);
+    // ...and the next put MUST rewrite it instead of skipping on existence.
+    store.put(hash, [3, 0, 4, 0]);
+    assert.equal(store.has(hash), true);
+    assert.equal(statSync(store.blobPath(hash)).size, PROFILE.dim * 4);
+    const back = store.get(hash);
+    assert.ok(Math.abs((back?.[0] ?? 0) - 0.6) < 1e-6);
+  }),
+);
+
+test(
+  'hash validation — non-sha256 hashes are rejected everywhere (C4)',
+  withRoot((root) => {
+    const store = new FileVectorStore(root, PROFILE);
+    assert.throws(() => store.blobPath('nothash'));
+    assert.throws(() => store.has('nothash'));
+    assert.throws(() => store.get('nothash'));
+    assert.throws(() => store.put('nothash', [1, 0, 0, 0]));
+    assert.throws(() => store.has('ABCDEF'.repeat(16))); // 64 chars, not hex
+  }),
+);
+
+test(
+  'manifest — a foreign-profile manifest on disk is treated as absent (C5)',
+  withRoot((root) => {
+    const store = new FileVectorStore(root, PROFILE);
+    const hash = sectionKey('T', 'x');
+    store.put(hash, [1, 0, 0, 0]);
+    store.setSections('docs/a.md', [hash]);
+    assert.equal(store.meta().files['docs/a.md'] !== undefined, true);
+
+    // Hand-copy a manifest from another profile into this profile's directory.
+    const manifestPath = join(
+      root,
+      '.mdlineage-cache',
+      'retrieve',
+      profileDirName(PROFILE),
+      'manifest.json',
+    );
+    const foreign = JSON.stringify({
+      version: 1,
+      profile: { model: 'other-model', dtype: 'f32', dim: 4 },
+      files: { 'stale.md': [hash] },
+    });
+    writeFileSync(manifestPath, foreign);
+
+    const reloaded = new FileVectorStore(root, PROFILE);
+    assert.deepEqual(reloaded.meta().files, {});
+    // The blob survives (content-addressed, still valid); only the foreign
+    // file index is discarded.
+    assert.equal(reloaded.has(hash), true);
   }),
 );

@@ -23,7 +23,6 @@
 import { createHash } from 'node:crypto';
 import { randomBytes } from 'node:crypto';
 import {
-  existsSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -78,13 +77,28 @@ export interface VectorStore {
   meta(): VectorMeta;
 }
 
-/** Deterministic profile directory: model slug + dtype + dim. */
+/**
+ * Deterministic profile directory: model slug + dtype + dim. The slug alone
+ * is lossy (two models can slugify to the same name), so the first 8 hex of
+ * sha256(model) is appended — the directory name is a lossless function of
+ * the profile identity.
+ */
 export function profileDirName(profile: VectorProfile): string {
   const slug = profile.model
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  return `${slug || 'model'}-${profile.dtype}-d${profile.dim}`;
+  const hash8 = createHash('sha256').update(profile.model, 'utf8').digest('hex').slice(0, 8);
+  return `${slug || 'model'}-${hash8}-${profile.dtype}-d${profile.dim}`;
+}
+
+/** Section/blob hashes are sha256 hex digests; anything else is a bug. */
+const HASH_PATTERN = /^[0-9a-f]{64}$/;
+
+function assertHash(hash: string): void {
+  if (!HASH_PATTERN.test(hash)) {
+    throw new Error(`invalid vector blob hash: expected 64 hex characters, got ${JSON.stringify(hash)}`);
+  }
 }
 
 /**
@@ -106,14 +120,19 @@ export class FileVectorStore implements VectorStore {
 
   /** Blob path of a hash (public for diagnostics/tests). */
   blobPath(hash: string): string {
+    assertHash(hash);
     return join(this.blobsDir, `${hash}.f32`);
   }
 
   has(hash: string): boolean {
+    // Explicit guard: readBlob treats ANY throw as absence, so validation
+    // must happen before its try/catch swallows the error.
+    assertHash(hash);
     return this.readBlob(hash) !== null;
   }
 
   get(hash: string): Float32Array | null {
+    assertHash(hash);
     return this.readBlob(hash);
   }
 
@@ -123,7 +142,10 @@ export class FileVectorStore implements VectorStore {
    * and rewriting would only churn mtimes).
    */
   put(hash: string, vector: readonly number[]): void {
-    if (existsSync(this.blobPath(hash))) return;
+    assertHash(hash);
+    // Skip only when a READABLE blob exists. A corrupt file (wrong length,
+    // unreadable) must be rewritten, not cached-missed forever.
+    if (this.readBlob(hash) !== null) return;
     if (vector.length !== this.profile.dim) {
       throw new Error(
         `vector dimension mismatch: profile dim ${this.profile.dim}, got ${vector.length}`,
@@ -225,6 +247,17 @@ export class FileVectorStore implements VectorStore {
     }
     try {
       const parsed = JSON.parse(raw) as Partial<StoreManifest>;
+      // A manifest written by a DIFFERENT profile (hand-copied cache, changed
+      // dim) is treated as absent: its hashes belong to another model and must
+      // not be reused as this profile's section index.
+      const onDisk = parsed.profile;
+      if (
+        typeof onDisk === 'object' &&
+        onDisk !== null &&
+        (onDisk.model !== this.profile.model || onDisk.dtype !== this.profile.dtype || onDisk.dim !== this.profile.dim)
+      ) {
+        return { version: 1, profile: this.profile, files: {} };
+      }
       const files =
         parsed.files && typeof parsed.files === 'object' && !Array.isArray(parsed.files)
           ? parsed.files

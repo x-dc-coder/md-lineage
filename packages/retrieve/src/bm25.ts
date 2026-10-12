@@ -65,11 +65,15 @@ export class Bm25Index {
   }
 
   /**
-   * Rank sections for `query`. Okapi BM25 with the non-negative idf
-   * `ln(1 + (N - df + 0.5)/(df + 0.5))` (the Lucene variant: a term in every
-   * document must score 0, never below it).
+   * Rank sections for `query`. Okapi BM25 with the idf
+   * `ln(1 + (N - df + 0.5)/(df + 0.5))` (the Lucene variant: strictly
+   * positive and uncapped — a term present in every document still yields
+   * ln(1 + 1/(2N)) > 0, it never goes negative and never hits zero).
+   * `limit <= 0` returns no hits (a negative slice would silently truncate
+   * from the end, which is the bug this guard exists for).
    */
   search(query: string, limit?: number): Bm25Hit[] {
+    if (limit !== undefined && limit <= 0) return [];
     const queryTerms = [...new Set(tokenize(query))];
     if (queryTerms.length === 0 || this.docs.length === 0) return [];
     const n = this.docs.length;

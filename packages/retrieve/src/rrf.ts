@@ -16,11 +16,18 @@ export interface FusedRank {
  * from all rankings (or all empty) produce an empty result.
  */
 export function fuse(rankings: readonly (readonly string[])[], k = 60): FusedRank[] {
+  if (!Number.isFinite(k) || k <= 0) {
+    throw new RangeError(`fuse: k must be a positive number, got ${k}`);
+  }
   const scores = new Map<string, number>();
   for (const ranking of rankings) {
+    // Within ONE ranking a key is scored once, at its first occurrence: a
+    // provider echoing a duplicate would otherwise double its credit.
+    const seen = new Set<string>();
     for (let i = 0; i < ranking.length; i++) {
       const key = ranking[i];
-      if (key === undefined) continue;
+      if (key === undefined || seen.has(key)) continue;
+      seen.add(key);
       scores.set(key, (scores.get(key) ?? 0) + 1 / (k + i + 1));
     }
   }

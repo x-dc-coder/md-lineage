@@ -46,3 +46,19 @@ test('tokenize — pure symbols and whitespace produce nothing', () => {
   assert.deepEqual(tokenize(''), []);
   assert.deepEqual(tokenize('🚀 — …'), []);
 });
+
+// ---------------------------------------------------------------------------
+// Review-round fixes (Issue #3 Phase 1).
+// ---------------------------------------------------------------------------
+
+test('tokenize — NFC identity: composed and decomposed input tokenize identically', () => {
+  // Same invariant sectionKey hashes under: visually equal text is equal.
+  assert.deepEqual(tokenize('cafe\u0301 bar'), tokenize('café bar'));
+});
+
+test('tokenize — CJK Extension C characters produce bigrams', () => {
+  // U+2A700 U+2A701 (Ext C): one run of two, overlapping bigram output.
+  assert.deepEqual(tokenize('\u{2A700}\u{2A701}'), ['\u{2A700}\u{2A701}']);
+  // Isolated Ext C character: unigram.
+  assert.deepEqual(tokenize('x \u{2A700} y'), ['x', '\u{2A700}', 'y']);
+});
