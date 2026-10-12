@@ -62,3 +62,13 @@ test('tokenize — CJK Extension C characters produce bigrams', () => {
   // Isolated Ext C character: unigram.
   assert.deepEqual(tokenize('x \u{2A700} y'), ['x', '\u{2A700}', 'y']);
 });
+
+test('tokenize — leading underscore runs strip before splitting (B6)', () => {
+  // The leading run is a prefix, not a boundary: the first piece becomes a
+  // plain word instead of re-emitting the whole identifier.
+  assert.deepEqual(tokenize('_foo'), ['_foo', 'foo']);
+  assert.deepEqual(tokenize('_foo_bar'), ['_foo_bar', 'foo', 'bar']);
+  assert.deepEqual(tokenize('__init__'), ['__init__', 'init']);
+  // No leading run: behaviour unchanged.
+  assert.deepEqual(tokenize('extractSections'), ['extractsections', 'extract', 'sections']);
+});

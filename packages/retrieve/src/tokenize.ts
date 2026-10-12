@@ -16,17 +16,26 @@
  *   - everything else (punctuation, whitespace, symbols) is dropped.
  */
 
-/** Split an identifier run into subwords at camelCase and `_` boundaries. */
+/**
+ * Split an identifier run into subwords at camelCase and `_` boundaries.
+ *
+ * A LEADING underscore run is a prefix, not a boundary: it is stripped
+ * before splitting so the first piece is a plain word — "_foo" indexes
+ * "foo", "__init__" indexes "init". Without the strip the first piece
+ * re-emits the whole word (nothing new gets indexed) or degenerates to a
+ * bare "_" piece.
+ */
 function subwords(word: string): string[] {
   const out: string[] = [];
+  const body = word.replace(/^_+/, '');
   let start = 0;
-  for (let i = 1; i < word.length; i++) {
-    const prev = word[i - 1];
-    const ch = word[i];
+  for (let i = 1; i < body.length; i++) {
+    const prev = body[i - 1];
+    const ch = body[i];
     if (prev === undefined || ch === undefined) break;
     // `_` is an identifier separator: "foo_bar" also indexes "foo" + "bar".
     if (ch === '_') {
-      emit(out, word.slice(start, i));
+      emit(out, body.slice(start, i));
       start = i + 1;
       continue;
     }
@@ -35,21 +44,21 @@ function subwords(word: string): string[] {
     // aB: a non-uppercase letter followed by an uppercase letter starts a new
     // subword ("extractSections" → extract|Sections).
     if (!prevUpper && chUpper) {
-      emit(out, word.slice(start, i));
+      emit(out, body.slice(start, i));
       start = i;
       continue;
     }
     // ABc: an uppercase letter followed by Upper+lower means the second
     // uppercase belongs to the next word ("HTTPServer" → HTTP|Server).
     if (prevUpper && chUpper) {
-      const next = word[i + 1];
+      const next = body[i + 1];
       if (next !== undefined && next >= 'a' && next <= 'z') {
-        emit(out, word.slice(start, i));
+        emit(out, body.slice(start, i));
         start = i;
       }
     }
   }
-  emit(out, word.slice(start));
+  emit(out, body.slice(start));
   return out;
 }
 
