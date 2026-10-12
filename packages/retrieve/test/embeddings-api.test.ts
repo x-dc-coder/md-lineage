@@ -80,7 +80,14 @@ test('embedTexts — response rows are ordered by index, not by arrival', async 
 });
 
 test('embedTexts — batches stay within the configured cap', async () => {
-  const { impl, calls } = mockFetch([() => embeddingsResponse([0]), () => embeddingsResponse([0])]);
+  // Each batch's mock answer must cover that batch's size (strict validation
+  // rejects row-count mismatches on purpose).
+  const { impl, calls } = mockFetch([
+    (call) => {
+      const input = (JSON.parse(String(call.init.body)) as { input: string[] }).input;
+      return embeddingsResponse(input.map((_, i) => i));
+    },
+  ]);
   const inputs = Array.from({ length: 100 }, (_, i) => `t${i}`);
   await embedTexts(inputs, {
     base: 'https://gw.example.com',
@@ -150,11 +157,14 @@ test('embedTexts — missing configuration throws a clear EmbeddingsError', asyn
 });
 
 test('embedTexts — env vars fill unset options', async () => {
-  const previous = {
-    base: process.env.MDLINEAGE_EMBED_API_BASE,
-    model: process.env.MDLINEAGE_EMBED_MODEL,
-    key: process.env.MDLINEAGE_EMBED_API_KEY,
-  };
+  // Save/restore under the REAL key names — an earlier revision wrote the
+  // snapshots back under invented keys ('base', 'model', 'key'), leaking the
+  // test values into the environment for every later test.
+  const previous: [string, string | undefined][] = [
+    ['MDLINEAGE_EMBED_API_BASE', process.env.MDLINEAGE_EMBED_API_BASE],
+    ['MDLINEAGE_EMBED_MODEL', process.env.MDLINEAGE_EMBED_MODEL],
+    ['MDLINEAGE_EMBED_API_KEY', process.env.MDLINEAGE_EMBED_API_KEY],
+  ];
   process.env.MDLINEAGE_EMBED_API_BASE = 'https://env.example.com';
   process.env.MDLINEAGE_EMBED_MODEL = 'env-model';
   process.env.MDLINEAGE_EMBED_API_KEY = 'env-key';
@@ -165,12 +175,9 @@ test('embedTexts — env vars fill unset options', async () => {
     const body = JSON.parse(String(calls[0]!.init.body)) as { model: string };
     assert.equal(body.model, 'env-model');
   } finally {
-    for (const [k, v] of Object.entries(previous)) {
-      if (v === undefined) {
-        delete process.env[k as keyof typeof previous];
-      } else {
-        process.env[k as keyof typeof previous] = v;
-      }
+    for (const [key, value] of previous) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   }
 });
@@ -224,4 +231,94 @@ test('embedTexts — proxy: a working undici install activates the dispatcher', 
     if (previous === undefined) delete process.env.HTTPS_PROXY;
     else process.env.HTTPS_PROXY = previous;
   }
+});
+
+// ---------------------------------------------------------------------------
+// A2: strict response validation — silent misalignment must throw.
+// ---------------------------------------------------------------------------
+
+test('embedTexts — duplicate index across rows is a protocol violation', async () => {
+  const { impl } = mockFetch([
+    () =>
+      new Response(
+        // Row 1 defaults to positional index 0; row 2 also claims 0.
+        JSON.stringify({ data: [{ embedding: [1] }, { index: 0, embedding: [9] }] }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+  ]);
+  await assert.rejects(
+    embedTexts(['a', 'b'], { base: 'https://gw.example.com', model: 'm', fetchImpl: impl }),
+    /duplicate index 0/,
+  );
+});
+
+test('embedTexts — fewer rows than inputs is a protocol violation', async () => {
+  const { impl } = mockFetch([() => embeddingsResponse([0, 1])]);
+  await assert.rejects(
+    embedTexts(['a', 'b', 'c'], { base: 'https://gw.example.com', model: 'm', fetchImpl: impl }),
+    /expected 3 rows, got 2/,
+  );
+});
+
+test('embedTexts — non-numeric embedding components are a protocol violation', async () => {
+  const { impl } = mockFetch([
+    () =>
+      new Response(JSON.stringify({ data: [{ index: 0, embedding: [1, 'x'] }] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+  ]);
+  await assert.rejects(
+    embedTexts(['a'], { base: 'https://gw.example.com', model: 'm', fetchImpl: impl }),
+    /invalid embedding/,
+  );
+});
+
+test('embedTexts — out-of-range index is a protocol violation; shuffled-but-complete passes', async () => {
+  const bad = mockFetch([
+    () => new Response(JSON.stringify({ data: [{ index: 7, embedding: [1] }] }), { status: 200 }),
+  ]);
+  await assert.rejects(
+    embedTexts(['a'], { base: 'https://gw.example.com', model: 'm', fetchImpl: bad.impl }),
+    /out of range/,
+  );
+
+  const good = mockFetch([() => embeddingsResponse([2, 0, 1])]);
+  const result = await embedTexts(['a', 'b', 'c'], {
+    base: 'https://gw.example.com',
+    model: 'm',
+    fetchImpl: good.impl,
+  });
+  assert.deepEqual(result.embeddings, [[0, 1], [10, 11], [20, 21]]);
+});
+
+// ---------------------------------------------------------------------------
+// B1: the timeout must cover the body read, not only the response headers.
+// ---------------------------------------------------------------------------
+
+test('embedTexts — a body stream that never ends is cut off by the timeout', async () => {
+  const neverEndingBody = new ReadableStream<Uint8Array>({
+    start() {
+      // Never enqueue, never close: response.json() would hang forever.
+    },
+  });
+  const impl = (() =>
+    Promise.resolve(new Response(neverEndingBody, { status: 200, headers: { 'content-type': 'application/json' } }))) as unknown as typeof fetch;
+  const startedAt = Date.now();
+  await assert.rejects(
+    embedTexts(['x'], {
+      base: 'https://gw.example.com',
+      model: 'm',
+      timeoutMs: 100,
+      fetchImpl: impl,
+    }),
+    (error: unknown) => {
+      assert.ok(error instanceof EmbeddingsError);
+      assert.match(error.message, /timed out after 100ms/);
+      return true;
+    },
+  );
+  const elapsed = Date.now() - startedAt;
+  // Order-of-magnitude probe: the budget is 100ms, not an unbounded hang.
+  assert.ok(elapsed < 2000, `timeout took ${elapsed}ms`);
 });

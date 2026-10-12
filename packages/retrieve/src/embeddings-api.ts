@@ -102,42 +102,76 @@ interface BatchRequest {
   fetchImpl: typeof fetch;
 }
 
-/** One batch with the single-retry policy; returns embeddings in input order. */
-async function requestBatch(req: BatchRequest): Promise<number[][]> {
-  let response: Response;
-  try {
-    response = await postOnce(req);
-    if (response.status === 429 || response.status >= 500) {
-      const backoff = retryAfterMs(response) ?? FALLBACK_BACKOFF_MS;
-      await sleep(backoff);
-      response = await postOnce(req); // exactly one retry, per the contract
-    }
-  } catch (error) {
-    throw new EmbeddingsError(`embeddings request failed: ${errorMessage(error)}`);
-  }
-  if (!response.ok) {
-    // Status only — the body could echo the Authorization header material.
-    throw new EmbeddingsError(`embeddings API error: HTTP ${response.status}`);
-  }
-  return parseEmbeddingsResponse(await safeJson(response));
+/** One HTTP attempt plus the machinery of its timeout (headers AND body). */
+interface Attempt {
+  response: Response;
+  controller: AbortController;
+  timer: NodeJS.Timeout;
+  /** Rejects when the attempt timer fires; see `postOnce`. */
+  timeout: Promise<never>;
 }
 
-async function postOnce(req: BatchRequest): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), req.timeoutMs);
+/** One batch with the single-retry policy; returns embeddings in input order. */
+async function requestBatch(req: BatchRequest): Promise<number[][]> {
   try {
-    const headers: Record<string, string> = { 'content-type': 'application/json' };
-    if (req.apiKey !== '') headers.authorization = `Bearer ${req.apiKey}`;
-    return await req.fetchImpl(`${req.base}/v1/embeddings`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ model: req.model, input: req.batch }),
-      signal: controller.signal,
-    });
-  } finally {
-    // The response body is consumed later; only the connection timer is done.
-    clearTimeout(timer);
+    let attempt = await postOnce(req);
+    if (attempt.response.status === 429 || attempt.response.status >= 500) {
+      // Release the failed attempt's connection, stop its timer, then back
+      // off — exactly one retry, per the contract.
+      void attempt.response.body?.cancel();
+      clearTimeout(attempt.timer);
+      const backoff = retryAfterMs(attempt.response) ?? FALLBACK_BACKOFF_MS;
+      await sleep(backoff);
+      attempt = await postOnce(req);
+    }
+    if (!attempt.response.ok) {
+      clearTimeout(attempt.timer);
+      // Status only — the body could echo the Authorization header material.
+      throw new EmbeddingsError(`embeddings API error: HTTP ${attempt.response.status}`);
+    }
+    // The attempt timer covers the body read too: it is cleared only after
+    // the JSON has fully arrived (or the race below rejects first).
+    const jsonPromise = safeJson(attempt.response);
+    // The race loser must not surface as an unhandled rejection later.
+    jsonPromise.catch(() => undefined);
+    let payload: unknown;
+    try {
+      payload = await Promise.race([jsonPromise, attempt.timeout]);
+    } finally {
+      clearTimeout(attempt.timer);
+    }
+    return parseEmbeddingsResponse(payload, req.batch.length);
+  } catch (error) {
+    if (error instanceof EmbeddingsError) throw error;
+    throw new EmbeddingsError(`embeddings request failed: ${errorMessage(error)}`);
   }
+}
+
+async function postOnce(req: BatchRequest): Promise<Attempt> {
+  const controller = new AbortController();
+  let fire: () => void = () => undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    fire = () => reject(new EmbeddingsError(`embeddings request timed out after ${req.timeoutMs}ms`));
+  });
+  // When the fetch itself throws (e.g. the abort), this promise is never
+  // raced; mark its (possible) rejection handled so it cannot surface as an
+  // unhandledRejection after the caller has already failed another way.
+  timeout.catch(() => undefined);
+  // One timer per attempt spanning headers AND body: a provider that streams
+  // the body forever must not hang the caller past the budget.
+  const timer = setTimeout(() => {
+    controller.abort();
+    fire();
+  }, req.timeoutMs);
+  const headers: Record<string, string> = { 'content-type': 'application/json' };
+  if (req.apiKey !== '') headers.authorization = `Bearer ${req.apiKey}`;
+  const response = await req.fetchImpl(`${req.base}/v1/embeddings`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model: req.model, input: req.batch }),
+    signal: controller.signal,
+  });
+  return { response, controller, timer, timeout };
 }
 
 function retryAfterMs(response: Response): number | undefined {
@@ -156,8 +190,14 @@ async function safeJson(response: Response): Promise<unknown> {
   }
 }
 
-/** Parse `{ data: [{ index, embedding }] }`, ordered by `index`. */
-function parseEmbeddingsResponse(payload: unknown): number[][] {
+/**
+ * Parse `{ data: [{ index, embedding }] }` strictly. The provider contract is
+ * one row per input, so anything else — a missing row, a duplicate or
+ * out-of-range `index`, a non-finite component — is a protocol violation and
+ * throws instead of silently misaligning embeddings with their inputs. Errors
+ * carry counts/indices only, never body text or key material.
+ */
+function parseEmbeddingsResponse(payload: unknown, expectedCount: number): number[][] {
   if (typeof payload !== 'object' || payload === null) {
     throw new EmbeddingsError('embeddings response: expected a JSON object');
   }
@@ -165,17 +205,40 @@ function parseEmbeddingsResponse(payload: unknown): number[][] {
   if (!Array.isArray(data)) {
     throw new EmbeddingsError('embeddings response: missing data array');
   }
-  const rows = data
-    .map((row, position) => ({ row, position }))
-    .filter((entry): entry is { row: { index?: unknown; embedding?: unknown }; position: number } =>
-      typeof entry.row === 'object' && entry.row !== null)
-    .map((entry) => ({
-      index: typeof entry.row.index === 'number' ? entry.row.index : entry.position,
-      embedding: entry.row.embedding,
-    }))
-    .filter((entry) => Array.isArray(entry.embedding) && entry.embedding.every((v) => typeof v === 'number'))
-    .sort((a, b) => a.index - b.index);
-  return rows.map((row) => row.embedding as number[]);
+  if (data.length !== expectedCount) {
+    throw new EmbeddingsError(`embeddings response: expected ${expectedCount} rows, got ${data.length}`);
+  }
+  const rows: number[][] = new Array<number[]>(expectedCount);
+  const seen = new Set<number>();
+  for (let position = 0; position < data.length; position++) {
+    const row = data[position];
+    if (typeof row !== 'object' || row === null) {
+      throw new EmbeddingsError(`embeddings response: row ${position} is not an object`);
+    }
+    const rawIndex = (row as { index?: unknown }).index;
+    // An absent index falls back to the row's position (a legal provider
+    // shape); a present-but-malformed index is a violation, not a fallback.
+    let index = position;
+    if (rawIndex !== undefined) {
+      if (typeof rawIndex !== 'number' || !Number.isInteger(rawIndex)) {
+        throw new EmbeddingsError(`embeddings response: row ${position} has a non-integer index`);
+      }
+      index = rawIndex;
+    }
+    if (index < 0 || index >= expectedCount) {
+      throw new EmbeddingsError(`embeddings response: index ${index} out of range for ${expectedCount} rows`);
+    }
+    if (seen.has(index)) {
+      throw new EmbeddingsError(`embeddings response: duplicate index ${index}`);
+    }
+    seen.add(index);
+    const embedding = (row as { embedding?: unknown }).embedding;
+    if (!Array.isArray(embedding) || !embedding.every((v) => typeof v === 'number' && Number.isFinite(v))) {
+      throw new EmbeddingsError(`embeddings response: row ${position} has an invalid embedding`);
+    }
+    rows[index] = embedding as number[];
+  }
+  return rows;
 }
 
 /**
