@@ -1,4 +1,4 @@
-import type { RerankBatch, RerankCandidate, RerankProvider } from '@mdlineage/retrieve';
+import { RERANK_UNSCORED, type RerankBatch, type RerankCandidate, type RerankOptions, type RerankProvider } from '@mdlineage/retrieve';
 import type { CatalogProfile } from './catalog.js';
 import { probeDevice, type ExecutionDevice } from './device.js';
 import { cachedPath } from './install.js';
@@ -22,6 +22,19 @@ const FORBIDDEN_TOKENS = ['<|im_start|>', '<|im_end|>', '<|endoftext|>'] as cons
  * during the first rerank window, so prompts truncate at 2048 tokens.
  */
 const MAX_LENGTH = 2048;
+/** Assistant suffix + margin: the tokens the yes/no logits are read against. */
+export const RERANK_TAIL_KEEP = 24;
+
+/**
+ * Trim an over-long token sequence from the MIDDLE: keep the head and the
+ * final `tailKeep` tokens. Right-side tokenizer truncation would cut off
+ * exactly the assistant suffix the YesNo scoring depends on (corpus max
+ * section: 5797 tokens).
+ */
+export function trimMiddleIds<T>(ids: readonly T[], maxLength: number, tailKeep: number): T[] {
+  if (ids.length <= maxLength) return [...ids];
+  return [...ids.slice(0, maxLength - tailKeep), ...ids.slice(ids.length - tailKeep)];
+}
 
 /**
  * YesNo INT8 graph from n24q02m/Qwen3-Reranker-0.6B-ONNX
@@ -81,38 +94,85 @@ export class LocalReranker implements RerankProvider {
   private ort: OrtModule | undefined;
   private probeNotes: readonly string[] = [];
   private notesEmitted = false;
+  /** Single-flight init: concurrent first calls share one session build. */
+  private initPromise: Promise<void> | undefined;
+  /** In-flight `session.run` count; dispose waits for it to drain. */
+  private inFlight = 0;
+  private drainWaiters: Array<() => void> = [];
+  private disposed = false;
 
   constructor(
     private readonly profile: CatalogProfile,
     private readonly modelDir: string,
   ) {}
 
-  async rerank(query: string, candidates: readonly RerankCandidate[]): Promise<RerankBatch> {
+  async rerank(
+    query: string,
+    candidates: readonly RerankCandidate[],
+    options: RerankOptions = {},
+  ): Promise<RerankBatch> {
     if (candidates.length === 0) return { scores: [], degraded: [] };
     const degraded = await this.ensure();
     const scores: number[] = [];
+    let stopped = false;
     for (let index = 0; index < candidates.length; index++) {
       const candidate = candidates[index];
       if (candidate === undefined) continue;
+      // Budget guard: stop scoring at the deadline instead of burning a CPU
+      // core long after the caller gave up. Unscored entries carry the
+      // sentinel so the pipeline keeps their RRF order.
+      if (options.deadlineAt !== undefined && Date.now() >= options.deadlineAt) {
+        stopped = true;
+        scores.push(RERANK_UNSCORED);
+        continue;
+      }
       if (process.env.MDLINEAGE_EMBED_PROGRESS === '1' && candidates.length > 1 && index % 10 === 0) {
         console.error(`embed-local: rerank ${index + 1}/${candidates.length}`);
       }
       scores.push(await this.scoreOne(query, candidate.text));
     }
+    if (stopped) {
+      degraded.push(`rerank-deadline: scored ${scores.filter((s) => s !== RERANK_UNSCORED).length}/${candidates.length} before deadline`);
+    }
     return { scores, degraded };
   }
 
   async dispose(): Promise<void> {
+    this.disposed = true;
+    // Wait for in-flight scoring runs before releasing the session: ORT
+    // undefined-behaves on a session released under an active run.
+    if (this.inFlight > 0) {
+      await new Promise<void>((resolve) => {
+        this.drainWaiters.push(resolve);
+      });
+    }
     const current = this.session;
     this.session = undefined;
     this.tokenizer = undefined;
+    this.initPromise = undefined;
     if (current !== undefined) await current.release();
   }
 
   private async ensure(): Promise<string[]> {
+    if (this.disposed) throw new Error('reranker session is disposed');
     if (this.session !== undefined && this.tokenizer !== undefined && this.ort !== undefined) {
       return this.takeProbeNotes();
     }
+    // Single-flight: cache the init promise so concurrent first calls build
+    // one session instead of racing to create (and leak) several.
+    this.initPromise ??= this.buildSession().then(
+      () => undefined,
+      (error: unknown) => {
+        // A failed init must not pin a rejected promise: the next call retries.
+        this.initPromise = undefined;
+        throw error;
+      },
+    );
+    await this.initPromise;
+    return this.takeProbeNotes();
+  }
+
+  private async buildSession(): Promise<void> {
     // The default pin is CPU. Probing CUDA first loads that EP into the
     // process and keeps it after the session is created on CPU. Only an
     // explicit cuda, dml, or auto override pays for the probe.
@@ -129,9 +189,13 @@ export class LocalReranker implements RerankProvider {
       this.probeNotes = resolved.note === undefined ? [] : [resolved.note];
       device = resolved.device;
     } else {
-      const resolved = resolveRerankDevice(undefined, 'cpu');
-      this.probeNotes = resolved.note === undefined ? [] : [resolved.note];
-      device = resolved.device;
+      // Default deployment runs CPU-pinned; the operator-facing note names
+      // the blocking bug and the escape hatch instead of failing silently
+      // into a bare rerank-timeout later.
+      this.probeNotes = [
+        'reranker on cpu (CUDA blocked by ORT 1.21 softmax bug, leftover #38; MDLINEAGE_RERANK_DEVICE=auto to override)',
+      ];
+      device = 'cpu';
     }
     const transformers = await configureTransformers(this.modelDir);
     const loaded = await transformers.fromPretrained(this.profile.repo);
@@ -145,7 +209,6 @@ export class LocalReranker implements RerankProvider {
     if (!isSession(created)) throw new Error('reranker session did not expose input names');
     this.ort = ort;
     this.session = created;
-    return this.takeProbeNotes();
   }
 
   private takeProbeNotes(): string[] {
@@ -162,12 +225,17 @@ export class LocalReranker implements RerankProvider {
       throw new Error('reranker session is not open');
     }
     const prompt = formatRerankPrompt(query, document);
+    // Encode the whole prompt first, then trim the MIDDLE: the assistant
+    // suffix (`<|im_end|>...\n</think>\n\n`) is what the yes/no logits are
+    // read against, and right-side tokenizer truncation would cut exactly
+    // that off on long sections (three corpus sections exceed the budget,
+    // the longest at 5797 tokens).
     const encoded = await tokenizer(prompt, {
       add_special_tokens: false,
-      truncation: true,
-      max_length: MAX_LENGTH,
     });
-    const ids = tokenIds(encoded);
+    const ids = trimMiddleIds(tokenIds(encoded), MAX_LENGTH, RERANK_TAIL_KEEP);
+    this.inFlight++;
+    try {
     if (ids.length === 0) throw new Error('reranker tokenizer returned no tokens');
     const feeds: Record<string, unknown> = {};
     if (!session.inputNames.includes('input_ids')) {
@@ -177,15 +245,23 @@ export class LocalReranker implements RerankProvider {
     if (session.inputNames.includes('attention_mask')) {
       feeds.attention_mask = ort.int64(ids.map(() => 1n));
     }
-    const result = await session.run(feeds);
-    try {
-      const logits = yesNoPair(result, session.outputNames);
-      return yesProbability(logits.no, logits.yes);
+      const result = await session.run(feeds);
+      try {
+        const logits = yesNoPair(result, session.outputNames);
+        return yesProbability(logits.no, logits.yes);
+      } finally {
+        // session.run's tensors have no finalizer. A 50-wide window times
+        // ten queries would otherwise keep every logit buffer.
+        disposeRerankTensors(feeds);
+        disposeRerankTensors(result);
+      }
     } finally {
-      // session.run's tensors have no finalizer. A 50-wide window times
-      // ten queries would otherwise keep every logit buffer.
-      disposeRerankTensors(feeds);
-      disposeRerankTensors(result);
+      this.inFlight--;
+      if (this.inFlight === 0) {
+        const waiters = this.drainWaiters;
+        this.drainWaiters = [];
+        for (const w of waiters) w();
+      }
     }
   }
 }
@@ -234,7 +310,12 @@ async function loadOrt(): Promise<OrtModule> {
 interface Tokenizer {
   (
     text: string,
-    options: { add_special_tokens: boolean; truncation: boolean; max_length: number },
+    options: {
+      add_special_tokens: boolean;
+      /** Optional: transformers.js trims right when asked; we trim ourselves. */
+      truncation?: boolean;
+      max_length?: number;
+    },
   ): Promise<unknown> | unknown;
 }
 

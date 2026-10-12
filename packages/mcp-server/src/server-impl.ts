@@ -568,7 +568,9 @@ function registerSearchDocuments(server: McpServer, context: McpServerContext, r
       description:
         'Search Markdown sections in the workspace. `lexical` is BM25. `hybrid` (the default) uses a local ONNX ' +
         'embedding and reranker when @mdlineage/embed-local and its models are installed, and otherwise falls back ' +
-        'to lexical. Results are candidates, not a gate. Nothing is written.',
+        'to lexical. Lexical mode reads only; hybrid mode writes derived vector caches under ' +
+        '.mdlineage-cache/ in the workspace (disposable, gitignored). Results are candidates, not a gate. ' +
+        'If the embedding session ever fails to start, hybrid stays disabled until the process restarts.',
       inputSchema: {
         query: z.string().min(1).describe('The search query.'),
         top_k: z.number().int().positive().optional().describe('How many sections to return. Default 10.'),
@@ -577,7 +579,7 @@ function registerSearchDocuments(server: McpServer, context: McpServerContext, r
           .optional()
           .describe('lexical forces BM25. hybrid tries dense retrieval and falls back to lexical. Default hybrid.'),
       },
-      annotations: { readOnlyHint: true },
+      annotations: { readOnlyHint: false },
     },
     async ({ query, top_k, mode }) => {
       const result = await retrieval.search({

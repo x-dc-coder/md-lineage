@@ -23,7 +23,7 @@ function vectorFor(text: string): number[] {
 }
 
 class FakeEmbedder implements EmbeddingProvider {
-  readonly meta = { model: 'fake', dtype: 'q8', dim: 4 };
+  readonly meta = { model: 'fake', dtype: 'q8', dim: 4, algo: 'fake-v1' };
   documentCalls = 0;
   queryCalls = 0;
   async embed(inputs: readonly string[]) {
@@ -154,7 +154,7 @@ test('searchCorpus — a rerank timeout keeps the fused order and records the sk
 
 test('searchCorpus — a short embed batch keeps the prefix and notes the gap', async () => {
   const embedder: EmbeddingProvider = {
-    meta: { model: 'fake', dtype: 'q8', dim: 4 },
+    meta: { model: 'fake', dtype: 'q8', dim: 4, algo: 'fake-v1' },
     async embed(inputs) {
       const first = inputs[0];
       return {

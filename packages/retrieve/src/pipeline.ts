@@ -15,6 +15,7 @@
 import { Bm25Index, type Bm25Doc } from './bm25.js';
 import type { EmbeddingProvider, RerankProvider } from './provider.js';
 import { fuse } from './rrf.js';
+import { RERANK_UNSCORED } from './provider.js';
 import { sectionCorpus, sectionKey, type VectorStore } from './vector-store.js';
 
 export interface CorpusSection {
@@ -30,6 +31,14 @@ export interface SearchHit {
   readonly title: string;
   readonly text: string;
   readonly score: number;
+  /**
+   * Which scale `score` is on. BM25 scores and RRF fusion scores
+   * (~1/61 steps) and rerank P(yes) probabilities are three different
+   * rulers; consumers must not compare scores across kinds. Rerank windows
+   * leave the tail on RRF scores, so one result list can legitimately mix
+   * `rrf` and `yes` entries.
+   */
+  readonly scoreKind: 'bm25' | 'rrf' | 'yes';
 }
 
 export interface SearchRequest {
@@ -98,7 +107,7 @@ export async function searchCorpus(request: SearchRequest): Promise<SearchOutcom
   for (const item of fused) {
     const section = byId.get(item.key);
     if (section === undefined) continue;
-    ranked.push({ id: item.key, section, score: item.score });
+    ranked.push({ id: item.key, section, score: item.score, scoreKind: 'rrf' });
   }
 
   const reranker = request.reranker ?? null;
@@ -108,7 +117,11 @@ export async function searchCorpus(request: SearchRequest): Promise<SearchOutcom
 
   return {
     mode: 'hybrid',
-    hits: ranked.slice(0, top).map((hit) => ({ ...hit.section, score: hit.score })),
+    hits: ranked.slice(0, top).map((hit) => ({
+      ...hit.section,
+      score: hit.score,
+      scoreKind: hit.scoreKind,
+    })),
     degraded,
   };
 }
@@ -117,6 +130,7 @@ interface Ranked {
   readonly id: string;
   readonly section: CorpusSection;
   readonly score: number;
+  readonly scoreKind: 'rrf' | 'yes';
 }
 
 function width(value: number | undefined): number {
@@ -142,6 +156,7 @@ function lexicalRank(sections: readonly CorpusSection[], query: string, limit: n
   }));
   // Length norm is the Bm25Index default (unique-terms; leftover #33).
   return new Bm25Index(docs).search(query, limit).map((hit) => ({
+    scoreKind: 'bm25' as const,
     path: hit.path,
     slug: hit.slug,
     title: hit.title,
@@ -220,7 +235,7 @@ async function denseRank(
     if (vector === undefined) continue;
     const score = dot(queryUnit, vector);
     if (score <= 0) continue;
-    hits.push({ id: sectionId(section), section, score });
+    hits.push({ id: sectionId(section), section, score, scoreKind: 'rrf' });
   }
   hits.sort(byScoreThenSection);
   return hits.slice(0, width(request.denseWidth));
@@ -236,7 +251,9 @@ function rememberManifest(request: SearchRequest): void {
     hashes.push(sectionKey(section.title, section.text));
     byPath.set(section.path, hashes);
   }
-  for (const [path, hashes] of byPath) store.setSections(path, hashes);
+  // One manifest read + one atomic write for the whole corpus, not one per
+  // path: a 61-doc workspace used to rewrite the manifest 61 times per query.
+  store.setSectionsBatch([...byPath.entries()]);
 }
 
 async function rerankWindow(
@@ -249,9 +266,14 @@ async function rerankWindow(
   const timeoutMs = request.rerankTimeoutMs ?? DEFAULT_RERANK_TIMEOUT_MS;
   const window = ranked.slice(0, depth);
   const tail = ranked.slice(depth);
+  // The deadline makes the provider stop scoring at the budget instead of
+  // burning a CPU core long after the caller has moved on; the outer
+  // withTimeout stays as a belt-and-suspenders guard.
+  const deadlineAt = Date.now() + timeoutMs;
   const pending = reranker.rerank(
     request.query,
     window.map((hit) => ({ key: hit.id, text: sectionCorpus(hit.section.title, hit.section.text) })),
+    { deadlineAt },
   );
   // The timeout abandons the call; a late rejection must not surface later.
   pending.catch(() => undefined);
@@ -262,12 +284,27 @@ async function rerankWindow(
       degraded.push(`rerank-skipped: expected ${window.length} scores, got ${batch.scores.length}`);
       return [...ranked];
     }
+    const unscored = batch.scores.filter((s) => s === RERANK_UNSCORED).length;
+    if (unscored > 0) {
+      degraded.push(`rerank-deadline: scored ${window.length - unscored}/${window.length} before budget`);
+    }
     const reordered = window.map((hit, index) => {
       const score = batch.scores[index];
-      return { hit, score: score ?? Number.NEGATIVE_INFINITY, index };
+      return {
+        hit,
+        score: score === undefined || score === RERANK_UNSCORED ? Number.NEGATIVE_INFINITY : score,
+        index,
+      };
     });
     reordered.sort((a, b) => (a.score !== b.score ? b.score - a.score : a.index - b.index));
-    return [...reordered.map((item) => ({ ...item.hit, score: item.score })), ...tail];
+    return [
+      ...reordered.map((item) => ({
+        ...item.hit,
+        score: item.score,
+        scoreKind: item.score === Number.NEGATIVE_INFINITY ? ('rrf' as const) : ('yes' as const),
+      })),
+      ...tail,
+    ];
   } catch (error) {
     if (error instanceof RerankTimeout) {
       degraded.push(`rerank-timeout: skipped after ${timeoutMs}ms`);

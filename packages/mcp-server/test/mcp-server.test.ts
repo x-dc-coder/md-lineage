@@ -190,11 +190,14 @@ describe('MCP server — tool surface', () => {
         'get_schema',
         'list_document_ids',
         'resolve_relation_target',
-        'search_documents',
         'suggest_metadata',
       ]) {
         assert.equal(byName.get(name)?.annotations?.readOnlyHint, true, `${name} stays read-only`);
       }
+      // search_documents: lexical reads only, but hybrid writes derived
+      // vector caches under .mdlineage-cache/ — the hint must not promise
+      // "nothing is written".
+      assert.notEqual(byName.get('search_documents')?.annotations?.readOnlyHint, true);
     } finally {
       await h.close();
     }

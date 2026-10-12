@@ -100,6 +100,7 @@ export class RetrievalSession {
         slug: hit.slug,
         title: hit.title,
         score: hit.score,
+        scoreKind: hit.scoreKind,
         snippet: snippet(hit.text),
       })),
       degraded: [...degraded, ...held.notes, ...outcome.degraded],
@@ -145,6 +146,7 @@ export class RetrievalSession {
             model: embedder.meta.model,
             dtype: embedder.meta.dtype,
             dim: embedder.meta.dim,
+            algo: embedder.meta.algo,
           })
         : undefined;
     return {

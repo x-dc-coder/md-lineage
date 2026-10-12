@@ -116,6 +116,7 @@ export async function retrieveSearch(options: RetrieveSearchOptions): Promise<nu
     slug: hit.slug,
     title: hit.title,
     score: hit.score,
+    scoreKind: hit.scoreKind,
     snippet: snippet(hit.text),
   }));
 
@@ -173,6 +174,7 @@ async function resolveProviders(options: RetrieveSearchOptions): Promise<Resolve
           model: embedder.meta.model,
           dtype: embedder.meta.dtype,
           dim: embedder.meta.dim,
+          algo: embedder.meta.algo,
         })
       : undefined;
   return {

@@ -41,6 +41,13 @@ export interface VectorProfile {
   model: string;
   dtype: string;
   dim: number;
+  /**
+   * Algorithm generation of the vectors (truncation budget, pooling, key
+   * implementation choices) plus the weights fingerprint. Two providers
+   * that would emit different vectors for the same text must not share a
+   * cache directory, so `algo` participates in the directory name.
+   */
+  algo: string;
 }
 
 /** On-disk manifest: which sections (by hash) each document contributed. */
@@ -80,6 +87,8 @@ export interface VectorStore {
   put(hash: string, vector: readonly number[]): void;
   putManifest(manifest: StoreManifest): void;
   setSections(path: string, hashes: readonly string[]): void;
+  /** Batched `setSections`: one manifest read + one atomic write for all paths. */
+  setSectionsBatch(entries: ReadonlyArray<readonly [string, readonly string[]]>): void;
   removePath(path: string): void;
   /** Delete blobs whose hash is not in `keep`; returns the removed hashes. */
   gc(keep: ReadonlySet<string> | readonly string[]): string[];
@@ -87,7 +96,7 @@ export interface VectorStore {
 }
 
 /**
- * Deterministic profile directory: model slug + dtype + dim. The slug alone
+ * Deterministic profile directory: model slug + algo generation + dtype + dim. The slug alone
  * is lossy (two models can slugify to the same name), so the first 8 hex of
  * sha256(model) is appended — the directory name is a lossless function of
  * the profile identity.
@@ -98,7 +107,8 @@ export function profileDirName(profile: VectorProfile): string {
     .replace(/[^a-z0-9._-]+/g, '-')
     .replace(/^-+|-+$/g, '');
   const hash8 = createHash('sha256').update(profile.model, 'utf8').digest('hex').slice(0, 8);
-  return `${slug || 'model'}-${hash8}-${profile.dtype}-d${profile.dim}`;
+  const algoSlug = profile.algo.toLowerCase().replace(/[^a-z0-9._-]+/g, '-').replace(/^-+|-+$/g, '') || 'algo';
+  return `${slug || 'model'}-${hash8}-${algoSlug}-${profile.dtype}-d${profile.dim}`;
 }
 
 /** Section/blob hashes are sha256 hex digests; anything else is a bug. */
@@ -179,8 +189,13 @@ export class FileVectorStore implements VectorStore {
   }
 
   setSections(path: string, hashes: readonly string[]): void {
+    this.setSectionsBatch([[path, hashes]]);
+  }
+
+  setSectionsBatch(entries: ReadonlyArray<readonly [string, readonly string[]]>): void {
+    if (entries.length === 0) return;
     const manifest = this.readManifest();
-    manifest.files[path] = [...hashes];
+    for (const [path, hashes] of entries) manifest.files[path] = [...hashes];
     this.putManifest(manifest);
   }
 

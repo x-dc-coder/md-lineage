@@ -16,6 +16,13 @@ export interface EmbeddingMeta {
   readonly model: string;
   readonly dtype: string;
   readonly dim: number;
+  /**
+   * Algorithm generation of the vectors this provider produces (truncation
+   * budget, pooling, key implementation choices). Part of the vector-cache
+   * fingerprint: two providers that would emit different vectors for the
+   * same text must not share one cache directory.
+   */
+  readonly algo: string;
 }
 
 export interface EmbedBatch {
@@ -41,8 +48,25 @@ export interface RerankBatch {
   readonly degraded: readonly string[];
 }
 
+/**
+ * Rerank call options. `deadlineAt` is an epoch-ms cutoff: implementations
+ * that score candidates one at a time stop at the deadline and return
+ * partial scores, marking unscored entries with the `RERANK_UNSCORED`
+ * sentinel instead of burning CPU past the budget.
+ */
+export interface RerankOptions {
+  readonly deadlineAt?: number;
+}
+
+/** Sentinel for "not scored before the deadline": keep RRF order. */
+export const RERANK_UNSCORED = -1;
+
 export interface RerankProvider {
-  rerank(query: string, candidates: readonly RerankCandidate[]): Promise<RerankBatch>;
+  rerank(
+    query: string,
+    candidates: readonly RerankCandidate[],
+    options?: RerankOptions,
+  ): Promise<RerankBatch>;
   dispose(): Promise<void>;
 }
 
@@ -58,7 +82,7 @@ export class ApiEmbeddingProvider implements EmbeddingProvider {
   constructor(options: EmbeddingsOptions & { readonly dim?: number } = {}) {
     this.options = options;
     const model = options.model ?? process.env.MDLINEAGE_EMBED_MODEL ?? '';
-    this.meta = { model, dtype: 'f32', dim: options.dim ?? 0 };
+    this.meta = { model, dtype: 'f32', dim: options.dim ?? 0, algo: 'api-v1' };
   }
 
   async embed(inputs: readonly string[]): Promise<EmbedBatch> {

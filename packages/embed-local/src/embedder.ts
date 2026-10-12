@@ -69,13 +69,31 @@ export class LocalEmbedder implements EmbeddingProvider {
   private extractor: FeatureExtractor | undefined;
   private probeNotes: readonly string[] = [];
   private notesEmitted = false;
+  /** Single-flight init: concurrent first calls share one pipeline build. */
+  private initPromise: Promise<FeatureExtractor> | undefined;
+  /**
+   * Set when session creation failed: transformers.js caches the first
+   * failed session promise at module level (onnx.js wasmInitPromise), so a
+   * later CPU retry in the same process replays the same error. Marking the
+   * provider permanently failed turns every later call into one clear,
+   * cheap degraded note instead of repeated failures (glm-5.3 review M2).
+   */
+  private broken: string | undefined;
 
   constructor(
     private readonly profile: CatalogProfile,
     private readonly modelDir: string,
     private readonly task: string = DEFAULT_EMBED_TASK,
   ) {
-    this.meta = { model: profile.repo, dtype: profile.dtype, dim: profile.dim };
+    // `algo` is the vector-cache generation: bump it whenever embedding
+    // behavior changes (truncation, pooling, batching) so old and new
+    // vectors never share a cache directory.
+    this.meta = {
+      model: profile.repo,
+      dtype: profile.dtype,
+      dim: profile.dim,
+      algo: 'v2-2048-lasttoken-peritem',
+    };
   }
 
   async embed(inputs: readonly string[]): Promise<EmbedBatch> {
@@ -94,7 +112,20 @@ export class LocalEmbedder implements EmbeddingProvider {
 
   private async run(inputs: readonly string[]): Promise<EmbedBatch> {
     if (inputs.length === 0) return { vectors: [], degraded: [] };
-    const extractor = await this.session();
+    if (this.broken !== undefined) {
+      throw new Error(`embedder permanently failed earlier in this process: ${this.broken}`);
+    }
+    let extractor: FeatureExtractor;
+    try {
+      extractor = await this.session();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.broken = reason;
+      throw new Error(
+        `embedder session failed permanently for this process (${reason}); ` +
+          'hybrid is disabled until restart — see MDLINEAGE_EMBED_DEVICE',
+      );
+    }
     const degraded = this.takeProbeNotes();
     const vectors: number[][] = [];
     const chunks = chunkEmbedInputs(inputs);
@@ -122,6 +153,16 @@ export class LocalEmbedder implements EmbeddingProvider {
 
   private async session(): Promise<FeatureExtractor> {
     if (this.extractor !== undefined) return this.extractor;
+    // Single-flight: concurrent first embeds share one pipeline build
+    // instead of racing to create (and leak) several.
+    this.initPromise ??= this.buildPipeline().catch((error: unknown) => {
+      this.initPromise = undefined;
+      throw error;
+    });
+    return this.initPromise;
+  }
+
+  private async buildPipeline(): Promise<FeatureExtractor> {
     // An explicit provider skips the probe. Probing CUDA loads that EP into
     // the process even when the session then runs on CPU, and the extra host
     // allocation OOM'd a full-corpus embed on this 13GB machine.
@@ -178,14 +219,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-interface EmbedPipeline {
-  tokenizer: (
-    texts: readonly string[],
-    options: { padding: boolean; truncation: boolean; max_length: number },
-  ) => Promise<unknown> | unknown;
-  model: (inputs: unknown) => Promise<unknown>;
-}
-
 /**
  * One forward, then drop every ONNX tensor it allocated.
  * `extractor()` only returns the pooled row. The hidden state stays
@@ -195,50 +228,14 @@ interface EmbedPipeline {
  * Qwen3 tokenizer left-pads — and disposes the inputs and outputs.
  */
 async function embedChunk(extractor: FeatureExtractor, texts: readonly string[]): Promise<number[][]> {
-  if (!isEmbedPipeline(extractor)) {
-    const output = await extractor(texts, { pooling: 'last_token', normalize: true });
-    try {
-      return readMatrix(output, texts.length);
-    } finally {
-      disposeTensors(output, new WeakSet());
-    }
-  }
-  const encoded = await extractor.tokenizer([...texts], {
-    padding: true,
-    truncation: true,
-    max_length: EMBED_MAX_TOKENS,
-  });
-  const masks = maskRows(encoded);
-  let outputs: unknown;
-  try {
-    outputs = await extractor.model(encoded);
-    const hidden = hiddenState(outputs);
-    if (hidden === null) throw new Error('embedding model did not return a float last_hidden_state');
-    return poolLastTokenNormalized(hidden.data, hidden.dims, texts.length, masks);
-  } finally {
-    const seen = new WeakSet<object>();
-    disposeTensors(encoded, seen);
-    disposeTensors(outputs, seen);
-  }
-}
-
-function isEmbedPipeline(value: FeatureExtractor): value is FeatureExtractor & EmbedPipeline {
-  if (!('model' in value) || !('tokenizer' in value)) return false;
-  return typeof value.model === 'function' && typeof value.tokenizer === 'function';
-}
-
-interface FloatHidden {
-  readonly dims: readonly number[];
-  readonly data: Float32Array | Float64Array;
-}
-
-function hiddenState(outputs: unknown): FloatHidden | null {
-  if (!isRecord(outputs)) return null;
-  const hidden = outputs.last_hidden_state ?? outputs.logits ?? outputs.token_embeddings;
-  if (!isRecord(hidden) || !Array.isArray(hidden.dims)) return null;
-  if (!(hidden.data instanceof Float32Array) && !(hidden.data instanceof Float64Array)) return null;
-  if (!hidden.dims.every((dim) => typeof dim === 'number')) return null;
-  return { dims: hidden.dims, data: hidden.data };
+  // Standard pipeline call: last-token pooling + normalize. The tokenizer
+  // left-pads, so last_token is the last real token for single-item chunks
+  // (chunkEmbedInputs feeds one text per chunk); truncation keeps Qwen3
+  // inputs inside the model budget. A manual tokenize-and-dispose path used
+  // to live here but never executed (transformers.js pipelines expose
+  // `model` as a string id, not a callable) and was removed.
+  const output = await extractor(texts, { pooling: 'last_token', normalize: true, max_length: EMBED_MAX_TOKENS });
+  return readMatrix(output, texts.length);
 }
 
 /** Last real token per row, then L2-normalize. `masks` is null when the tokenizer sent none. */
@@ -286,52 +283,3 @@ function lastRealIndex(mask: ArrayLike<number> | undefined, seq: number): number
   return seq - 1;
 }
 
-function maskRows(encoded: unknown): (ArrayLike<number> | undefined)[] | null {
-  if (!isRecord(encoded)) return null;
-  const mask = encoded.attention_mask;
-  if (!isRecord(mask) || !Array.isArray(mask.dims) || !ArrayBuffer.isView(mask.data)) return null;
-  const batch = mask.dims[0];
-  const seq = mask.dims[1];
-  if (typeof batch !== 'number' || typeof seq !== 'number' || mask.dims.length !== 2) return null;
-  const rows: ArrayLike<number>[] = [];
-  for (let row = 0; row < batch; row++) {
-    const values: number[] = [];
-    for (let col = 0; col < seq; col++) values.push(viewNumber(mask.data, row * seq + col));
-    rows.push(values);
-  }
-  return rows;
-}
-
-function viewNumber(data: ArrayBufferView, index: number): number {
-  if (data instanceof BigInt64Array || data instanceof BigUint64Array) {
-    const value = data[index];
-    return value === undefined ? 0 : Number(value);
-  }
-  if (
-    data instanceof Float32Array ||
-    data instanceof Float64Array ||
-    data instanceof Int32Array ||
-    data instanceof Uint32Array ||
-    data instanceof Int16Array ||
-    data instanceof Uint16Array ||
-    data instanceof Int8Array ||
-    data instanceof Uint8Array
-  ) {
-    return data[index] ?? 0;
-  }
-  return 0;
-}
-
-function disposeTensors(value: unknown, seen: WeakSet<object>): void {
-  if (typeof value !== 'object' || value === null || seen.has(value)) return;
-  seen.add(value);
-  if ('dispose' in value && typeof value.dispose === 'function' && 'dims' in value) {
-    value.dispose.call(value);
-    return;
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) disposeTensors(item, seen);
-    return;
-  }
-  for (const child of Object.values(value)) disposeTensors(child, seen);
-}

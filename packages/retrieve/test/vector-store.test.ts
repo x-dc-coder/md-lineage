@@ -18,7 +18,7 @@ import {
   type VectorProfile,
 } from '../src/index.js';
 
-const PROFILE: VectorProfile = { model: 'Qwen/Qwen3-Embedding-0.6B', dtype: 'f32', dim: 4 };
+const PROFILE: VectorProfile = { model: 'Qwen/Qwen3-Embedding-0.6B', dtype: 'f32', dim: 4, algo: 'test-v1' };
 
 function makeRoot(): string {
   return mkdtempSync(join(tmpdir(), 'mdl-vector-store-'));
@@ -49,7 +49,7 @@ test('profileDirName — deterministic slug + lossless model hash + dtype + dim'
   // The slug alone is lossy; the first 8 hex of sha256(model) makes the
   // directory name a lossless function of the profile identity.
   const hash8 = createHash('sha256').update(PROFILE.model, 'utf8').digest('hex').slice(0, 8);
-  assert.equal(profileDirName(PROFILE), `qwen-qwen3-embedding-0.6b-${hash8}-f32-d4`);
+  assert.equal(profileDirName(PROFILE), `qwen-qwen3-embedding-0.6b-${hash8}-test-v1-f32-d4`);
 });
 
 test(
@@ -257,7 +257,7 @@ test(
     );
     const foreign = JSON.stringify({
       version: 1,
-      profile: { model: 'other-model', dtype: 'f32', dim: 4 },
+      profile: { model: 'other-model', dtype: 'f32', dim: 4, algo: 'test-v1' },
       files: { 'stale.md': [hash] },
     });
     writeFileSync(manifestPath, foreign);

@@ -42,6 +42,8 @@ export {
   type RerankProvider,
   type RerankCandidate,
   type RerankBatch,
+  type RerankOptions,
+  RERANK_UNSCORED,
 } from './provider.js';
 export {
   searchCorpus,

@@ -12,7 +12,7 @@ export interface TransformersEnv {
 }
 
 export interface FeatureExtractor {
-  (texts: readonly string[], options: { pooling: 'last_token'; normalize: boolean }): Promise<unknown>;
+  (texts: readonly string[], options: { pooling: 'last_token'; normalize: boolean; max_length?: number }): Promise<unknown>;
   dispose?: () => Promise<void>;
 }
 

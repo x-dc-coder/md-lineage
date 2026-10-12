@@ -674,10 +674,7 @@ async function runRetrieve(args: string[], values: ParsedArgs['values']): Promis
   });
 }
 
-/**
- * `--bm25-only` is the lexical alias. Combining it with `--mode hybrid`
- * contradicts itself and is a usage error.
- */
+/** `mdlineage retrieve setup`: download and verify local ONNX model weights. */
 async function runRetrieveSetup(args: string[], values: ParsedArgs['values']): Promise<number> {
   if (args.length > 0) {
     process.stderr.write(`mdlineage: retrieve setup does not take a query\n\n${HELP}\n`);
