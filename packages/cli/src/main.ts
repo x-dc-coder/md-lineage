@@ -45,6 +45,7 @@ import { runOrganize } from './organize.js';
 import { runManifestSeed } from './manifest.js';
 import { configValidate } from './config-validate.js';
 import { indexRebuild } from './index-rebuild.js';
+import { retrieveSearch } from './retrieve.js';
 import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
@@ -80,6 +81,10 @@ Usage:
   mdlineage index rebuild           Rebuild the workspace index in memory and
                                     report stats and index-level diagnostics
                                     (nothing is persisted)
+  mdlineage retrieve search <query>
+                                    Lexical (BM25) section search over the
+                                    workspace (read-only; exits 0 even when
+                                    degraded, per Issue #3's determinism rule)
 
 Roots — each command anchors "the workspace" differently, by design:
   check/fix/move/organize          the CWD: paths are resolved against it, and
@@ -115,6 +120,9 @@ Options:
   --report                    organize: report directory-intent compliance
   --plan                      organize: output the move plan (the default)
   --frail                     Any diagnostic fails the run, warnings included
+  --top <N>                   retrieve search: results to print (default 20)
+  --bm25-only                 retrieve search: lexical-only (Phase 1 default;
+                              placeholder for the Phase 2 dense/rerank path)
   --root <dir>                mcp: the workspace to index (default: the CWD)
   --help, -h                  Show this text
   --version, -v               Print the version
@@ -163,6 +171,8 @@ interface ParsedArgs {
     inventory?: boolean;
     report?: boolean;
     scope?: string;
+    top?: string;
+    'bm25-only'?: boolean;
     stdio?: boolean;
     root?: string;
     help?: boolean;
@@ -214,6 +224,11 @@ function readArgs(argv: string[]): ParsedArgs {
       inventory: { type: 'boolean' },
       report: { type: 'boolean' },
       scope: { type: 'string' },
+      // `mdlineage retrieve search --top <N>`: how many hits to print.
+      top: { type: 'string' },
+      // Phase 1 default behaviour; kept as an explicit flag so Phase 2 can
+      // turn the dense branch on without a breaking option change.
+      'bm25-only': { type: 'boolean' },
       help: { type: 'boolean', short: 'h' },
       version: { type: 'boolean', short: 'v' },
     },
@@ -286,6 +301,9 @@ export async function main(argv: string[]): Promise<number> {
     }
     if (command === 'index') {
       return await runIndexCommand(parsed.positionals.slice(1), parsed.values);
+    }
+    if (command === 'retrieve') {
+      return await runRetrieve(parsed.positionals.slice(1), parsed.values);
     }
     if (command !== 'check') {
       process.stderr.write(`mdlineage: unknown command '${command}'\n\n${HELP}\n`);
@@ -569,6 +587,38 @@ async function runIndexCommand(args: string[], values: ParsedArgs['values']): Pr
     return 2;
   }
   return await indexRebuild({ format, configFile: values.config, cwd: processCwd(), exclude: values.exclude ?? [] });
+}
+
+/** `mdlineage retrieve search <query>`: read-only lexical search (§Issue 3). */
+async function runRetrieve(args: string[], values: ParsedArgs['values']): Promise<number> {
+  const sub = args[0];
+  if (values.help) {
+    process.stdout.write(`${HELP}\n`);
+    return 0;
+  }
+  if (sub !== 'search') {
+    process.stderr.write(
+      `mdlineage: unknown retrieve subcommand '${sub ?? '(none)'}' (expected search)\n\n${HELP}\n`,
+    );
+    return 2;
+  }
+  const format = parseFormat(values.format);
+  if (format === null || format === 'sarif') {
+    process.stderr.write(`mdlineage: retrieve search --format must be text or json\n`);
+    return 2;
+  }
+  const top = values.top === undefined ? 20 : Number(values.top);
+  if (!Number.isInteger(top) || top < 1) {
+    process.stderr.write(`mdlineage: --top must be a positive integer, got '${values.top}'\n`);
+    return 2;
+  }
+  const query = args.slice(1).join(' ').trim();
+  if (query === '') {
+    process.stderr.write(`mdlineage: retrieve search needs a query\n\n${HELP}\n`);
+    return 2;
+  }
+  // Retrieval is advisory: every non-usage failure degrades, never exits 1.
+  return retrieveSearch({ format, configFile: values.config, cwd: processCwd(), top, query });
 }
 
 /** `mdlineage server`: the dedicated LSP (§10.1). Only stdio exists in M3-a. */

@@ -20,3 +20,9 @@ export {
   type VectorMeta,
   type StoreManifest,
 } from './vector-store.js';
+export {
+  embedTexts,
+  EmbeddingsError,
+  type EmbeddingsOptions,
+  type EmbeddingsResult,
+} from './embeddings-api.js';
