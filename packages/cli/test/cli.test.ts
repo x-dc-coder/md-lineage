@@ -1350,6 +1350,7 @@ describe('mdlineage init', () => {
       assert.match(out.stdout, /\+\* text=auto eol=lf/);
       assert.match(out.stdout, /create schemas\//);
       assert.match(out.stdout, /dry run, nothing written/);
+      assert.match(out.stdout, /optional: npm install @mdlineage\/embed-local/);
       assert.equal(existsSync(join(dir.root, 'mdlineage.config.yaml')), before);
       assert.equal(existsSync(join(dir.root, 'mdlineage.manifest.yaml')), false);
       assert.equal(existsSync(join(dir.root, '.gitattributes')), false);
@@ -1364,6 +1365,7 @@ describe('mdlineage init', () => {
     try {
       const out = runCli(['init', '--write'], dir.root);
       assert.equal(out.status, 0);
+      assert.match(out.stdout, /optional: npm install @mdlineage\/embed-local/);
       const config = readFileSync(join(dir.root, 'mdlineage.config.yaml'), 'utf8');
       assert.match(config, /configVersion: 1/);
       assert.match(config, /manifestFile: mdlineage\.manifest\.yaml/);
@@ -1405,6 +1407,7 @@ describe('mdlineage init', () => {
       const out = runCli(['init', '--write'], dir.root);
       assert.equal(out.status, 0);
       assert.match(out.stdout, /nothing to do, already initialized/);
+      assert.match(out.stdout, /optional: npm install @mdlineage\/embed-local/);
       assert.equal(snapshot('mdlineage.config.yaml').equals(config), true);
       assert.equal(snapshot('mdlineage.manifest.yaml').equals(manifest), true);
       assert.equal(snapshot('.gitattributes').equals(attr), true);

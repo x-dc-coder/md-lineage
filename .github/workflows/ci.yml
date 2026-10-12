@@ -9,6 +9,11 @@ jobs:
   test:
     name: build & test (Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    # onnxruntime-node 1.21's Linux postinstall downloads a CUDA execution
+    # provider from GitHub. CPU binaries are already in the npm package, and
+    # CI must not depend on that download. The local probe falls back to CPU.
+    env:
+      ONNXRUNTIME_NODE_INSTALL_CUDA: skip
     strategy:
       fail-fast: false
       matrix:
@@ -26,6 +31,8 @@ jobs:
   gates:
     name: hygiene gates (line endings, baseline, markdown lint)
     runs-on: ubuntu-latest
+    env:
+      ONNXRUNTIME_NODE_INSTALL_CUDA: skip
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -57,7 +64,7 @@ jobs:
       # A dry-run pack costs seconds and writes no artifacts.
       - name: Verify packages are packable (dry run)
         run: |
-          for p in validator retrieve cli language-server mcp-server remark-lint-mdlineage; do
+          for p in validator retrieve embed-local cli language-server mcp-server remark-lint-mdlineage; do
             npm pack -w "packages/$p" --dry-run
           done
 

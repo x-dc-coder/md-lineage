@@ -182,12 +182,14 @@ export function runInit(args: string[], values: { write?: boolean; config?: stri
   }
   if (changes.length === 0) {
     process.stdout.write('mdlineage: nothing to do, already initialized\n');
+    suggestEmbedLocal();
     return 0;
   }
   if (values.write !== true) {
     process.stdout.write(
       `mdlineage: dry run, nothing written (${changes.length} change${changes.length === 1 ? '' : 's'}; pass --write to apply)\n`,
     );
+    suggestEmbedLocal();
     return 0;
   }
 
@@ -205,5 +207,13 @@ export function runInit(args: string[], values: { write?: boolean; config?: stri
       return 1;
     }
   }
+  suggestEmbedLocal();
   return 0;
+}
+
+/** Points at the optional local ONNX package. Init never installs it. */
+function suggestEmbedLocal(): void {
+  process.stdout.write(
+    'mdlineage: optional: npm install @mdlineage/embed-local  # local ONNX embeddings (recommended)\n',
+  );
 }
