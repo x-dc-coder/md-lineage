@@ -8,6 +8,7 @@
  */
 
 export { tokenize } from './tokenize.js';
+export { isInTreeRealpath } from './tree-guard.js';
 export { Bm25Index, type Bm25Doc, type Bm25Hit } from './bm25.js';
 export { fuse, type FusedRank } from './rrf.js';
 export {
