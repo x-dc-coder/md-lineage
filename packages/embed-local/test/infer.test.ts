@@ -26,6 +26,17 @@ test(
       assert.equal(vector.length, 1024);
       const norm = Math.hypot(...vector);
       assert.ok(Math.abs(norm - 1) < 1e-3, `expected unit norm, got ${norm}`);
+      const paired = await opened.embedder.embed([
+        'BM25 检索如何打分',
+        '明天北京有小雨，最高气温十二度，出门记得带伞。',
+      ]);
+      const alone = await opened.embedder.embed(['BM25 检索如何打分']);
+      const pairedRow = paired.vectors[0];
+      const aloneRow = alone.vectors[0];
+      assert.ok(pairedRow !== undefined && aloneRow !== undefined);
+      let dot = 0;
+      for (let i = 0; i < pairedRow.length; i++) dot += (pairedRow[i] ?? 0) * (aloneRow[i] ?? 0);
+      assert.ok(dot > 0.999, `a text embedded beside another must match embedding it alone, cosine ${dot}`);
       const ranked = await opened.reranker.rerank('BM25 是什么', [
         { key: 'relevant', text: 'BM25 是词法检索的经典打分函数，用词频和文档长度估计相关度。' },
         { key: 'unrelated', text: '明天北京有小雨，最高气温十二度，出门记得带伞。' },

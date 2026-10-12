@@ -16,8 +16,12 @@ const SYSTEM_PROMPT =
 
 const FORBIDDEN_TOKENS = ['<|im_start|>', '<|im_end|>', '<|endoftext|>'] as const;
 
-/** Whole-prompt cap from the Qwen3-Reranker sample. Sections in this corpus are far smaller. */
-const MAX_LENGTH = 8192;
+/**
+ * Whole-prompt cap. The Qwen3-Reranker sample uses 8192. One forward at that
+ * length allocated about 10GB and was OOM-killed (exit 137) on a 13GB machine
+ * during the first rerank window, so prompts truncate at 2048 tokens.
+ */
+const MAX_LENGTH = 2048;
 
 /**
  * YesNo INT8 graph from n24q02m/Qwen3-Reranker-0.6B-ONNX
@@ -46,6 +50,31 @@ export function yesProbability(noLogit: number, yesLogit: number): number {
   return 1 / (Math.exp(diff) + 1);
 }
 
+/**
+ * Reranker device policy (pure, unit-tested): CPU unless the operator
+ * explicitly opts in. The YesNo int8 graph ends in a Softmax over the full
+ * 151k-entry Qwen3 vocabulary, and onnxruntime-node 1.21's CUDA Softmax
+ * kernel aborts the PROCESS with an illegal-memory-access on it (eval log
+ * 2026-10-12: softmax_impl.cu:96, node_Softmax_248). A native abort cannot
+ * be caught or degraded in-process, so auto-CUDA here would turn "rerank"
+ * into a crash. `MDLINEAGE_RERANK_DEVICE=auto` follows the probe result for
+ * operators who know their ORT/weights combo is fixed; `cpu`/`cuda`/`dml`
+ * pin one provider.
+ */
+export function resolveRerankDevice(
+  override: string | undefined,
+  probe: ExecutionDevice,
+): { device: ExecutionDevice; note?: string } {
+  if (override === 'cpu' || override === 'cuda' || override === 'dml') return { device: override };
+  if (override === 'auto') return { device: probe };
+  return probe === 'cpu'
+    ? { device: 'cpu' }
+    : {
+        device: 'cpu',
+        note: 'reranker pinned to cpu (ORT 1.21 CUDA softmax aborts on this graph; set MDLINEAGE_RERANK_DEVICE=auto to override)',
+      };
+}
+
 export class LocalReranker implements RerankProvider {
   private session: OrtSession | undefined;
   private tokenizer: Tokenizer | undefined;
@@ -62,7 +91,12 @@ export class LocalReranker implements RerankProvider {
     if (candidates.length === 0) return { scores: [], degraded: [] };
     const degraded = await this.ensure();
     const scores: number[] = [];
-    for (const candidate of candidates) {
+    for (let index = 0; index < candidates.length; index++) {
+      const candidate = candidates[index];
+      if (candidate === undefined) continue;
+      if (process.env.MDLINEAGE_EMBED_PROGRESS === '1' && candidates.length > 1 && index % 10 === 0) {
+        console.error(`embed-local: rerank ${index + 1}/${candidates.length}`);
+      }
       scores.push(await this.scoreOne(query, candidate.text));
     }
     return { scores, degraded };
@@ -79,16 +113,35 @@ export class LocalReranker implements RerankProvider {
     if (this.session !== undefined && this.tokenizer !== undefined && this.ort !== undefined) {
       return this.takeProbeNotes();
     }
-    const probe = await probeDevice();
-    this.probeNotes = probe.degraded;
+    // The default pin is CPU. Probing CUDA first loads that EP into the
+    // process and keeps it after the session is created on CPU. Only an
+    // explicit cuda, dml, or auto override pays for the probe.
+    // Never device auto (zvec-grep issue #135).
+    const override = process.env.MDLINEAGE_RERANK_DEVICE;
+    let device: ExecutionDevice;
+    if (override === 'auto') {
+      const probe = await probeDevice();
+      const resolved = resolveRerankDevice(override, probe.device);
+      this.probeNotes = resolved.note === undefined ? [...probe.degraded] : [...probe.degraded, resolved.note];
+      device = resolved.device;
+    } else if (override === 'cuda' || override === 'dml' || override === 'cpu') {
+      const resolved = resolveRerankDevice(override, 'cpu');
+      this.probeNotes = resolved.note === undefined ? [] : [resolved.note];
+      device = resolved.device;
+    } else {
+      const resolved = resolveRerankDevice(undefined, 'cpu');
+      this.probeNotes = resolved.note === undefined ? [] : [resolved.note];
+      device = resolved.device;
+    }
     const transformers = await configureTransformers(this.modelDir);
     const loaded = await transformers.fromPretrained(this.profile.repo);
     if (!isTokenizer(loaded)) throw new Error('reranker tokenizer did not load');
     this.tokenizer = loaded;
     const ort = await loadOrt();
     const modelPath = cachedPath(this.modelDir, this.profile.repo, this.profile.onnxFile);
-    // Same explicit provider as the embedder. Never device auto (zvec-grep issue #135).
-    const created = await ort.create(modelPath, [probe.device satisfies ExecutionDevice]);
+    // One explicit provider, chosen by the policy above. Never device auto
+    // (zvec-grep issue #135).
+    const created = await ort.create(modelPath, [device satisfies ExecutionDevice]);
     if (!isSession(created)) throw new Error('reranker session did not expose input names');
     this.ort = ort;
     this.session = created;
@@ -125,8 +178,15 @@ export class LocalReranker implements RerankProvider {
       feeds.attention_mask = ort.int64(ids.map(() => 1n));
     }
     const result = await session.run(feeds);
-    const logits = yesNoPair(result, session.outputNames);
-    return yesProbability(logits.no, logits.yes);
+    try {
+      const logits = yesNoPair(result, session.outputNames);
+      return yesProbability(logits.no, logits.yes);
+    } finally {
+      // session.run's tensors have no finalizer. A 50-wide window times
+      // ten queries would otherwise keep every logit buffer.
+      disposeRerankTensors(feeds);
+      disposeRerankTensors(result);
+    }
   }
 }
 
@@ -142,6 +202,13 @@ interface OrtModule {
   readonly int64: (values: readonly bigint[]) => unknown;
 }
 
+interface OrtCreateOptions {
+  executionProviders: string[];
+  enableCpuMemArena: boolean;
+  enableMemPattern: boolean;
+  intraOpNumThreads: number;
+}
+
 async function loadOrt(): Promise<OrtModule> {
   const imported: unknown = await import('onnxruntime-node');
   if (!isRecord(imported)) throw new Error('onnxruntime-node did not export a module');
@@ -152,7 +219,14 @@ async function loadOrt(): Promise<OrtModule> {
     throw new Error('onnxruntime-node is missing InferenceSession.create or Tensor');
   }
   return {
-    create: (model, providers) => session.create(model, { executionProviders: [...providers] }),
+    // The default CPU arena kept the high-water mark of a long YesNo
+    // sequence. The first rerank window crossed 10GB on a 13GB machine.
+    create: (model, providers) => session.create(model, {
+      executionProviders: [...providers],
+      enableCpuMemArena: false,
+      enableMemPattern: false,
+      intraOpNumThreads: 1,
+    } satisfies OrtCreateOptions),
     int64: (values) => new tensor('int64', BigInt64Array.from(values), [1, values.length]),
   };
 }
@@ -170,7 +244,7 @@ function isTokenizer(value: unknown): value is Tokenizer {
 
 function isSessionHost(
   value: unknown,
-): value is { create(model: string, options: { executionProviders: string[] }): Promise<unknown> } {
+): value is { create(model: string, options: OrtCreateOptions): Promise<unknown> } {
   if (value === null || (typeof value !== 'function' && typeof value !== 'object')) return false;
   return 'create' in value && typeof value.create === 'function';
 }
@@ -239,6 +313,20 @@ function stringArray(value: unknown): value is readonly string[] {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
+}
+
+function disposeRerankTensors(value: unknown, seen: WeakSet<object> = new WeakSet()): void {
+  if (typeof value !== 'object' || value === null || seen.has(value)) return;
+  seen.add(value);
+  if ('dispose' in value && typeof value.dispose === 'function' && 'dims' in value) {
+    value.dispose.call(value);
+    return;
+  }
+  if (Array.isArray(value)) {
+    for (const item of value) disposeRerankTensors(item, seen);
+    return;
+  }
+  for (const child of Object.values(value)) disposeRerankTensors(child, seen);
 }
 
 function stripSpecial(text: string): string {

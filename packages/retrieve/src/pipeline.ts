@@ -140,6 +140,7 @@ function lexicalRank(sections: readonly CorpusSection[], query: string, limit: n
     title: section.title,
     text: section.text,
   }));
+  // Length norm is the Bm25Index default (token-total; leftover #33).
   return new Bm25Index(docs).search(query, limit).map((hit) => ({
     path: hit.path,
     slug: hit.slug,

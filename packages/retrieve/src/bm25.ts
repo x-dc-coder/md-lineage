@@ -31,6 +31,21 @@ export interface Bm25Hit extends Bm25Doc {
 const K1 = 1.2;
 const B = 0.75;
 
+/**
+ * How a section's length enters the BM25 length norm.
+ * `token-total` counts every token, including a repeated identifier and its
+ * subwords. `unique-terms` counts `tf.size` instead. The default is chosen
+ * in the 2026-10-12 hybrid comparison and recorded on the constructor.
+ */
+export type LengthAccounting = 'token-total' | 'unique-terms';
+
+/**
+ * Constructor default. On the 2026-10-12 comparison both accountings scored
+ * Recall@10 100% and the same MRR@10, so the length norm stays the token
+ * total (leftover #33). The report records the figures.
+ */
+export const DEFAULT_LENGTH_ACCOUNTING: LengthAccounting = 'token-total';
+
 interface IndexedDoc {
   doc: Bm25Doc;
   tf: Map<string, number>;
@@ -42,14 +57,26 @@ export class Bm25Index {
   private readonly df = new Map<string, number>();
   private readonly avgdl: number;
 
-  constructor(docs: readonly Bm25Doc[]) {
+  /**
+   * Default is `token-total` (see `DEFAULT_LENGTH_ACCOUNTING`). Pass
+   * `unique-terms` to score with the set-size length norm. The comparison
+   * report records both Recall@10 and MRR@10 figures.
+   */
+  constructor(
+    docs: readonly Bm25Doc[],
+    lengthAccounting: LengthAccounting = DEFAULT_LENGTH_ACCOUNTING,
+  ) {
+    if (lengthAccounting !== 'token-total' && lengthAccounting !== 'unique-terms') {
+      throw new Error(`length accounting must be token-total or unique-terms`);
+    }
     this.docs = docs.map((doc) => {
       // The corpus string convention: title line then body — kept in sync
       // with the vector cache key so lexical and dense see the same text.
       const terms = tokenize(`${doc.title}\n${doc.text}`);
       const tf = new Map<string, number>();
       for (const term of terms) tf.set(term, (tf.get(term) ?? 0) + 1);
-      return { doc, tf, length: terms.length };
+      const length = lengthAccounting === 'unique-terms' ? tf.size : terms.length;
+      return { doc, tf, length };
     });
     for (const indexed of this.docs) {
       for (const term of indexed.tf.keys()) {

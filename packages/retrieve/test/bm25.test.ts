@@ -3,11 +3,13 @@
  * verify by hand; every constant below is the closed-form arithmetic, so a
  * formula regression fails loudly.
  *
- * Corpus (tokens = tokenize(`${title}\n${text}`)):
+ * Corpus (tokens = tokenize(`${title}\n${text}`), length = token total):
  *   a.md#cat : cat×3, dog×1                     len 4
  *   b.md#bird: bird×4                           len 4
  *   c.md#fish: fish×2, cat×1                    len 3
  * N = 3, avgdl = 11/3, k1 = 1.2, b = 0.75, df(cat) = 2, df(dog) = 1.
+ * The golden ranking pins `token-total`, which is also the constructor
+ * default: on the 2026-10-12 comparison the two accountings tied (leftover #33).
  */
 
 import { test } from 'node:test';
@@ -21,7 +23,7 @@ const CORPUS = [
 ];
 
 test('bm25 — hand-computed golden ranking for "cat dog"', () => {
-  const index = new Bm25Index(CORPUS);
+  const index = new Bm25Index(CORPUS, 'token-total');
   const hits = index.search('cat dog');
   assert.deepEqual(hits.map((h) => `${h.path}#${h.slug}`), ['a.md#cat', 'c.md#fish']);
 
@@ -35,6 +37,21 @@ test('bm25 — hand-computed golden ranking for "cat dog"', () => {
   //    cat: ln(1.6)*1*2.2/(1+1.2*19/22) = 0.5077717780244108
   assert.ok(Math.abs(hits[0]!.score - 1.6701242694590301) < 1e-12);
   assert.ok(Math.abs(hits[1]!.score - 0.5077717780244108) < 1e-12);
+});
+
+test('bm25 — unique-terms length accounting scores a repeated token higher than token-total', () => {
+  const docs = [
+    { path: 'repeat.md', slug: 's', title: 'T', text: 'alpha alpha alpha' },
+    { path: 'spread.md', slug: 's', title: 'T', text: 'alpha beta gamma' },
+  ];
+  const score = (accounting: 'token-total' | 'unique-terms') =>
+    new Bm25Index(docs, accounting).search('alpha').find((hit) => hit.path === 'repeat.md')?.score;
+  const total = score('token-total');
+  const unique = score('unique-terms');
+  const byDefault = new Bm25Index(docs).search('alpha').find((hit) => hit.path === 'repeat.md')?.score;
+  assert.ok(total !== undefined && unique !== undefined);
+  assert.ok(unique > total);
+  assert.equal(byDefault, total);
 });
 
 test('bm25 — tie-break is (path, slug) lexicographic, byte-stable', () => {
