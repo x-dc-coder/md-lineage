@@ -1,6 +1,6 @@
 name: Pack
 
-# 每次 push 到 main 或手动触发时自动构建、测试并打包 5 个 npm 包 + 3 个 schema。
+# 每次 push 到 main 或手动触发时自动构建、测试并打包 6 个 npm 包 + 3 个 schema。
 # 本工作流产出的 tgz 是构建快照（Actions 运行页下载，7 天过期），发布物以 GitHub Release 资产为准（由 release.yml 挂载）。
 
 on:
@@ -29,10 +29,10 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npm test
-      - name: Pack 5 packages + schemas
+      - name: Pack 6 packages + schemas
         run: |
           mkdir -p dist-assets
-          for p in validator cli language-server mcp-server remark-lint-mdlineage; do
+          for p in validator retrieve cli language-server mcp-server remark-lint-mdlineage; do
             npm pack -w "packages/$p" --pack-destination dist-assets
           done
           cp schemas/diagnostic-codes.json schemas/mdlineage-config.schema.json schemas/mdlineage-v1.schema.json dist-assets/
