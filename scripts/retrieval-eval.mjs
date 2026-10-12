@@ -88,7 +88,11 @@ for (const [path, doc] of docs) {
 // Sample pairs: strong relations first, then other relations, then topics.
 // ---------------------------------------------------------------------------
 
-/** All eval samples must live under docs/ so the corpus stays the docs tree. */
+/**
+ * Sample pairs are restricted to the docs tree (the front matter the issue
+ * names); the CORPUS is the whole scanned universe — fixtures, READMEs and
+ * all — because that is what `mdlineage retrieve search` actually searches.
+ */
 const inDocsTree = (p) => p === 'docs' || p.startsWith('docs/');
 
 function pairsFromRelations(types) {
@@ -189,7 +193,9 @@ for (const sample of samples) {
   const rank = ranking.findIndex(([path]) => path === sample.target) + 1;
   const inTop = rank >= 1 && rank <= RECALL_AT;
   if (inTop) recalls++;
-  if (rank >= 1) reciprocalSum += 1 / rank;
+  // MRR@10 is truncated at 10: a target found at rank 37 contributes nothing,
+  // same as an unranked one.
+  if (rank >= 1 && rank <= RECALL_AT) reciprocalSum += 1 / rank;
   perPair.push({ ...sample, rank: rank >= 1 ? rank : null, inTop });
 }
 
