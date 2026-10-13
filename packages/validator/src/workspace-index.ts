@@ -37,7 +37,7 @@ import { collectAnchors, collectHeadingTexts, mdlineageFieldOffset, visitTree } 
 import type { RelationOffsets } from './document-validator.js';
 import { relationOffsetsOf } from './document-validator.js';
 import { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
-import { normalizeFilterPath } from './path-filter.js';
+import { resolveMetadata } from './metadata.js';
 import { buildLineMap } from './source-map.js';
 import type { Document } from 'yaml';
 
@@ -580,12 +580,7 @@ function parseDocument(path: DocPath, content: string, config: Config): DocEntry
     }
   }
 
-  if (mdlineage === null && config.manifestDocuments) {
-    const manifestEntry = config.manifestDocuments.get(path) ?? config.manifestDocuments.get(normalizeFilterPath(path));
-    if (manifestEntry) {
-      mdlineage = manifestEntry as unknown as Record<string, unknown>;
-    }
-  }
+  mdlineage = resolveMetadata(mdlineage, path, config).metadata;
 
   const id = typeof mdlineage?.['id'] === 'string' ? (mdlineage['id'] as string) : null;
   const status = typeof mdlineage?.['status'] === 'string' ? (mdlineage['status'] as string) : null;

@@ -13,6 +13,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { loadConfig } from '@mdlineage/validator';
+import { profileOf } from '../src/organize.js';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..', '..', '..');
 const cliBin = resolve(repoRoot, 'packages', 'cli', 'dist', 'main.js');
@@ -93,6 +95,111 @@ function countOf(stdout: string, code: string): number {
   for (const report of parsed.reports) for (const d of report.diagnostics) if (d.code === code) n += 1;
   return n;
 }
+
+describe('mdlineage organize — manifest metadata', () => {
+  for (const explicit of [false, true]) {
+    it(`uses ${explicit ? 'manifestFile' : 'auto-discovered manifest'} in inventory, report, and plan`, () => {
+      const manifestName = explicit ? 'custom.manifest.yaml' : 'mdlineage.manifest.yaml';
+      const ws = scratchWorkspace({
+        'mdlineage.config.yaml': CONFIG.replace('required: false', 'required: true').replace(
+          "  - match: '**/*.md'\n    require:\n      frontmatter: optional\n", '',
+        ) + (explicit ? `manifestFile: ${manifestName}\n` : ''),
+        [manifestName]: [
+          'version: 1',
+          'documents:',
+          '  docs/policy.md:',
+          '    id: docs.policy',
+          '    kind: policy',
+          '    status: active',
+          '  docs/guides/guide.md:',
+          '    id: docs.guide',
+          '    kind: guide',
+          '    status: active',
+          '  docs/foo.md:',
+          '    id: docs.foo',
+          '    kind: reference',
+          '    status: draft',
+          '',
+        ].join('\n'),
+        'docs/policy.md': '# Policy\n',
+        'docs/guides/guide.md': '# Guide\n',
+        'docs/foo.md': '# Reference\n',
+      });
+      try {
+        const inventory = runCli(['organize', '--inventory'], ws.root);
+        assert.equal(inventory.status, 0, inventory.stderr);
+        for (const kind of ['policy', 'guide', 'reference']) assert.match(inventory.stdout, new RegExp(`${kind}\\s+1`));
+        const kinds = inventory.stdout.split('kind distribution:\n')[1]?.split('\ndirectory distribution:')[0];
+        assert.ok(kinds);
+        assert.doesNotMatch(kinds, /\(none\)/);
+
+        const report = runCli(['organize', '--report'], ws.root);
+        assert.equal(report.status, 0, report.stderr);
+        assert.match(report.stdout, /2\/3 documents match their directory intent/);
+        assert.match(report.stdout, /misplaced \(kind\):\s+1/);
+
+        const plan = runCli(['organize', '--plan'], ws.root);
+        assert.equal(plan.status, 0, plan.stderr);
+        assert.match(plan.stdout, /move docs\/foo\.md -> docs\/reference\/foo\.md/);
+
+        const { config } = loadConfig(resolve(ws.root, 'mdlineage.config.yaml'));
+        assert.deepEqual(profileOf('docs/foo.md', '# Reference\n', config), {
+          path: 'docs/foo.md', kind: 'reference', status: 'draft', authority: null,
+        });
+
+        const checked = runCli(['check', '.', '--no-baseline', '--format', 'json'], ws.root);
+        assert.equal(countOf(checked.stdout, 'MDL502'), 2);
+        assert.equal(countOf(checked.stdout, 'MDL003'), 0);
+
+        const suggest = runCli(['suggest', 'docs/foo.md'], ws.root);
+        assert.equal(suggest.status, 0, suggest.stderr);
+        assert.deepEqual(JSON.parse(suggest.stdout).operations, [], 'complete manifest metadata needs no proposal');
+        assert.equal(readFileSync(join(ws.root, 'docs/foo.md'), 'utf8'), '# Reference\n');
+      } finally {
+        ws.cleanup();
+      }
+    });
+  }
+
+  it('checks status intents against manifest metadata', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': CONFIG.replace('kinds: [policy]', 'kinds: [policy]\n      forbidStatus: [draft]'),
+      'mdlineage.manifest.yaml': 'documents:\n  docs/policy.md:\n    id: docs.policy\n    kind: policy\n    status: draft\n',
+      'docs/policy.md': '# Draft policy\n',
+    });
+    try {
+      const report = runCli(['organize', '--report'], ws.root);
+      assert.equal(report.status, 0, report.stderr);
+      assert.match(report.stdout, /0\/1 documents match their directory intent/);
+      assert.match(report.stdout, /misplaced \(other\):\s+1/);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('uses the front matter block as a whole and keeps MDL105', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': CONFIG,
+      'mdlineage.manifest.yaml': 'documents:\n  docs/foo.md:\n    id: manifest.foo\n    kind: reference\n    status: draft\n',
+      'docs/foo.md': doc('docs.foo', 'policy'),
+    });
+    try {
+      const inventory = runCli(['organize', '--inventory'], ws.root);
+      assert.equal(inventory.status, 0, inventory.stderr);
+      assert.match(inventory.stdout, /policy\s+1/);
+      assert.doesNotMatch(inventory.stdout, /reference\s+1/);
+      const { config } = loadConfig(resolve(ws.root, 'mdlineage.config.yaml'));
+      assert.equal(profileOf('docs/foo.md', doc('docs.foo', 'policy'), config).status, 'active');
+      const partial = '---\nmdlineage:\n  kind: policy\n---\n# Partial\n';
+      assert.equal(profileOf('docs/foo.md', partial, config).status, null, 'manifest does not fill fields in a front matter block');
+      const checked = runCli(['check', '.', '--no-baseline', '--format', 'json'], ws.root);
+      assert.equal(countOf(checked.stdout, 'MDL105'), 1);
+      assert.equal(countOf(checked.stdout, 'MDL502'), 0);
+    } finally {
+      ws.cleanup();
+    }
+  });
+});
 
 describe('mdlineage organize — inventory and report', () => {
   it('--inventory reports the kind and directory distribution and the scattered files', () => {

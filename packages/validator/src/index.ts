@@ -23,7 +23,7 @@ import type { Diagnostic } from './diagnostic.js';
 import { severityOf, layerOf } from './diagnostic.js';
 import { buildLineMap, rangeAt } from './source-map.js';
 import { validateLineEndings } from './line-endings.js';
-import { normalizeFilterPath } from './path-filter.js';
+import { resolveMetadata } from './metadata.js';
 import { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
 import { parseMarkdownSync } from './parse-markdown.js';
 import { validateAgainstSchema } from './schema-validator.js';
@@ -95,6 +95,7 @@ export { buildLineMap, positionAt, rangeAt } from './source-map.js';
 export type { LineMap, ResolvedRange } from './source-map.js';
 export { scanLineEndings, validateLineEndings } from './line-endings.js';
 export { scanBoundary, parseFrontmatter, stripBom } from './parse-frontmatter.js';
+export { resolveMetadata, readDocumentMetadata } from './metadata.js';
 export { parseMarkdown, parseMarkdownSync } from './parse-markdown.js';
 export { getSchemaValidator, validateAgainstSchema, resolveErrorRange } from './schema-validator.js';
 export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset, collectAnchors, collectHeadingTexts, extractSamePageLinks } from './document-validator.js';
@@ -206,17 +207,14 @@ export function validateDocumentSync(input: ValidateInput): ValidateResult {
     }
   }
 
-  const manifestEntry = input.path
-    ? (config.manifestDocuments.get(input.path) ?? config.manifestDocuments.get(normalizeFilterPath(input.path)))
-    : undefined;
-  if (mdlineage !== null && manifestEntry) {
+  const resolvedMetadata = resolveMetadata(mdlineage, input.path, config);
+  if (resolvedMetadata.ignoredManifest) {
     const where = mdlineageRange ?? { start: 0, end: lineEnd(lineMap, 0) };
     diagnostics.push(
       mdl('MDL105', 'Document has front matter metadata; its manifest entry is ignored', where, lineMap, config),
     );
-  } else if (mdlineage === null && manifestEntry) {
-    mdlineage = manifestEntry as unknown as Record<string, unknown>;
   }
+  mdlineage = resolvedMetadata.metadata;
 
   // 3. Missing-metadata check (suppressed entirely when metadata.required is
   // false, and when MDL001/MDL002 already explained why no metadata could be

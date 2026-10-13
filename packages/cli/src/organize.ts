@@ -29,8 +29,7 @@ import {
   layoutDiagnostics,
   loadConfig,
   matchesPattern,
-  parseFrontmatter,
-  scanBoundary,
+  readDocumentMetadata,
   type Config,
 } from '@mdlineage/validator';
 import { Workspace, executeMove, planMove, todayUtc } from './move.js';
@@ -48,7 +47,7 @@ export interface OrganizeValues {
   exclude?: readonly string[];
 }
 
-/** What one document's front matter says, as far as layout cares. */
+/** What one document's effective metadata says, as far as layout cares. */
 export interface DocProfile {
   readonly path: DocPath;
   readonly kind: string | null;
@@ -193,8 +192,8 @@ export function analyze(workspace: Workspace, selected: readonly DocPath[]): Ana
 
   for (const path of [...selected].sort()) {
     const content = workspace.documents.get(path) ?? '';
-    const metadata = metadataOf(content, workspace.config.metadata.key);
-    profiles.push(profileOf(path, content, workspace.config.metadata.key));
+    const metadata = readDocumentMetadata(content, path, workspace.config);
+    profiles.push(profileFromMetadata(path, metadata));
 
     // A document no intent-declaring rule claims is MDL505's scattered file: it
     // has no convention to obey, which is itself the finding.
@@ -266,21 +265,14 @@ export function governingIntentRule(config: Config, path: DocPath): Config['layo
 }
 
 /** Read the metadata fields layout decisions need from one document. */
-export function profileOf(path: DocPath, content: string, metadataKey: string): DocProfile {
-  const metadata = metadataOf(content, metadataKey);
+export function profileOf(path: DocPath, content: string, config: Config): DocProfile {
+  return profileFromMetadata(path, readDocumentMetadata(content, path, config));
+}
+
+function profileFromMetadata(path: DocPath, metadata: Record<string, unknown> | null): DocProfile {
   if (metadata === null) return { path, kind: null, status: null, authority: null };
   const field = (key: string): string | null => (typeof metadata[key] === 'string' ? (metadata[key] as string) : null);
   return { path, kind: field('kind'), status: field('status'), authority: field('authority') };
-}
-
-/** The metadata block's mapping, or null when the document has none to read. */
-function metadataOf(content: string, metadataKey: string): Record<string, unknown> | null {
-  const boundary = scanBoundary(content);
-  if (boundary === null || boundary.closeStart === null) return null;
-  const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, buildLineMap(content));
-  const metadata = parsed.parsed?.data?.[metadataKey];
-  if (typeof metadata !== 'object' || metadata === null || Array.isArray(metadata)) return null;
-  return metadata as Record<string, unknown>;
 }
 
 /**
