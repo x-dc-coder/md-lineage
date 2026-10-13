@@ -159,3 +159,24 @@ describe('MCP search_documents', () => {
     }
   });
 });
+
+describe('MCP `discover_relations`', () => {
+  it('discovers candidate pairs across the corpus in lexical mode', async () => {
+    const root = corpus();
+    const h = await harness(root);
+    try {
+      const result = await h.client.callTool({
+        name: 'discover_relations',
+        arguments: { mode: 'lexical', top_k: 5 },
+      });
+      assert.equal(result.isError, undefined);
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '{}';
+      const payload = JSON.parse(text);
+      assert.equal(payload.mode, 'lexical');
+      assert.ok(Array.isArray(payload.pairs));
+    } finally {
+      await h.close();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});

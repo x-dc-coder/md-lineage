@@ -144,6 +144,7 @@ describe('MCP server — tool surface', () => {
         names,
         [
           'apply_metadata_patch',
+          'discover_relations',
           'get_schema',
           'list_document_ids',
           'resolve_relation_target',
@@ -152,10 +153,10 @@ describe('MCP server — tool surface', () => {
           'validate_document',
           'validate_repository',
         ],
-        'the eight tools, and no others',
+        'the nine tools, and no others',
       );
       // A tool without an input schema would be unusable from a client; every
-      // one of the eight takes arguments.
+      // one of the nine takes arguments.
       for (const tool of listed.tools) {
         assert.equal(tool.inputSchema.type, 'object', `${tool.name} declares an object input schema`);
       }
@@ -194,10 +195,11 @@ describe('MCP server — tool surface', () => {
       ]) {
         assert.equal(byName.get(name)?.annotations?.readOnlyHint, true, `${name} stays read-only`);
       }
-      // search_documents: lexical reads only, but hybrid writes derived
-      // vector caches under .mdlineage-cache/ — the hint must not promise
-      // "nothing is written".
+      // search_documents and discover_relations: lexical reads only, but hybrid
+      // writes derived vector caches under .mdlineage-cache/ — the hint must
+      // not promise "nothing is written".
       assert.notEqual(byName.get('search_documents')?.annotations?.readOnlyHint, true);
+      assert.notEqual(byName.get('discover_relations')?.annotations?.readOnlyHint, true);
     } finally {
       await h.close();
     }

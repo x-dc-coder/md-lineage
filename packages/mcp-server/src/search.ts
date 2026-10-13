@@ -7,11 +7,21 @@
  * note. `dispose` runs when the server transport closes.
  */
 
-import { extractSections, scanWorkspaceUniverse, type Config } from '@mdlineage/validator';
+import {
+  extractSections,
+  scanWorkspaceUniverse,
+  scanBoundary,
+  parseFrontmatter,
+  buildLineMap,
+  type Config,
+} from '@mdlineage/validator';
 import {
   FileVectorStore,
   isInTreeRealpath,
   searchCorpus,
+  discoverCandidatePairs,
+  type CandidateDocMeta,
+  type CandidatePair,
   type CorpusSection,
   type EmbeddingProvider,
   type RerankProvider,
@@ -40,6 +50,22 @@ export interface SearchDocumentsResult {
   readonly query: string;
   readonly mode: 'lexical' | 'hybrid';
   readonly results: readonly SearchDocumentsHit[];
+  readonly degraded: readonly string[];
+}
+
+export interface DiscoverRelationsRequest {
+  readonly root: string;
+  readonly config: Config;
+  readonly sourcePath?: string;
+  readonly top: number;
+  readonly threshold?: number;
+  readonly mode: 'lexical' | 'hybrid';
+}
+
+export interface DiscoverRelationsResult {
+  readonly mode: 'lexical' | 'hybrid';
+  readonly source?: string;
+  readonly pairs: readonly CandidatePair[];
   readonly degraded: readonly string[];
 }
 
@@ -103,6 +129,44 @@ export class RetrievalSession {
         scoreKind: hit.scoreKind,
         snippet: snippet(hit.text),
       })),
+      degraded: [...degraded, ...held.notes, ...outcome.degraded],
+    };
+  }
+
+  async discover(request: DiscoverRelationsRequest): Promise<DiscoverRelationsResult> {
+    const sections: CorpusSection[] = [];
+    const docsMeta = new Map<string, CandidateDocMeta>();
+    const degraded: string[] = [];
+    const universe = scanWorkspaceUniverse(request.root, request.config);
+    for (const [path, content] of universe.documents) {
+      if (!isInTreeRealpath(request.root, path)) {
+        degraded.push(`skipped out-of-tree symlink: ${path}`);
+        continue;
+      }
+      docsMeta.set(path, extractDocMeta(content));
+      for (const section of extractSections(content)) {
+        sections.push({ path, slug: section.slug, title: section.title, text: section.text });
+      }
+    }
+
+    const held = request.mode === 'lexical' ? lexicalHold() : await this.hybrid();
+    const outcome = await discoverCandidatePairs({
+      sections,
+      docsMeta,
+      sourcePath: request.sourcePath,
+      top: request.top,
+      threshold: request.threshold,
+      mode: held.hybrid ? 'hybrid' : 'lexical',
+      filterExisting: true,
+      ...(held.embedder === null ? {} : { embedder: held.embedder }),
+      ...(held.reranker === null ? {} : { reranker: held.reranker }),
+      ...(held.store === undefined ? {} : { store: held.store }),
+    });
+
+    return {
+      mode: held.hybrid ? 'hybrid' : 'lexical',
+      source: request.sourcePath,
+      pairs: outcome.pairs,
       degraded: [...degraded, ...held.notes, ...outcome.degraded],
     };
   }
@@ -220,4 +284,29 @@ function snippet(text: string): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
   const chars = [...collapsed];
   return chars.length <= SNIPPET_LENGTH ? collapsed : `${chars.slice(0, SNIPPET_LENGTH).join('')}…`;
+}
+
+function extractDocMeta(content: string): CandidateDocMeta {
+  const boundary = scanBoundary(content);
+  if (!boundary || !boundary.hasFrontmatter) return {};
+  const lineMap = buildLineMap(content);
+  const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
+  const data = parsed.data;
+  if (!data || typeof data !== 'object') return {};
+  const mdlineage = (data as Record<string, unknown>).mdlineage;
+  if (!mdlineage || typeof mdlineage !== 'object') return {};
+  const id =
+    typeof (mdlineage as Record<string, unknown>).id === 'string'
+      ? ((mdlineage as Record<string, unknown>).id as string)
+      : undefined;
+  const relsRaw = (mdlineage as Record<string, unknown>).relations;
+  const relations: { target: string }[] = [];
+  if (Array.isArray(relsRaw)) {
+    for (const r of relsRaw) {
+      if (r && typeof r === 'object' && typeof (r as Record<string, unknown>).target === 'string') {
+        relations.push({ target: (r as Record<string, unknown>).target as string });
+      }
+    }
+  }
+  return { ...(id !== undefined ? { id } : {}), relations };
 }

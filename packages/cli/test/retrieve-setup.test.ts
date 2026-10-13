@@ -37,7 +37,7 @@ test('unknown retrieve subcommand mentions setup', () => {
   try {
     const result = runCli(['retrieve', 'nope'], dir, { MDLINEAGE_MODELS_DIR: dir });
     assert.equal(result.status, 2);
-    assert.match(result.stderr, /expected search or setup/);
+    assert.match(result.stderr, /expected search, discover, or setup/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

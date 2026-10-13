@@ -214,3 +214,16 @@ test('retrieve search — auto without a local model falls back to lexical and s
     rmSync(modelDir, { recursive: true, force: true });
   }
 });
+
+test('retrieve discover — discovers candidate relation pairs from CLI', () => {
+  const root = makeCorpus();
+  try {
+    const run = runCli(['retrieve', 'discover', '--mode', 'lexical', '--format', 'json', '--top', '5'], root);
+    assert.equal(run.status, 0, run.stderr);
+    const parsed = JSON.parse(run.stdout) as { mode: string; pairs: unknown[] };
+    assert.equal(parsed.mode, 'lexical');
+    assert.ok(Array.isArray(parsed.pairs));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});

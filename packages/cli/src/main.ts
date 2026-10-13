@@ -45,7 +45,7 @@ import { runOrganize } from './organize.js';
 import { runManifestSeed } from './manifest.js';
 import { configValidate } from './config-validate.js';
 import { indexRebuild } from './index-rebuild.js';
-import { retrieveSearch, retrieveSetup } from './retrieve.js';
+import { retrieveSearch, retrieveSetup, retrieveDiscover } from './retrieve.js';
 import { startStdio as startMcpStdio, buildProposals } from '@mdlineage/mcp-server';
 
 const HELP = `mdlineage — Markdown metadata and hygiene validation
@@ -84,6 +84,9 @@ Usage:
   mdlineage retrieve search <query>
                                     Section search over the workspace
                                     (read-only; exits 0 even when degraded)
+  mdlineage retrieve discover [--source <path>]
+                                    Discover candidate relation pairs with
+                                    evidence anchors, filtering existing edges
   mdlineage retrieve setup [--profile <id>] [--mirror <url>]
                                     Download local ONNX models into
                                     ~/.mdlineage/models (or MDLINEAGE_MODELS_DIR).
@@ -245,6 +248,8 @@ function readArgs(argv: string[]): ParsedArgs {
       inventory: { type: 'boolean' },
       report: { type: 'boolean' },
       scope: { type: 'string' },
+      source: { type: 'string' },
+      threshold: { type: 'string' },
       // `mdlineage retrieve search --top <N>`: how many hits to print.
       top: { type: 'string' },
       mode: { type: 'string' },
@@ -623,9 +628,10 @@ async function runRetrieve(args: string[], values: ParsedArgs['values']): Promis
     return 0;
   }
   if (sub === 'setup') return runRetrieveSetup(args.slice(1), values);
+  if (sub === 'discover') return runRetrieveDiscover(args.slice(1), values);
   if (sub !== 'search') {
     process.stderr.write(
-      `mdlineage: unknown retrieve subcommand '${sub ?? '(none)'}' (expected search or setup)\n\n${HELP}\n`,
+      `mdlineage: unknown retrieve subcommand '${sub ?? '(none)'}' (expected search, discover, or setup)\n\n${HELP}\n`,
     );
     return 2;
   }
@@ -684,6 +690,55 @@ async function runRetrieveSetup(args: string[], values: ParsedArgs['values']): P
   return retrieveSetup({
     ...(values.profile === undefined ? {} : { profile: values.profile }),
     ...(values.mirror === undefined ? {} : { mirror: values.mirror }),
+    ...(modelDir === undefined ? {} : { modelDir }),
+  });
+}
+
+async function runRetrieveDiscover(args: string[], values: ParsedArgs['values']): Promise<number> {
+  const format = parseFormat(values.format);
+  if (format === null || format === 'sarif') {
+    process.stderr.write(`mdlineage: retrieve discover --format must be text or json\n`);
+    return 2;
+  }
+  const top = values.top === undefined ? 10 : Number(values.top);
+  if (!Number.isInteger(top) || top < 1) {
+    process.stderr.write(`mdlineage: --top must be a positive integer, got '${values.top}'\n`);
+    return 2;
+  }
+  const mode = parseRetrieveMode(values);
+  if (mode === null) {
+    const conflict = values['bm25-only'] === true && values.mode !== undefined && values.mode !== 'lexical';
+    process.stderr.write(
+      conflict
+        ? `mdlineage: --bm25-only cannot be combined with --mode ${values.mode}\n`
+        : `mdlineage: retrieve discover --mode must be auto, lexical, or hybrid\n`,
+    );
+    return 2;
+  }
+  const rerank = parseRerank(values);
+  if (rerank === null) {
+    process.stderr.write(`mdlineage: --rerank must be a positive integer (or pass --no-rerank)\n`);
+    return 2;
+  }
+  const threshold = values.threshold !== undefined ? Number(values.threshold) : undefined;
+  if (threshold !== undefined && Number.isNaN(threshold)) {
+    process.stderr.write(`mdlineage: --threshold must be a valid number, got '${values.threshold}'\n`);
+    return 2;
+  }
+  const sourcePath =
+    typeof values.source === 'string' && values.source.trim() !== '' ? values.source.trim() : undefined;
+  const modelDir = process.env.MDLINEAGE_MODELS_DIR;
+
+  return retrieveDiscover({
+    format,
+    configFile: values.config,
+    cwd: processCwd(),
+    top,
+    sourcePath,
+    threshold,
+    mode,
+    rerank: rerank.enabled,
+    rerankDepth: rerank.depth,
     ...(modelDir === undefined ? {} : { modelDir }),
   });
 }

@@ -169,8 +169,8 @@ export function createMdlineageMcpServer(context: McpServerContext): {
         'unless it is called with write: true, which overwrites the document on disk with the reviewed text. ' +
         'A proposal over a document that was never saved writes that document into existence; one over a document ' +
         'that has since been deleted or renamed is refused instead. ' +
-        'search_documents is read-only section search: hybrid when a local model is ready, otherwise lexical, ' +
-        'and the hits are candidates, never a gate.',
+        'search_documents searches sections; discover_relations mines candidate cross-document relationships ' +
+        'with evidence anchors; and the hits are candidates, never a gate.',
     },
   );
 
@@ -592,6 +592,42 @@ function registerSearchDocuments(server: McpServer, context: McpServerContext, r
       return asJson(result);
     },
   );
+
+  server.registerTool(
+    'discover_relations',
+    {
+      title: 'Discover candidate document relations',
+      description:
+        'Discover candidate cross-document relationships with bidirectional evidence anchors. ' +
+        'Filters out existing frontmatter relations and self-references to save LLM reasoning budget. ' +
+        '`lexical` is BM25. `hybrid` (the default) uses local ONNX embedding and reranker. ' +
+        'Results are advisory suggestions, not a gate.',
+      inputSchema: {
+        source: z
+          .string()
+          .optional()
+          .describe('Optional source document path. If omitted, discovers across all workspace docs.'),
+        top_k: z.number().int().positive().optional().describe('How many candidate pairs to return. Default 10.'),
+        threshold: z.number().optional().describe('Minimum score threshold for candidates.'),
+        mode: z
+          .enum(['lexical', 'hybrid'])
+          .optional()
+          .describe('lexical forces BM25. hybrid tries dense retrieval and falls back to lexical. Default hybrid.'),
+      },
+      annotations: { readOnlyHint: false },
+    },
+    async ({ source, top_k, threshold, mode }) => {
+      const result = await retrieval.discover({
+        root: context.root,
+        config: context.config,
+        sourcePath: source,
+        top: top_k ?? 10,
+        threshold,
+        mode: mode ?? 'hybrid',
+      });
+      return asJson(result);
+    },
+  );
 }
 
 /** Every §12 tool name, in the order the doc's table lists them. */
@@ -602,6 +638,7 @@ export const TOOL_NAMES = [
   'list_document_ids',
   'resolve_relation_target',
   'search_documents',
+  'discover_relations',
   'suggest_metadata',
   'apply_metadata_patch',
 ] as const;

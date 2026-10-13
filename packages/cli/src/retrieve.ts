@@ -13,12 +13,23 @@
  * is a usage mistake, not a retrieval failure.
  */
 
-import { loadConfig, scanWorkspaceUniverse, extractSections } from '@mdlineage/validator';
+import {
+  loadConfig,
+  scanWorkspaceUniverse,
+  extractSections,
+  scanBoundary,
+  parseFrontmatter,
+  buildLineMap,
+} from '@mdlineage/validator';
 import {
   FileVectorStore,
   isInTreeRealpath,
   searchCorpus,
+  discoverCandidatePairs,
   type Bm25Doc,
+  type CandidateDocMeta,
+  type CandidatePair,
+  type CorpusSection,
   type EmbeddingProvider,
   type RerankProvider,
 } from '@mdlineage/retrieve';
@@ -283,4 +294,149 @@ function snippet(text: string): string {
   const collapsed = text.replace(/\s+/g, ' ').trim();
   const chars = [...collapsed];
   return chars.length <= SNIPPET_LENGTH ? collapsed : `${chars.slice(0, SNIPPET_LENGTH).join('')}…`;
+}
+
+export interface RetrieveDiscoverOptions {
+  format: 'text' | 'json';
+  configFile?: string;
+  cwd: string;
+  top: number;
+  sourcePath?: string;
+  threshold?: number;
+  mode: 'auto' | 'lexical' | 'hybrid';
+  rerank: boolean;
+  rerankDepth: number;
+  modelDir?: string;
+}
+
+function extractDocMeta(content: string): CandidateDocMeta {
+  const boundary = scanBoundary(content);
+  if (!boundary || !boundary.hasFrontmatter) return {};
+  const lineMap = buildLineMap(content);
+  const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
+  const data = parsed.data;
+  if (!data || typeof data !== 'object') return {};
+  const mdlineage = (data as Record<string, unknown>).mdlineage;
+  if (!mdlineage || typeof mdlineage !== 'object') return {};
+  const id =
+    typeof (mdlineage as Record<string, unknown>).id === 'string'
+      ? ((mdlineage as Record<string, unknown>).id as string)
+      : undefined;
+  const relsRaw = (mdlineage as Record<string, unknown>).relations;
+  const relations: { target: string }[] = [];
+  if (Array.isArray(relsRaw)) {
+    for (const r of relsRaw) {
+      if (r && typeof r === 'object' && typeof (r as Record<string, unknown>).target === 'string') {
+        relations.push({ target: (r as Record<string, unknown>).target as string });
+      }
+    }
+  }
+  return { ...(id !== undefined ? { id } : {}), relations };
+}
+
+export async function retrieveDiscover(options: RetrieveDiscoverOptions): Promise<number> {
+  const loaded = loadConfig(options.configFile, options.configFile ? undefined : options.cwd);
+  if (options.configFile !== undefined && loaded.diagnostics.some((d) => d.severity === 'error')) {
+    for (const diag of loaded.diagnostics) {
+      process.stderr.write(`mdlineage: ${diag.code} ${diag.severity} ${diag.message}\n`);
+    }
+    process.stderr.write(`mdlineage: cannot load config '${options.configFile}'\n`);
+    return 2;
+  }
+
+  const degraded: string[] = [];
+  for (const diag of loaded.diagnostics) {
+    const line = `${diag.code} ${diag.severity} ${diag.message}`;
+    process.stderr.write(`mdlineage: ${line}\n`);
+    degraded.push(line);
+  }
+
+  const universe = scanWorkspaceUniverse(options.cwd, loaded.config);
+  const sections: CorpusSection[] = [];
+  const docsMeta = new Map<string, CandidateDocMeta>();
+
+  for (const [path, content] of universe.documents) {
+    if (!isInTreeRealpath(options.cwd, path)) {
+      const note = `skipped out-of-tree symlink: ${path}`;
+      process.stderr.write(`mdlineage: ${note}\n`);
+      degraded.push(note);
+      continue;
+    }
+    docsMeta.set(path, extractDocMeta(content));
+    for (const section of extractSections(content)) {
+      sections.push({ path, slug: section.slug, title: section.title, text: section.text });
+    }
+  }
+
+  if (options.sourcePath !== undefined && !docsMeta.has(options.sourcePath)) {
+    process.stderr.write(`mdlineage: source document '${options.sourcePath}' not found in workspace universe\n`);
+    return 2;
+  }
+
+  const searchOptions: RetrieveSearchOptions = {
+    ...options,
+    query: '',
+  };
+  const resolved = await resolveProviders(searchOptions);
+  for (const note of resolved.notes) {
+    process.stderr.write(`mdlineage: ${note}\n`);
+    degraded.push(note);
+  }
+
+  let outcome;
+  try {
+    outcome = await discoverCandidatePairs({
+      sections,
+      docsMeta,
+      sourcePath: options.sourcePath,
+      top: options.top,
+      threshold: options.threshold,
+      mode: resolved.mode,
+      filterExisting: true,
+      ...(resolved.embedder === undefined ? {} : { embedder: resolved.embedder }),
+      ...(resolved.reranker === undefined ? {} : { reranker: resolved.reranker }),
+      ...(resolved.store === undefined ? {} : { store: resolved.store }),
+    });
+  } finally {
+    await resolved.embedder?.dispose();
+    await resolved.reranker?.dispose();
+  }
+
+  for (const note of outcome.degraded) {
+    process.stderr.write(`mdlineage: ${note}\n`);
+    degraded.push(note);
+  }
+
+  const results = outcome.pairs.map((pair, i) => ({
+    rank: i + 1,
+    sourcePath: pair.sourcePath,
+    sourceSlug: pair.sourceSlug,
+    targetPath: pair.targetPath,
+    targetSlug: pair.targetSlug,
+    targetId: pair.targetId,
+    score: pair.score,
+    scoreKind: pair.scoreKind,
+    evidenceAnchor: pair.evidenceAnchor,
+    snippet: pair.snippet,
+  }));
+
+  if (options.format === 'json') {
+    process.stdout.write(
+      `${JSON.stringify({ mode: resolved.mode, source: options.sourcePath, pairs: results, degraded }, null, 2)}\n`,
+    );
+  } else if (results.length === 0) {
+    process.stdout.write(`mdlineage: no candidate relation pairs discovered\n`);
+  } else {
+    for (const r of results) {
+      const targetLabel = r.targetId ? `${r.targetPath}${r.evidenceAnchor} (${r.targetId})` : `${r.targetPath}${r.evidenceAnchor}`;
+      process.stdout.write(
+        `${r.rank}  ${r.sourcePath}#${r.sourceSlug} -> ${targetLabel}  ${r.score.toFixed(4)} [${r.scoreKind}]  ${r.snippet}\n`,
+      );
+    }
+    process.stdout.write(
+      `mdlineage: ${results.length} candidate pair${results.length === 1 ? '' : 's'} discovered (${resolved.mode})\n`,
+    );
+  }
+
+  return 0;
 }

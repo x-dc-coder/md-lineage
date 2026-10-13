@@ -52,3 +52,10 @@ export {
   type SearchRequest,
   type SearchOutcome,
 } from './pipeline.js';
+export {
+  discoverCandidatePairs,
+  type CandidateDocMeta,
+  type CandidatePair,
+  type DiscoverOptions,
+  type DiscoverOutcome,
+} from './discover.js';
