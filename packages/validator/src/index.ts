@@ -48,6 +48,19 @@ export {
   createFederatedIndex,
   type FederatedMemberMount,
 } from './federation.js';
+export {
+  DISCOVERY_SKIP_DIRS,
+  MAX_DISCOVER_UP_LEVELS,
+  slugifyScopeName,
+  assignDiscoveryScopes,
+  buildFederationProposal,
+  renderFederationYaml,
+  type ScopeAssignment,
+  type FederationProposal,
+  type FederationProposalEntry,
+  type FederationProposalSkipped,
+  type FederationSkipReason,
+} from './federation-discover.js';
 export { layoutDiagnostics, layoutExemptsFrontmatter, type LayoutDiagnosticsParams } from './layout.js';
 export {
   MS_PER_DAY,
