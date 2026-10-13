@@ -64,7 +64,11 @@ Usage:
   mdlineage baseline verify         CI gate: diagnostics must match the baseline
   mdlineage server --stdio          Run the language server over stdio
   mdlineage mcp --stdio             Run the MCP server over stdio
-  mdlineage init                    Bootstrap config, manifest skeleton, .gitattributes and schemas/ (dry run)
+  mdlineage init [--discover-federations] [--discover-depth <N>]
+                                    Bootstrap config, manifest skeleton,
+                                    .gitattributes and schemas/ (dry run);
+                                    --discover-federations proposes federations:
+                                    entries for sibling repositories
   mdlineage manifest seed [paths...]
                                     Generate missing manifest entries for documents (dry run)
   mdlineage suggest <file>          Propose metadata for a document (no writes)
@@ -120,6 +124,11 @@ Options:
                               the file and write the repaired documents;
                               organize: execute the planned moves (default is a
                               dry run)
+  --discover-federations      init: scan sibling repositories (directories with
+                              their own mdlineage.config.yaml) and propose
+                              federations: entries (dry run unless --write)
+  --discover-depth <N>        init: ancestor levels to scan above the repository
+                              root (default 1, maximum 2)
   --dry-run                   move: print the plan even when --write is given
   --apply                     organize: execute the planned moves (--write alias)
   --scope <glob>              organize: analyse only the matching documents
@@ -184,6 +193,8 @@ interface ParsedArgs {
     force?: boolean;
     'report-only'?: boolean;
     write?: boolean;
+    'discover-federations'?: boolean;
+    'discover-depth'?: string;
     'dry-run'?: boolean;
     apply?: boolean;
     plan?: boolean;
@@ -244,6 +255,10 @@ function readArgs(argv: string[]): ParsedArgs {
       // the two shapes those commands need.
       write: { type: 'boolean' },
       json: { type: 'boolean' },
+      // `mdlineage init --discover-federations [--discover-depth <N>]`: scan
+      // sibling repositories for a federation proposal.
+      'discover-federations': { type: 'boolean' },
+      'discover-depth': { type: 'string' },
       'dry-run': { type: 'boolean' },
       apply: { type: 'boolean' },
       plan: { type: 'boolean' },
@@ -310,7 +325,12 @@ export async function main(argv: string[]): Promise<number> {
       return runSuggest(parsed.positionals.slice(1), parsed.values);
     }
     if (command === 'init') {
-      return runInit(parsed.positionals.slice(1), parsed.values);
+      return runInit(parsed.positionals.slice(1), {
+        write: parsed.values.write,
+        config: parsed.values.config,
+        discoverFederations: parsed.values['discover-federations'] === true,
+        ...parseDiscoverDepth(parsed.values['discover-depth']),
+      });
     }
     if (command === 'manifest') {
       const sub = parsed.positionals[1];
@@ -394,6 +414,16 @@ export async function main(argv: string[]): Promise<number> {
 function parseFormat(value: string | undefined): Format | null {
   if (value === undefined) return 'text';
   return (FORMATS as readonly string[]).includes(value) ? (value as Format) : null;
+}
+
+/** Validate `--discover-depth <N>`: a positive integer within the scan ceiling. */
+function parseDiscoverDepth(value: string | undefined): { maxUpLevels?: number } {
+  if (value === undefined) return {};
+  const depth = Number(value);
+  if (!Number.isInteger(depth) || depth < 1 || depth > 2) {
+    throw new UsageError(`--discover-depth must be 1 or 2, got '${value}'`);
+  }
+  return { maxUpLevels: depth };
 }
 
 interface RunOptions {

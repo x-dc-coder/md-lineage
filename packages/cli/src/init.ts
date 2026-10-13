@@ -14,8 +14,19 @@
 import { existsSync, readFileSync, writeFileSync, mkdirSync, appendFileSync } from 'node:fs';
 import { cwd as processCwd } from 'node:process';
 import { resolve, join } from 'node:path';
-import { loadConfig, stripBom, type EolPolicy } from '@mdlineage/validator';
+import {
+  loadConfig,
+  stripBom,
+  assignDiscoveryScopes,
+  buildFederationProposal,
+  renderFederationYaml,
+  type Config,
+  type EolPolicy,
+  type FederationProposal,
+} from '@mdlineage/validator';
+import { parseDocument } from 'yaml';
 import { repositoryRoot } from './git.js';
+import { collectDiscoveryCandidates, existingFederationRoots } from './discover-federations.js';
 
 const CONFIG_FILE = 'mdlineage.config.yaml';
 const ATTR_FILE = '.gitattributes';
@@ -139,8 +150,25 @@ function plan(root: string, policy: string): Step[] {
   return steps;
 }
 
+/** Options `init` honours beyond its flags (assembled by `main.ts`). */
+export interface InitValues {
+  readonly write?: boolean;
+  readonly config?: string;
+  /** `--discover-federations`: scan sibling repositories for a proposal. */
+  readonly discoverFederations?: boolean;
+  /** `--discover-depth <N>`: ancestor levels to scan (default 1, max 2). */
+  readonly maxUpLevels?: number;
+}
+
+/** The discovery scan plus the proposal and skips it produced. */
+interface DiscoveryReport {
+  readonly candidateCount: number;
+  readonly proposal: FederationProposal;
+  readonly errors: readonly string[];
+}
+
 /** `mdlineage init`: print the plan; only `--write` touches the filesystem. */
-export function runInit(args: string[], values: { write?: boolean; config?: string }): number {
+export function runInit(args: string[], values: InitValues): number {
   const stray = args.filter((arg) => arg.startsWith('-'));
   if (stray.length > 0) {
     process.stderr.write(`mdlineage: unknown option: ${stray.join(', ')}\n\n`);
@@ -162,9 +190,23 @@ export function runInit(args: string[], values: { write?: boolean; config?: stri
   // The bootstrap is a repository-level contract; fall back to the CWD when
   // there is no git repository to anchor at.
   const root = repositoryRoot(cwd) ?? resolve(cwd);
-  // The config is only consulted for its line-ending policy: a repository that
-  // declares one gets the attribute that matches it.
-  const policy = attrPolicyLine(loadConfig(undefined, root).config.eolPolicy);
+  const configPath = join(root, CONFIG_FILE);
+  // The config anchored at this repository (never a parent's), consulted for the
+  // line-ending policy and for the scopes discovery must avoid.
+  const loaded = loadConfig(existsSync(configPath) ? configPath : undefined, root);
+  const policy = attrPolicyLine(loaded.config.eolPolicy);
+
+  let discovery: DiscoveryReport | null = null;
+  if (values.discoverFederations === true) {
+    try {
+      discovery = discover(root, loaded.config, values.maxUpLevels);
+    } catch (error) {
+      process.stderr.write(
+        `mdlineage: cannot scan for sibling repositories: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      return 1;
+    }
+  }
 
   let steps: Step[];
   try {
@@ -176,19 +218,26 @@ export function runInit(args: string[], values: { write?: boolean; config?: stri
     return 1;
   }
   const changes = steps.filter((step) => step.apply !== null);
+  const pendingFederation = discovery !== null && discovery.proposal.entries.length > 0;
 
   for (const step of steps) {
     process.stdout.write(`mdlineage: ${step.describe}\n`);
   }
-  if (changes.length === 0) {
+  if (discovery !== null) reportDiscovery(discovery);
+
+  if (changes.length === 0 && !pendingFederation) {
     process.stdout.write('mdlineage: nothing to do, already initialized\n');
     suggestEmbedLocal();
     return 0;
   }
   if (values.write !== true) {
-    process.stdout.write(
-      `mdlineage: dry run, nothing written (${changes.length} change${changes.length === 1 ? '' : 's'}; pass --write to apply)\n`,
-    );
+    const parts: string[] = [];
+    if (changes.length > 0) parts.push(`${changes.length} change${changes.length === 1 ? '' : 's'}`);
+    if (pendingFederation) {
+      const n = discovery?.proposal.entries.length ?? 0;
+      parts.push(`${n} federation${n === 1 ? '' : 's'}`);
+    }
+    process.stdout.write(`mdlineage: dry run, nothing written (${parts.join(', ')}; pass --write to apply)\n`);
     suggestEmbedLocal();
     return 0;
   }
@@ -207,8 +256,98 @@ export function runInit(args: string[], values: { write?: boolean; config?: stri
       return 1;
     }
   }
+
+  if (discovery !== null && discovery.proposal.entries.length > 0) {
+    try {
+      const added = mergeFederations(configPath, discovery.proposal);
+      process.stdout.write(
+        added.length === 0
+          ? `mdlineage: ${CONFIG_FILE}: federations already up to date\n`
+          : `mdlineage: ${CONFIG_FILE}: added federations ${added.join(', ')}\n`,
+      );
+    } catch (error) {
+      process.stderr.write(
+        `mdlineage: cannot update ${CONFIG_FILE}: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+      return 1;
+    }
+  }
   suggestEmbedLocal();
   return 0;
+}
+
+/**
+ * Run the filesystem scan and shape its candidates into a proposal.
+ *
+ * The scope pool is seeded with the scopes this config already declares and
+ * with the reserved names (via `assignDiscoveryScopes`), and candidates whose
+ * physical root is already mounted are dropped as `already-declared`.
+ */
+function discover(root: string, config: Config, maxUpLevels?: number): DiscoveryReport {
+  const scan = collectDiscoveryCandidates(root, maxUpLevels === undefined ? {} : { maxUpLevels });
+  const existingRoots = existingFederationRoots(config, scan.homeRoot);
+  const taken = new Set<string>(config.federations.keys());
+  const assignments = assignDiscoveryScopes(
+    scan.candidates.map((c) => ({ root: c.root, basename: c.basename })),
+    taken,
+  );
+  const proposal = buildFederationProposal(scan.homeRoot, assignments, existingRoots);
+  return {
+    candidateCount: scan.candidates.length,
+    proposal,
+    errors: scan.errors,
+  };
+}
+
+/** Print the discovery result: candidates, skips, and the YAML to append. */
+function reportDiscovery(report: DiscoveryReport): void {
+  const { entries, skipped } = report.proposal;
+  process.stdout.write(
+    `mdlineage: discover-federations: ${report.candidateCount} candidate repositor${report.candidateCount === 1 ? 'y' : 'ies'} found\n`,
+  );
+  for (const error of report.errors) {
+    process.stderr.write(`mdlineage: discovery: ${error}\n`);
+  }
+  for (const entry of entries) {
+    process.stdout.write(`mdlineage:   + ${entry.scope} -> ${entry.alias} (${entry.localPath})\n`);
+  }
+  for (const skip of skipped) {
+    process.stdout.write(`mdlineage:   - ${skip.reason}: ${skip.scope} (${skip.root})\n`);
+  }
+  const yaml = renderFederationYaml(entries);
+  if (yaml.length > 0) {
+    process.stdout.write(`mdlineage: federations to add (pass --write to apply):\n${yaml}`);
+  }
+}
+
+/**
+ * Merge new federation entries into `mdlineage.config.yaml`.
+ *
+ * Uses the `yaml` Document API so existing keys keep their comments and the
+ * repository's other configuration; a scope the file already declares is left
+ * untouched, and only genuinely new scopes are appended. Returns the scope
+ * names added (empty when the file was already up to date).
+ */
+function mergeFederations(configPath: string, proposal: FederationProposal): string[] {
+  const text = stripBom(readFileSync(configPath, 'utf8'));
+  const doc = parseDocument(text);
+  if (doc.errors.length > 0) {
+    throw new Error(`mdlineage.config.yaml is not valid YAML: ${doc.errors[0]?.message ?? 'unknown error'}`);
+  }
+
+  const added: string[] = [];
+  for (const entry of proposal.entries) {
+    if (doc.hasIn(['federations', entry.scope])) continue;
+    doc.setIn(['federations', entry.scope], {
+      local: { path: entry.localPath },
+      trust: entry.trust,
+      missing: entry.missing,
+      include: [...entry.include],
+    });
+    added.push(entry.scope);
+  }
+  if (added.length > 0) writeFileSync(configPath, doc.toString());
+  return added;
 }
 
 /** Points at the optional local ONNX package. Init never installs it. */
