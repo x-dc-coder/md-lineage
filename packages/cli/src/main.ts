@@ -190,6 +190,8 @@ interface ParsedArgs {
     inventory?: boolean;
     report?: boolean;
     scope?: string;
+    source?: string;
+    threshold?: string;
     top?: string;
     mode?: string;
     rerank?: string;
@@ -694,7 +696,7 @@ async function runRetrieveSetup(args: string[], values: ParsedArgs['values']): P
   });
 }
 
-async function runRetrieveDiscover(args: string[], values: ParsedArgs['values']): Promise<number> {
+async function runRetrieveDiscover(_args: string[], values: ParsedArgs['values']): Promise<number> {
   const format = parseFormat(values.format);
   if (format === null || format === 'sarif') {
     process.stderr.write(`mdlineage: retrieve discover --format must be text or json\n`);

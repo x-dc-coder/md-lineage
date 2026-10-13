@@ -28,7 +28,6 @@ import {
   discoverCandidatePairs,
   type Bm25Doc,
   type CandidateDocMeta,
-  type CandidatePair,
   type CorpusSection,
   type EmbeddingProvider,
   type RerankProvider,
@@ -311,12 +310,11 @@ export interface RetrieveDiscoverOptions {
 
 function extractDocMeta(content: string): CandidateDocMeta {
   const boundary = scanBoundary(content);
-  if (!boundary || !boundary.hasFrontmatter) return {};
+  if (!boundary) return {};
   const lineMap = buildLineMap(content);
-  const parsed = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
-  const data = parsed.data;
-  if (!data || typeof data !== 'object') return {};
-  const mdlineage = (data as Record<string, unknown>).mdlineage;
+  const { parsed } = parseFrontmatter(boundary.raw, boundary.rawStart, lineMap);
+  if (!parsed || !parsed.data || typeof parsed.data !== 'object') return {};
+  const mdlineage = parsed.data.mdlineage;
   if (!mdlineage || typeof mdlineage !== 'object') return {};
   const id =
     typeof (mdlineage as Record<string, unknown>).id === 'string'
