@@ -30,3 +30,13 @@ test('catalog lists four profiles and pins every published file', () => {
     }
   }
 });
+
+test('catalog supports altSha256 for patched upstream models', () => {
+  const catalog = loadCatalog();
+  const rerankProfile = catalog.find((p) => p.id === 'local:qwen3-reranker-0.6b');
+  assert.ok(rerankProfile);
+  const onnx = rerankProfile.files.find((f) => f.path === rerankProfile.onnxFile);
+  assert.ok(onnx);
+  assert.ok(onnx.altSha256);
+  assert.match(onnx.altSha256, PIN);
+});

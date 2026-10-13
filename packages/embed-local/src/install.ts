@@ -22,10 +22,11 @@ export async function assessInstalled(profile: CatalogProfile, modelDir: string)
     // Full sha256 of the 600MB weights costs ~4s per CLI invocation; skip
     // it when size and mtime match the last verified state (sidecar next
     // to the weights, refreshed only after a digest actually matched).
-    if (verifyFastPath(abs, file.sha256)) continue;
+    if (verifyFastPath(abs, file.sha256) || (file.altSha256 !== undefined && verifyFastPath(abs, file.altSha256))) continue;
     const digest = await sha256File(abs);
-    if (digest !== file.sha256) problems.push(`checksum mismatch ${file.path}`);
-    else recordVerified(abs, file.sha256);
+    const matches = digest === file.sha256 || (file.altSha256 !== undefined && digest === file.altSha256);
+    if (!matches) problems.push(`checksum mismatch ${file.path}`);
+    else recordVerified(abs, digest);
   }
   return { ready: problems.length === 0, problems };
 }

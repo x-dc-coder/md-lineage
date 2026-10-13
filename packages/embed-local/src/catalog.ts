@@ -7,6 +7,7 @@ export const DEFAULT_RERANK_PROFILE_ID = 'local:qwen3-reranker-0.6b';
 export interface CatalogFile {
   readonly path: string;
   readonly sha256: string;
+  readonly altSha256?: string;
 }
 
 export interface CatalogProfile {
@@ -94,7 +95,11 @@ function parseFile(raw: unknown, profileId: string, index: number): CatalogFile 
   if (sha256 !== '' && !PIN.test(sha256)) {
     throw new Error(`models.json: ${profileId} ${path} sha256 must be empty or 64 hex chars`);
   }
-  return { path, sha256 };
+  const altSha256 = typeof raw.altSha256 === 'string' ? raw.altSha256 : undefined;
+  if (altSha256 !== undefined && !PIN.test(altSha256)) {
+    throw new Error(`models.json: ${profileId} ${path} altSha256 must be 64 hex chars`);
+  }
+  return { path, sha256, ...(altSha256 === undefined ? {} : { altSha256 }) };
 }
 
 function requiredString(raw: Record<string, unknown>, key: string, index: number, allowEmpty = false): string {

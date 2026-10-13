@@ -331,6 +331,7 @@ async function evaluate() {
         model: opened.embedder.meta.model,
         dtype: typeof opened.embedder.meta.dtype === 'string' ? opened.embedder.meta.dtype : 'q8',
         dim: opened.embedder.meta.dim,
+        algo: opened.embedder.meta.algo,
       });
       // The product default is 5s. On CPU a 50-candidate YesNo window does not
       // finish in 5s, and the pipeline would then keep RRF order. This mode

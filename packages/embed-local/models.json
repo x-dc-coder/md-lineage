@@ -28,7 +28,11 @@
         { "path": "config.json", "sha256": "af5909d9cd23cabb646d90250ab8ebb97d3e994fe8d873c6109d52421f128f67" },
         { "path": "tokenizer.json", "sha256": "8579e1ca7cc5d82a9e0202eed555529996f4ffe7f563c2979a0290cf3db452d3" },
         { "path": "tokenizer_config.json", "sha256": "bc3e7cb4dad833a185d4bfbb4880562dc9b0cb101c47b8985078122a122d553a" },
-        { "path": "onnx/model_yesno_quantized.onnx", "sha256": "2bc0a77812a15ff6ead003370f36149139ae2c1bb1faf779b00c00886cd919ef" }
+        {
+          "path": "onnx/model_yesno_quantized.onnx",
+          "sha256": "2bc0a77812a15ff6ead003370f36149139ae2c1bb1faf779b00c00886cd919ef",
+          "altSha256": "1b0cc712bff4daba6fec62136a5809766d5fe594bc6c597df3fb07d94282f99e"
+        }
       ]
     },
     {
