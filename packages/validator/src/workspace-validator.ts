@@ -18,6 +18,8 @@
  *             reported once per strongly connected component
  *   - MDL401  a Markdown link whose path resolves to no indexed document
  *   - MDL402  a relation evidence anchor absent from the target's headings
+ *   - MDL404  a shell code-fence command whose argument path resolves to no
+ *             indexed document (opt-in via `links.codeFences: 'corpus'`)
  *
  * MDL303 stays unreachable (reserved): the index resolves targets by id only and
  * MDL301 guarantees id uniqueness, so an ambiguous target cannot exist.
@@ -42,6 +44,7 @@ import { resolveLinkPath } from './workspace-index.js';
 import type { Baseline } from './baseline.js';
 import { suppressWithBaseline } from './baseline.js';
 import { checkHostLink } from './host-links.js';
+import { resolveCorpusPath } from './code-fence-links.js';
 import { scopedPath, isExternalPath } from './federation.js';
 
 /** A read-only empty neighbour list, reused for every node without edges. */
@@ -132,6 +135,7 @@ export function validateWorkspace(
       ...mdl304(entry, config),
       ...mdl401(entry, index, config, options.root, fileLinesCache),
       ...mdl402(entry, index, config),
+      ...mdl404(entry, index, config),
     );
 
     // MDL801 Git fallback clock for documents without authored timestamps
@@ -826,6 +830,47 @@ function mdl402(entry: DocEntry, index: WorkspaceIndex, config: Config): Workspa
 }
 
 /**
+ * MDL404 — a shell code-fence command whose argument path resolves to no
+ * document in the workspace.
+ *
+ * Opt-in: `links.codeFences: 'corpus'` is the only value that reports; the
+ * default `'off'` returns nothing, so every existing corpus and baseline is
+ * untouched. Extraction happened unconditionally at index time (`DocEntry.
+ * fenceLinks`); only the judgment is gated here.
+ *
+ * Two independent guards keep the report inside the corpus:
+ *   - a token whose `..` segments escape the corpus root is a host path —
+ *     MDL403's jurisdiction, never "a missing file";
+ *   - a token that folds onto the corpus root itself (`./`, `a/..`) names the
+ *     one target that always exists.
+ * Resolution then reuses MDL401's `resolveLinkPath` (document-directory
+ * first, root-relative fallback, `knowsPath` for scanned non-Markdown files),
+ * so a fence command and a Markdown link spelled the same way get the same
+ * answer. One diagnostic per occurrence, positioned exactly on the token.
+ */
+function mdl404(entry: DocEntry, index: WorkspaceIndex, config: Config): WorkspaceDiagnostic[] {
+  if (config.links.codeFences !== 'corpus') return [];
+  const out: WorkspaceDiagnostic[] = [];
+  for (const fence of entry.fenceLinks) {
+    const corpusPath = resolveCorpusPath(entry.path, fence.token);
+    if (corpusPath === null || corpusPath === '') continue; // escapes corpus root / the root itself
+    if (resolveLinkPath(index, entry.path, fence.token).length > 0) continue;
+    out.push(
+      build(
+        'MDL404',
+        `Code fence references a path that does not exist: ${fence.token}`,
+        entry,
+        fence.offset,
+        config,
+        { token: fence.token },
+        fence.offset + fence.token.length,
+      ),
+    );
+  }
+  return out;
+}
+
+/**
  * MDL801 — Git-backed fallback freshness check for documents without authored timestamps.
  */
 function mdl801Git(
@@ -855,6 +900,7 @@ function build(
   offset: number,
   config: Config,
   data?: Record<string, unknown>,
+  end?: number,
 ): WorkspaceDiagnostic {
   const overrides = config.diagnostics as Record<string, 'error' | 'warning' | 'information' | 'hint'>;
   return {
@@ -863,8 +909,9 @@ function build(
     message,
     // The range is clamped to the end of the offending line: a rule that names
     // a declaration often has no precise end, and an unclamped width would run
-    // past the line into territory a highlight cannot show.
-    range: rangeAt(entry.lineMap, offset, lineEnd(entry.lineMap, offset)),
+    // past the line into territory a highlight cannot show. A caller that DOES
+    // know the end (MDL404's token) passes it and wins over the clamp.
+    range: rangeAt(entry.lineMap, offset, end ?? lineEnd(entry.lineMap, offset)),
     layer: layerOf(code) ?? 'workspace-semantic',
     path: entry.path,
     ...(data ? { data } : {}),

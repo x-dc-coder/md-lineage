@@ -515,6 +515,78 @@ Link to [skills](../member-a/docs/x.md).
     ]);
   });
 
+  it('case 18: MDL404 inside a federated member — member-internal resolution, warning preserved', () => {
+    const config = { ...defaultConfig(), links: { ...defaultConfig().links, codeFences: 'corpus' } };
+    const home = createWorkspaceIndex(
+      {
+        // The home fence points INTO the member through the physical alias,
+        // the same coordinate the link layer resolves (case 14).
+        'docs/home.md': [
+          '---',
+          'mdlineage:',
+          '  schema: 1',
+          '  id: docs.home',
+          '  kind: guide',
+          '  status: active',
+          '---',
+          '',
+          '```bash',
+          'python member-a/scripts/exists.py',
+          'python member-a/scripts/missing.py',
+          '```',
+          '',
+        ].join('\n'),
+      },
+      config
+    );
+    const member = createWorkspaceIndex(
+      {
+        'docs/x.md': [
+          '---',
+          'mdlineage:',
+          '  schema: 1',
+          '  id: docs.x',
+          '  kind: guide',
+          '  status: active',
+          '---',
+          '',
+          '```bash',
+          'python scripts/exists.py',
+          'python scripts/missing.py',
+          '```',
+          '',
+        ].join('\n'),
+        'scripts/exists.py': '#!/usr/bin/env python3\n',
+      },
+      config
+    );
+
+    // The member's own index (how the LSP routes member documents): the
+    // existing member path resolves document-relatively, only the missing one
+    // reports.
+    const solo = validateWorkspace(member, { includeSingleDocument: false }).filter((d) => d.code === 'MDL404');
+    assert.equal(solo.length, 1, 'member-internal existing path does not report in the member index');
+    assert.equal(solo[0]!.path, 'docs/x.md');
+    assert.equal(solo[0]!.data?.token, 'scripts/missing.py');
+
+    const proxy = createFederatedIndex(home, new Map([['member-a', { scope: 'member-a', index: member, alias: 'member-a' }]]));
+    const all = validateWorkspace(proxy, { includeSingleDocument: false });
+    const home404 = all.filter((d) => d.code === 'MDL404' && d.path === 'docs/home.md');
+    assert.equal(home404.length, 1, 'home fence to the missing member path reports once');
+    assert.equal(home404[0]!.data?.token, 'member-a/scripts/missing.py');
+    assert.equal(
+      all.some((d) => d.code === 'MDL404' && d.data?.token === 'member-a/scripts/exists.py'),
+      false,
+      'home fence to the existing member path resolves via the alias and stays silent'
+    );
+
+    // MDL404 is link-layer: applyExternalScopePolicy neither drops it nor
+    // alters its warning severity on external paths.
+    const capped = applyExternalScopePolicy(all.filter((d) => d.code === 'MDL404'));
+    for (const d of capped) assert.equal(d.severity, 'warning');
+    assert.ok(capped.length >= 1, 'the member fence diagnostic survives the sovereignty policy');
+  });
+
   it('case 17: updateFile on federated proxy throws Error (read-only enforcement)', () => {
     const config = defaultConfig();
     const home = createWorkspaceIndex({}, config);

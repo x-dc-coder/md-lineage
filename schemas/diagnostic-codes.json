@@ -161,6 +161,13 @@
       "description": "Markdown link targets a host-absolute or home-relative path (~ or $HOME). These links depend on machine-local filesystem state and may not be portable across environments."
     },
     {
+      "code": "MDL404",
+      "layer": "link",
+      "severity": "warning",
+      "message": "Code fence references a path that does not exist",
+      "description": "A command inside a fenced code block (info string bash, sh, shell or console) carries a relative path in its argument position that resolves to no file or directory in the corpus: document-directory-relative first, corpus-root-relative as fallback. Paths escaping the corpus root and absolute, home-relative, env-expanded or URL forms are excluded (MDL403 owns host paths). Opt-in via links.codeFences: 'corpus'; the default 'off' emits nothing. Out of scope (v1): command-flag semantics (missing flags, subcommand drift), tree-diagram fences, non-shell language fences, and paths that resolve outside the corpus root."
+    },
+    {
       "code": "MDL501",
       "layer": "policy-layout",
       "severity": "warning",

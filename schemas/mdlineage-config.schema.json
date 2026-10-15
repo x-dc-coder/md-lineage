@@ -159,7 +159,7 @@
           "MDL101", "MDL102", "MDL103", "MDL104", "MDL105",
           "MDL201", "MDL202", "MDL203",
           "MDL301", "MDL302", "MDL303", "MDL304", "MDL305", "MDL306", "MDL307", "MDL308",
-          "MDL401", "MDL402", "MDL403",
+          "MDL401", "MDL402", "MDL403", "MDL404",
           "MDL501", "MDL502", "MDL503", "MDL504", "MDL505",
           "MDL601", "MDL602",
           "MDL801"
@@ -437,6 +437,12 @@
           "enum": ["always", "warning", "forbidden"],
           "default": "warning",
           "description": "Policy for host-style link targets (always: accept without diagnostic if target exists; warning: warn about non-portable host paths; forbidden: treat all host paths as errors)."
+        },
+        "codeFences": {
+          "type": "string",
+          "enum": ["off", "corpus"],
+          "default": "off",
+          "description": "代码围栏路径探知（MDL404）。off（默认）：完全不检查，行为与历史版本一致，零新增诊断；corpus：只检查解析后落在语料根内的相对路径（文档目录优先、语料根相对回退，与 MDL401 同优先级），目标不存在报 MDL404 warning。三态中的 all 档被本 schema 显式拒绝（写成 all 将得到 MDL900 并回退默认 off）：语料外相对路径以什么为根未定义，不做静默降级。"
         }
       }
     },

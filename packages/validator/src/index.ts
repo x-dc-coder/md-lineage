@@ -102,6 +102,14 @@ export { validateDocumentSemantics, relationOffsetsOf, mdlineageFieldOffset, col
 export { Slugger, slugifyHeading } from './slugger.js';
 export { extractSections, estimateTokens, type Section } from './sections.js';
 export type { ValidateInput, ValidateResult } from './index-types.js';
+export {
+  SHELL_FENCE_LANGS,
+  isCheckableFenceToken,
+  extractPathTokens,
+  extractFenceLinks,
+  resolveCorpusPath,
+} from './code-fence-links.js';
+export type { FenceLinkEntry, PathToken } from './code-fence-links.js';
 export type { WorkspaceIndex, DocEntry, DocPath, RelationEntry, LinkEntry, UpdateResult, RelationTargetResolution } from './workspace-index.js';
 export {
   createWorkspaceIndex,

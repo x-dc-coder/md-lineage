@@ -36,6 +36,8 @@ import { validateDocumentSync } from './index.js';
 import { collectAnchors, collectHeadingTexts, mdlineageFieldOffset, visitTree } from './document-validator.js';
 import type { RelationOffsets } from './document-validator.js';
 import { relationOffsetsOf } from './document-validator.js';
+import { extractFenceLinks, resolveCorpusPath } from './code-fence-links.js';
+import type { FenceLinkEntry } from './code-fence-links.js';
 import { scanBoundary, parseFrontmatter } from './parse-frontmatter.js';
 import { resolveMetadata } from './metadata.js';
 import { buildLineMap } from './source-map.js';
@@ -93,6 +95,13 @@ export interface DocEntry {
   readonly createdAt: string | null;
   readonly relations: readonly RelationEntry[];
   readonly links: readonly LinkEntry[];
+  /**
+   * Path tokens extracted from shell code fences (MDL404's candidates),
+   * extracted unconditionally: the entry describes the DOCUMENT, not a
+   * configuration state, so a `links.codeFences` change never needs a
+   * re-index. Empty for documents without shell fences.
+   */
+  readonly fenceLinks: readonly FenceLinkEntry[];
   /** Heading anchors of the document (GFM slugs); empty when the body did not parse. */
   readonly anchors: ReadonlySet<string>;
   /**
@@ -259,6 +268,13 @@ class IndexImpl implements WorkspaceIndex {
    */
   private readonly referrersByPath = new Map<string, Set<DocPath>>();
   /**
+   * Code-fence candidates (MDL404) keyed by the path each token resolves to.
+   * Mirror of `referrersByPath` for the affected set ONLY: it is deliberately
+   * kept off the public `linkReferrersOf`, which is the LSP references and
+   * federation-routing API — a fence mention is not a document reference.
+   */
+  private readonly fenceReferrersByPath = new Map<string, Set<DocPath>>();
+  /**
    * Workspace files the caller scanned but did not index as documents (schemas,
    * configs, images). Metadata handed in by the scanner — never read off disk
    * here — so MDL401 can tell "absent from the repository" from "not Markdown".
@@ -335,6 +351,15 @@ class IndexImpl implements WorkspaceIndex {
     return sorted(this.referrersByPath.get(path));
   }
 
+  /**
+   * Paths whose shell code fences resolve to `path` (MDL404's reverse edge).
+   * Private on purpose — see `fenceReferrersByPath`: the affected set reads
+   * it, the public query surface does not.
+   */
+  private fenceReferrersOf(path: DocPath): readonly DocPath[] {
+    return sorted(this.fenceReferrersByPath.get(path));
+  }
+
   anchorsOf(path: DocPath): ReadonlySet<string> {
     return this.entries.get(path)?.anchors ?? EMPTY_STRINGS;
   }
@@ -368,6 +393,7 @@ class IndexImpl implements WorkspaceIndex {
     // exactly what flips a referrer's MDL401, so those referrers are collected
     // once here, after the swap.
     for (const p of this.linkReferrersOf(path)) affected.add(p);
+    for (const p of this.fenceReferrersOf(path)) affected.add(p);
     return affected;
   }
 
@@ -383,6 +409,7 @@ class IndexImpl implements WorkspaceIndex {
     // the reverse map answers the same set before and after `unindex` — one
     // call here is enough.
     for (const p of this.linkReferrersOf(path)) affected.add(p);
+    for (const p of this.fenceReferrersOf(path)) affected.add(p);
     for (const rel of previous.relations) {
       for (const target of this.idToPaths(rel.target)) affected.add(target);
     }
@@ -410,6 +437,9 @@ class IndexImpl implements WorkspaceIndex {
       if (!link.path) continue;
       for (const p of this.resolveLinkTargets(link.path, entry.path)) affected.add(p);
     }
+    for (const fence of entry.fenceLinks) {
+      for (const p of this.resolveFenceTargets(fence.token, entry.path)) affected.add(p);
+    }
   }
 
   /** Add one entry's derived edges to every reverse map. */
@@ -425,6 +455,11 @@ class IndexImpl implements WorkspaceIndex {
         referrersSet(this.referrersByPath, target).add(path);
       }
     }
+    for (const fence of entry.fenceLinks) {
+      for (const target of this.fenceTargetPaths(fence.token, entry.path)) {
+        referrersSet(this.fenceReferrersByPath, target).add(path);
+      }
+    }
   }
 
   /** Subtract one entry's derived edges from every reverse map. */
@@ -436,6 +471,11 @@ class IndexImpl implements WorkspaceIndex {
       dropReferrer(this.linkReferrers, link.path, path);
       for (const target of this.linkTargetPaths(link.path, entry.path)) {
         dropReferrer(this.referrersByPath, target, path);
+      }
+    }
+    for (const fence of entry.fenceLinks) {
+      for (const target of this.fenceTargetPaths(fence.token, entry.path)) {
+        dropReferrer(this.fenceReferrersByPath, target, path);
       }
     }
   }
@@ -466,6 +506,33 @@ class IndexImpl implements WorkspaceIndex {
       if (this.entries.has(candidate)) out.push(candidate);
     }
     return out;
+  }
+
+  /**
+   * The indexed paths a fence token can mean (MDL404's edge vocabulary).
+   *
+   * A token that escapes the corpus root (`resolveCorpusPath` null) has no
+   * reverse edge at all — MDL403's jurisdiction, never a fence target. The
+   * link-resolution and `entries.has` guards mirror `linkTargetPaths`, so an
+   * external or non-Markdown destination is not a key either.
+   */
+  private fenceTargetPaths(token: string, from: DocPath): readonly DocPath[] {
+    if (resolveCorpusPath(from, token) === null) return EMPTY_PATHS;
+    const out: DocPath[] = [];
+    for (const candidate of this.linkResolvesTo(token, from)) {
+      if (this.entries.has(candidate)) out.push(candidate);
+    }
+    return out;
+  }
+
+  /** Reverse-map direction of a fence token: which referrers to re-validate. */
+  private resolveFenceTargets(token: string, from: DocPath): readonly DocPath[] {
+    const out = new Set<DocPath>();
+    for (const candidate of this.fenceTargetPaths(token, from)) {
+      const set = this.fenceReferrersByPath.get(candidate);
+      if (set) for (const p of set) out.add(p);
+    }
+    return sorted(out);
   }
 
   /**
@@ -608,6 +675,8 @@ function parseDocument(path: DocPath, content: string, config: Config): DocEntry
     createdAt,
     relations: extractRelations(mdlineage),
     links: extractLinks(result.tree, result.bodyStart),
+    // Unconditional: the entry describes the document, not a config state.
+    fenceLinks: extractFenceLinks(content, result.tree, result.bodyStart, lineMap),
     rawStart,
     anchors: result.tree ? collectAnchors(result.tree) : EMPTY_STRINGS,
     headings: result.tree ? collectHeadingTexts(result.tree) : EMPTY_HEADINGS,

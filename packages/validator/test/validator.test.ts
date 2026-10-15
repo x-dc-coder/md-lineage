@@ -27,7 +27,8 @@ import {
   stripBom,
   scanBoundary,
 } from '../src/index.js';
-import { loadConfig } from '../src/config.js';
+import { loadConfig, resolveSeverity } from '../src/config.js';
+import { layerOf, severityOf } from '../src/diagnostic.js';
 import { validateDocumentSemantics, relationOffsetsOf } from '../src/document-validator.js';
 import { buildLineMap } from '../src/source-map.js';
 import type { Diagnostic } from '../src/index.js';
@@ -1221,5 +1222,54 @@ describe('MDL801 — authored clock matrix', () => {
     const marchFirst = parseAuthoredInstant('2020-03-01');
     assert.ok(rolled !== null && marchFirst !== null);
     assert.equal(rolled, marchFirst, '2020-02-30 rolls over to 2020-03-01 in setUTCFullYear');
+  });
+});
+
+describe('diagnostic code lockstep (registry ↔ diagnostic.ts ↔ config schema)', () => {
+  // Four places must agree on every code's severity and layer: the checked-in
+  // registry, diagnostic.ts's DEFAULT_SEVERITIES + LAYERS, config.ts's
+  // DEFAULT_SEVERITIES copy (feeding resolveSeverity) and the config schema's
+  // overridable-code whitelist. MDL404 (Issue #5) drifted once already in
+  // design — this guard makes the next drift a test failure.
+  interface RegistryEntry {
+    code: string;
+    layer: string;
+    severity: string;
+  }
+  const registry = (
+    JSON.parse(readFileSync(resolve(repoRoot, 'schemas', 'diagnostic-codes.json'), 'utf8')) as {
+      codes: RegistryEntry[];
+    }
+  ).codes;
+  const configSchema = JSON.parse(readFileSync(resolve(repoRoot, 'schemas', 'mdlineage-config.schema.json'), 'utf8')) as {
+    properties: { diagnostics: { propertyNames: { enum: string[] } } };
+  };
+  const overridable = new Set(configSchema.properties.diagnostics.propertyNames.enum);
+  // MDL9xx is the config-integrity block: produced before a Config exists and
+  // deliberately NOT severity-overridable (progress.md decision log, 2026-10-11).
+  const isConfigBlock = (code: string): boolean => code.startsWith('MDL9');
+
+  it('every overridable registry code is whitelisted in the config schema', () => {
+    for (const entry of registry) {
+      if (isConfigBlock(entry.code)) {
+        assert.equal(overridable.has(entry.code), false, `${entry.code} must stay non-overridable`);
+        continue;
+      }
+      assert.ok(overridable.has(entry.code), `${entry.code} is missing from diagnostics.propertyNames.enum`);
+    }
+  });
+
+  it('registry severity, severityOf and resolveSeverity(defaultConfig()) agree three ways', () => {
+    for (const entry of registry) {
+      if (isConfigBlock(entry.code)) continue;
+      assert.equal(severityOf(entry.code), entry.severity, `${entry.code} default severity (diagnostic.ts)`);
+      assert.equal(resolveSeverity(defaultConfig(), entry.code), entry.severity, `${entry.code} default severity (config.ts)`);
+    }
+  });
+
+  it('registry layer and layerOf agree', () => {
+    for (const entry of registry) {
+      assert.equal(layerOf(entry.code), entry.layer, `${entry.code} layer`);
+    }
   });
 });

@@ -101,9 +101,21 @@ export interface LayoutException {
   readonly expires?: string;
 }
 
+/**
+ * How MDL404 treats paths inside shell code fences.
+ *
+ * `off` (the default) emits nothing, keeping every existing corpus and
+ * baseline byte-identical. `corpus` checks only tokens that resolve inside
+ * the corpus root. There is deliberately no `all` value: which root an
+ * out-of-corpus relative path resolves against is undefined, and an unusable
+ * configuration fails (MDL900 + defaults) rather than degrades silently.
+ */
+export type CodeFencePolicy = 'off' | 'corpus';
+
 export interface LinksConfig {
   readonly expandTilde: boolean;
   readonly allowHostPaths: 'always' | 'warning' | 'forbidden';
+  readonly codeFences: CodeFencePolicy;
 }
 
 export interface LifecycleConfig {
@@ -485,6 +497,7 @@ export function defaultConfig(): Config {
     links: {
       expandTilde: true,
       allowHostPaths: 'warning',
+      codeFences: 'off',
     },
     manifestDocuments: new Map(),
     diagnostics: { MDL301: 'error', MDL304: 'warning' },
@@ -1308,9 +1321,14 @@ function parseLinks(rawLinks: unknown, baseLinks: LinksConfig): LinksConfig {
   if (obj.allowHostPaths === 'always' || obj.allowHostPaths === 'warning' || obj.allowHostPaths === 'forbidden') {
     allowHostPaths = obj.allowHostPaths;
   }
+  // The schema enum guarantees validity; the guard keeps the cast honest if a
+  // caller ever hands `normalize` an unvalidated document. `all` is not a
+  // value: the schema rejects it (MDL900) before an instance can exist.
+  const codeFences: CodeFencePolicy = obj.codeFences === 'corpus' ? 'corpus' : 'off';
   return {
     expandTilde,
     allowHostPaths,
+    codeFences,
   };
 }
 
@@ -1367,6 +1385,7 @@ const DEFAULT_SEVERITIES: Readonly<Record<string, 'error' | 'warning' | 'informa
   MDL401: 'warning',
   MDL402: 'warning',
   MDL403: 'warning',
+  MDL404: 'warning',
   MDL501: 'warning',
   MDL502: 'warning',
   MDL503: 'error',
