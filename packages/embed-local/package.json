@@ -1,6 +1,6 @@
 {
   "name": "@mdlineage/embed-local",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Optional local ONNX embedding and reranking for MDLineage (Issue #3 Phase 2). The CLI and MCP server load this package with a dynamic import.",
   "type": "module",
   "main": "./dist/index.js",
