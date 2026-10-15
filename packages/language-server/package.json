@@ -19,10 +19,6 @@
     "!dist/**/*.map",
     "!dist/.tsbuildinfo"
   ],
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/x-dc-coder/md-lineage.git",
@@ -30,8 +26,7 @@
   },
   "scripts": {
     "build": "tsc -b && node ../../scripts/ensure-bin-exec.mjs",
-    "test": "node ../../scripts/run-tests.mjs .",
-    "prepublishOnly": "npm run build"
+    "test": "node ../../scripts/run-tests.mjs ."
   },
   "dependencies": {
     "@mdlineage/validator": "*",

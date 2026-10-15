@@ -16,10 +16,6 @@
     "!dist/**/*.map",
     "!dist/.tsbuildinfo"
   ],
-  "publishConfig": {
-    "access": "public",
-    "provenance": true
-  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/x-dc-coder/md-lineage.git",
