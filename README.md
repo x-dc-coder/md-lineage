@@ -5,8 +5,8 @@
 ## 快速开始
 
 ```bash
-# 安装：从 Releases 页面下载 5 个 mdlineage-*.tgz 后执行
-npm i -g ./mdlineage-*-*.tgz
+# 安装：GitHub Release 资产 URL（把 v0.5.0 / 0.5.0 换成最新版本号）
+npm i -g https://github.com/x-dc-coder/md-lineage/releases/download/v0.5.0/mdlineage-{validator,retrieve,remark-lint-mdlineage,cli,language-server,mcp-server}-0.5.0.tgz
 cd /path/to/your/repo
 mdlineage init --write           # 生成配置、清单骨架、schemas/ 与 .gitattributes
 mdlineage manifest seed --write  # 为现有文档批量生成 id/kind/status
