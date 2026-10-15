@@ -372,19 +372,13 @@ describe('MDL404 resolveCorpusPath', () => {
     assert.equal(resolveCorpusPath('docs/a.md', '../../escape.py'), null);
     assert.equal(resolveCorpusPath('a.md', '../escape.py'), null);
   });
-  it('matches normalizeRelative byte-for-byte on every non-escaping input', () => {
-    const cases: ReadonlyArray<readonly [string, string]> = [
-      ['docs/a.md', 'b.md'],
-      ['docs/a.md', './b.md'],
-      ['docs/a/b.md', '../c/d.md'],
-      ['docs/a/b.md', './c/../d.md'],
-      ['docs/a/b.md', 'x/./y/z.md'],
-      ['a.md', 'q/r/s.md'],
-    ];
-    for (const [fromPath, token] of cases) {
-      const slash = fromPath.lastIndexOf('/');
-      const dir = slash >= 0 ? fromPath.slice(0, slash + 1) : '';
-      const expected = (dir + token.replace(/^\.[\\/]/, '')).split('/').reduce<string[]>((out, part) => {
+  it('matches normalizeRelative byte-for-byte on every non-escaping input (incl. scoped fromPath, Issue #7)', () => {
+    // The reducer below IS normalizeRelative's algorithm (segment folding, no
+    // escape check) so the table locks the two folds to one semantics — the
+    // scoped fromPath rows pin that the `@scope//` prefix survives byte for
+    // byte and only the member-internal part folds (Issue #7's lockstep).
+    const fold = (dir: string, tail: string): string =>
+      (dir + tail.replace(/^\.[\\/]/, '')).split('/').reduce<string[]>((out, part) => {
         if (part === '' || part === '.') return out;
         if (part === '..') {
           out.pop();
@@ -393,8 +387,40 @@ describe('MDL404 resolveCorpusPath', () => {
         out.push(part);
         return out;
       }, []).join('/');
-      assert.equal(resolveCorpusPath(fromPath, token), expected, `${fromPath} + ${token}`);
+    const expectedOf = (fromPath: string, token: string): string => {
+      const scoped = /^@[a-z][a-z0-9-]*\/\//.exec(fromPath);
+      if (scoped) {
+        const rest = fromPath.slice(scoped[0]!.length);
+        return scoped[0]! + fold(rest.slice(0, rest.lastIndexOf('/') + 1), token);
+      }
+      return fold(fromPath.slice(0, fromPath.lastIndexOf('/') + 1), token);
+    };
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      ['docs/a.md', 'b.md'],
+      ['docs/a.md', './b.md'],
+      ['docs/a/b.md', '../c/d.md'],
+      ['docs/a/b.md', './c/../d.md'],
+      ['docs/a/b.md', 'x/./y/z.md'],
+      ['a.md', 'q/r/s.md'],
+      // Scoped fromPath: the prefix survives, the member-internal part folds.
+      ['@scope//docs/a.md', 'b.md'],
+      ['@scope//docs/a.md', './b.md'],
+      ['@scope//docs/a.md', '../c/d.md'],
+      ['@scope//docs/a.md', 'x/./y/z.md'],
+      ['@scope//a.md', 'q/r/s.md'],
+    ];
+    for (const [fromPath, token] of cases) {
+      assert.equal(resolveCorpusPath(fromPath, token), expectedOf(fromPath, token), `${fromPath} + ${token}`);
     }
+  });
+  it('a scoped DESTINATION token is guard-inert: folded as plain segments, never null or the root (Issue #7 boundary)', () => {
+    // Destination scoping is `resolveLinkPath`'s rule (a `@scope//…`
+    // destination is already a terminal coordinate); `resolveCorpusPath` only
+    // feeds MDL404's escape/root guard, so it folds the token as ordinary
+    // segments — which can never escape or hit the root, keeping the guard out
+    // of the destination's way.
+    assert.equal(resolveCorpusPath('docs/a.md', '@scope//lib/m.py'), 'docs/@scope/lib/m.py');
+    assert.equal(resolveCorpusPath('@scope//docs/a.md', '@scope//lib/m.py'), '@scope//docs/@scope/lib/m.py');
   });
   it('federated scoped coordinates fold inside the member namespace', () => {
     assert.equal(resolveCorpusPath('@scope//docs/x.md', 'lib/m.py'), '@scope//docs/lib/m.py');
@@ -702,6 +728,33 @@ describe('MDL404 — incremental consistency', () => {
       after.map((d) => [d.path, d.code, d.range.start.offset]),
       validateWorkspace(rebuilt, { includeSingleDocument: false }).map((d) => [d.path, d.code, d.range.start.offset]),
       'post-update report equals a full rebuild',
+    );
+  });
+
+  it('(c) creating each dangling spelling wakes the fence document through the affected set (Issue #6)', () => {
+    // Test (b) validates the whole index after the create, so it cannot see a
+    // missed wake; this pins the AFFECTED SET for both resolution spellings —
+    // the document-directory fold and the root-relative fallback token.
+    const files = new Map<string, string>([['docs/a.md', fenceDoc('docs.fence', ['python sub/tool.py', 'bash scripts/root.py'])]]);
+    const index = createWorkspaceIndex(files, corpusConfig());
+    assert.equal(mdl404(validateWorkspace(index, { includeSingleDocument: false })).length, 2, 'both tokens dangle');
+
+    let { affected } = updateFile(index, 'docs/sub/tool.py', TARGET);
+    files.set('docs/sub/tool.py', TARGET);
+    assert.ok(affected.has('docs/a.md'), 'the doc-relative create wakes the fence document');
+    let scoped = mdl404(validateWorkspace(index, { includeSingleDocument: false, paths: [...affected] }));
+    assert.deepEqual(scoped.map((d) => d.data?.token), ['scripts/root.py'], 'only the still-missing token reports');
+
+    ({ affected } = updateFile(index, 'scripts/root.py', TARGET));
+    files.set('scripts/root.py', TARGET);
+    assert.ok(affected.has('docs/a.md'), 'the root-relative create wakes the fence document too');
+    assert.equal(mdl404(validateWorkspace(index, { includeSingleDocument: false, paths: [...affected] })).length, 0, 'MDL404 fully clears');
+
+    const rebuilt = createWorkspaceIndex(files, corpusConfig());
+    assert.deepEqual(
+      validateWorkspace(index, { includeSingleDocument: false }).map((d) => [d.path, d.code, d.range.start.offset]),
+      validateWorkspace(rebuilt, { includeSingleDocument: false }).map((d) => [d.path, d.code, d.range.start.offset]),
+      'post-creates report equals a full rebuild',
     );
   });
 });

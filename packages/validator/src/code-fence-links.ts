@@ -288,8 +288,10 @@ function rawLineAt(content: string, lineMap: LineMap, line0: number): string {
  * silently absorbs an over-pop; here that is the escape signal.
  *
  * Federated scoped coordinates (`@scope//docs/a.md`) fold inside the member
- * coordinate system after the `//`, matching `resolveLinkPath`'s federation
- * semantics; the returned path carries the same scope prefix.
+ * coordinate system after the `//`; since Issue #7 `normalizeRelative` carries
+ * the same prefix handling, so the two folds stay one federation semantics
+ * (lockstep-pinned by the shared contract test). The returned path carries the
+ * same scope prefix.
  */
 export function resolveCorpusPath(fromPath: DocPath, token: string): string | null {
   const scoped = /^(@[a-z][a-z0-9-]*\/\/)(.+)$/.exec(fromPath);

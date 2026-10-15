@@ -305,6 +305,8 @@ export function createServer(connection: Connection, options: ServerOptions = {}
         if (oldId) {
           for (const ref of index.referrersOf(scopedPath(m.scope, oldId))) toPub.add(ref);
         }
+        // Issue #6: home docs dangling on this member file lose it again.
+        for (const p of homeDanglingWake(m.scope, m.memberPath)) toPub.add(p);
         publishAffected(toPub);
         return;
       }
@@ -319,6 +321,9 @@ export function createServer(connection: Connection, options: ServerOptions = {}
       if (newId && newId !== oldId) {
         for (const ref of index.referrersOf(scopedPath(m.scope, newId))) toPub.add(ref);
       }
+      // Issue #6: home docs dangling on this member file resolve against the
+      // disk snapshot now.
+      for (const p of homeDanglingWake(m.scope, m.memberPath)) toPub.add(p);
       publishAffected(toPub);
       return;
     }
@@ -400,6 +405,30 @@ export function createServer(connection: Connection, options: ServerOptions = {}
     return Buffer.byteLength(text, 'utf8') > MAX_DOCUMENT_BYTES;
   }
 
+  /**
+   * Home documents whose dangling links or fence tokens name a member file, in
+   * either spelling (Issue #6's cross-index half): the `@scope//path`
+   * coordinate and the physical alias the home document's relative fold
+   * produces.
+   *
+   * Member directories are not watched (2026-10-11 decision), so a home
+   * document's dangling link to a member file would otherwise wait forever for
+   * a home-side `set()` that never comes — the member-side `updateFile` cannot
+   * wake it either, because the dangling registry is per-index and the home
+   * document lives in the home index.
+   */
+  function homeDanglingWake(scope: string, memberRel: string): Set<DocPath> {
+    const out = new Set<DocPath>();
+    const dangling = homeIndex.danglingReferrersOf;
+    if (typeof dangling !== 'function') return out;
+    for (const p of dangling.call(homeIndex, scopedPath(scope, memberRel) as DocPath)) out.add(p);
+    const mount = mounts.get(scope);
+    if (mount) {
+      for (const p of dangling.call(homeIndex, `${mount.alias}/${memberRel}` as DocPath)) out.add(p);
+    }
+    return out;
+  }
+
   /** Revalidate `paths` immediately, publishing every diagnostic they own. */
   function validateNow(paths: ReadonlyArray<DocPath>): void {
     const toPublish = new Set<DocPath>();
@@ -439,6 +468,10 @@ export function createServer(connection: Connection, options: ServerOptions = {}
               toPublish.add(p);
             }
           }
+          // And any home doc whose dangling link/fence names this member file
+          // (Issue #6): the member change is the only event that will ever
+          // resolve it, since member directories are not watched.
+          for (const p of homeDanglingWake(scope, memberRel)) toPublish.add(p);
           continue;
         }
       }

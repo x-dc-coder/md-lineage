@@ -15,6 +15,7 @@ import {
   createFederatedIndex,
   applyExternalScopePolicy,
   updateFile,
+  resolveLinkPath,
 } from '../src/index.js';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
@@ -585,6 +586,204 @@ Link to [skills](../member-a/docs/x.md).
     const capped = applyExternalScopePolicy(all.filter((d) => d.code === 'MDL404'));
     for (const d of capped) assert.equal(d.severity, 'warning');
     assert.ok(capped.length >= 1, 'the member fence diagnostic survives the sovereignty policy');
+
+    // Issue #7: the member document's OWN relative fence tokens resolve inside
+    // the member coordinate system through the proxy — the doc-relative AND
+    // the member-root-relative token both hit. Before the fix both folded into
+    // home coordinates (`@member-a/scripts/exists.py` collapsed to a home key)
+    // and false-positived even though the member solo pass was clean above.
+    const memberDoc404 = all.filter((d) => d.code === 'MDL404' && d.path === '@member-a//docs/x.md');
+    assert.deepEqual(memberDoc404.map((d) => d.data?.token), ['scripts/missing.py'], 'only the missing member token reports through the proxy');
+    const cappedMember = applyExternalScopePolicy(memberDoc404);
+    assert.equal(cappedMember.length, 1, 'the missing-token diagnostic survives the sovereignty policy');
+    assert.equal(cappedMember[0]!.severity, 'warning', 'external MDL404 stays capped at warning');
+  });
+
+  it('case 19: member-internal relative markdown links resolve through the proxy (Issue #7)', () => {
+    const config = defaultConfig();
+    const home = createWorkspaceIndex(
+      {
+        'docs/home.md': '---\nmdlineage:\n  id: docs.home\n  kind: guide\n  status: active\n---\n# Home\n',
+      },
+      config
+    );
+    const member = createWorkspaceIndex(
+      new Map<string, string>([
+        [
+          'docs/m1.md',
+          [
+            '---',
+            'mdlineage:',
+            '  id: docs.m1',
+            '  kind: guide',
+            '  status: active',
+            '---',
+            '',
+            '[sibling](m2.md) and [member root](README.md) and [missing](missing.md).',
+            '',
+          ].join('\n'),
+        ],
+        ['docs/m2.md', '---\nmdlineage:\n  id: docs.m2\n  kind: guide\n  status: active\n---\n# M2\n'],
+        ['README.md', '---\nmdlineage:\n  id: docs.mreadme\n  kind: guide\n  status: active\n---\n# Member README\n'],
+      ]),
+      config
+    );
+
+    const proxy = createFederatedIndex(home, new Map([['member-a', { scope: 'member-a', index: member, alias: 'member-a' }]]));
+    const all = validateWorkspace(proxy, { includeSingleDocument: false });
+    const throughProxy = all.filter((d) => d.code === 'MDL401' && d.path === '@member-a//docs/m1.md');
+    assert.deepEqual(throughProxy.map((d) => d.data?.path), ['missing.md'], 'doc-relative and member-root-relative links resolve; only the missing one reports');
+
+    const solo = validateWorkspace(member, { includeSingleDocument: false }).filter((d) => d.code === 'MDL401');
+    assert.deepEqual(solo.map((d) => d.data?.path), ['missing.md'], 'the member solo pass agrees — proxy equals member semantics');
+
+    const capped = applyExternalScopePolicy(throughProxy);
+    assert.equal(capped.length, 1, 'the missing-target diagnostic survives the sovereignty policy');
+    assert.equal(capped[0]!.severity, 'warning', 'external MDL401 stays capped at warning');
+  });
+
+  it('case 20: proxy ↔ member resolution equivalence, the name collision, and the home regression table (Issue #7)', () => {
+    const config = defaultConfig();
+    const home = createWorkspaceIndex(
+      new Map<string, string>([
+        ['docs/h.md', '---\nmdlineage:\n  id: home.h\n  kind: guide\n  status: active\n---\n# Home H\n'],
+        ['root.md', '---\nmdlineage:\n  id: home.root\n  kind: guide\n  status: active\n---\n# Home Root\n'],
+        ['docs/b.md', '---\nmdlineage:\n  id: home.b\n  kind: guide\n  status: active\n---\n# Home B\n'],
+        ['scripts/tool.md', '---\nmdlineage:\n  id: home.tool\n  kind: guide\n  status: active\n---\n# Home Tool\n'],
+      ]),
+      config
+    );
+    const member = createWorkspaceIndex(
+      new Map<string, string>([
+        ['docs/x.md', '---\nmdlineage:\n  id: member.x\n  kind: guide\n  status: active\n---\n# Member X\n'],
+        ['docs/m2.md', '---\nmdlineage:\n  id: member.m2\n  kind: guide\n  status: active\n---\n# Member M2\n'],
+        ['README.md', '---\nmdlineage:\n  id: member.readme\n  kind: guide\n  status: active\n---\n# Member README\n'],
+        ['scripts/tool.py', '#!/usr/bin/env python3\n'],
+        ['scripts/tool.md', '---\nmdlineage:\n  id: member.tool\n  kind: guide\n  status: active\n---\n# Member Tool\n'],
+        ['lib/deep/d.md', '---\nmdlineage:\n  id: member.deep\n  kind: guide\n  status: active\n---\n# Deep\n'],
+      ]),
+      config
+    );
+    const proxy = createFederatedIndex(home, new Map([['member-a', { scope: 'member-a', index: member, alias: 'member-a' }]]));
+    const scoped = (p: string): string => `@member-a//${p}`;
+
+    // Equivalence table: whatever the member index resolves solo, the proxy
+    // must resolve to the SAME member document through its scoped coordinate —
+    // document-relative, member-root-relative, deep climbs, fancy folds, fence
+    // targets, and missing targets alike.
+    const rows: ReadonlyArray<readonly [string, string]> = [
+      ['docs/x.md', 'm2.md'],
+      ['docs/x.md', './m2.md'],
+      ['docs/x.md', '../README.md'],
+      ['docs/x.md', 'README.md'],
+      ['docs/x.md', 'scripts/tool.py'],
+      ['docs/x.md', './x/../m2.md'],
+      ['lib/deep/d.md', '../../docs/x.md'],
+      ['lib/deep/d.md', '../../README.md'],
+      ['docs/x.md', 'scripts/tool.md'],
+      ['docs/x.md', 'missing.md'],
+      ['lib/deep/d.md', '../missing.md'],
+      ['docs/x.md', 'gone/deep.md'],
+    ];
+    for (const [from, dest] of rows) {
+      const solo = resolveLinkPath(member, from, dest);
+      assert.deepEqual(
+        resolveLinkPath(proxy, scoped(from), dest),
+        solo.map(scoped),
+        `${from} + ${dest}: the proxy must resolve to the member document`,
+      );
+    }
+
+    // The collision row (adjudication 4): home AND member both have
+    // scripts/tool.md; a member document's root-relative reference must land
+    // in the MEMBER (its own solo semantics), never the home namesake.
+    assert.deepEqual([...resolveLinkPath(proxy, scoped('docs/x.md'), 'scripts/tool.md')], [scoped('scripts/tool.md')]);
+    assert.deepEqual([...resolveLinkPath(proxy, 'docs/h.md', 'scripts/tool.md')], ['scripts/tool.md'], 'home documents keep home precedence');
+
+    // Federated absolute destinations are terminal coordinates on both sides.
+    assert.deepEqual([...resolveLinkPath(proxy, scoped('docs/x.md'), scoped('docs/m2.md'))], [scoped('docs/m2.md')]);
+    assert.deepEqual([...resolveLinkPath(proxy, 'docs/h.md', scoped('docs/m2.md'))], [scoped('docs/m2.md')]);
+
+    // Home regression: every spelling that resolved before Issue #7 resolves
+    // identically after it (the `before` column pins the pre-fix behavior).
+    const homeRows: ReadonlyArray<readonly [string, string, readonly string[]]> = [
+      ['docs/h.md', 'b.md', ['docs/b.md']],
+      ['docs/h.md', './b.md', ['docs/b.md']],
+      ['docs/h.md', '../root.md', ['root.md']],
+      ['docs/h.md', 'root.md', ['root.md']],
+      ['docs/h.md', 'missing.md', []],
+      ['docs/h.md', '/docs/b.md', []],
+      ['docs/h.md', 'https://example.com/x.md', []],
+      ['docs/h.md', '../member-a/docs/x.md', ['member-a/docs/x.md']],
+      ['docs/h.md', '@member-a//docs/x.md', ['@member-a//docs/x.md']],
+      ['docs/h.md', 'b.md/', ['docs/b.md']],
+    ];
+    for (const [from, dest, expected] of homeRows) {
+      assert.deepEqual([...resolveLinkPath(proxy, from, dest)], expected, `${from} + ${dest}: home behavior is byte-identical`);
+    }
+  });
+
+  it('case 21: home dangling keys on member targets answer both spellings and wake on member creation (Issue #6 × #7)', () => {
+    const config = defaultConfig();
+    const homeFiles = new Map<string, string>([
+      [
+        'docs/a.md',
+        [
+          '---',
+          'mdlineage:',
+          '  id: docs.a',
+          '  kind: guide',
+          '  status: active',
+          '---',
+          '',
+          '[scoped](@member-a//m.md) and [alias](../member-a/m2.md).',
+          '',
+        ].join('\n'),
+      ],
+    ]);
+    const memberFiles = new Map<string, string>([
+      ['docs/m3.md', '---\nmdlineage:\n  id: member.m3\n  kind: guide\n  status: active\n---\n[t](t.md).\n'],
+    ]);
+    const home = createWorkspaceIndex(homeFiles, config);
+    const member = createWorkspaceIndex(memberFiles, config);
+    const proxy = createFederatedIndex(home, new Map([['member-a', { scope: 'member-a', index: member, alias: 'member-a' }]]));
+
+    // Both spellings of the not-yet-existing member targets are HOME-index
+    // wake keys — the query the LSP bridge issues on a member change.
+    assert.deepEqual(home.danglingReferrersOf!('@member-a//m.md'), ['docs/a.md']);
+    assert.deepEqual(home.danglingReferrersOf!('member-a/m2.md'), ['docs/a.md']);
+    assert.deepEqual(home.danglingReferrersOf!('@member-a//nope.md'), []);
+
+    // Member-internal half: the member index wakes its own referrer.
+    updateFile(member, 't.md', '---\nmdlineage:\n  id: member.t\n  kind: guide\n  status: active\n---\n# T\n');
+    memberFiles.set('t.md', '---\nmdlineage:\n  id: member.t\n  kind: guide\n  status: active\n---\n# T\n');
+
+    // Creating the member targets resolves the home documents' dangling links.
+    updateFile(member, 'm.md', '---\nmdlineage:\n  id: member.m\n  kind: guide\n  status: active\n---\n# M\n');
+    memberFiles.set('m.md', '---\nmdlineage:\n  id: member.m\n  kind: guide\n  status: active\n---\n# M\n');
+    updateFile(member, 'm2.md', '---\nmdlineage:\n  id: member.m2\n  kind: guide\n  status: active\n---\n# M2\n');
+    memberFiles.set('m2.md', '---\nmdlineage:\n  id: member.m2\n  kind: guide\n  status: active\n---\n# M2\n');
+    assert.deepEqual(
+      [...new Set([...home.danglingReferrersOf!('@member-a//m.md'), ...home.danglingReferrersOf!('member-a/m2.md')])],
+      ['docs/a.md'],
+      'the bridge query names the home referrer',
+    );
+
+    // And the proxy's full report equals a rebuild: both MDL401s cleared.
+    const rebuilt = createFederatedIndex(
+      createWorkspaceIndex(homeFiles, config),
+      new Map([['member-a', { scope: 'member-a', index: createWorkspaceIndex(memberFiles, config), alias: 'member-a' }]]),
+    );
+    assert.deepEqual(
+      validateWorkspace(proxy, { includeSingleDocument: false }).map((d) => [d.path, d.code, d.range.start.offset]),
+      validateWorkspace(rebuilt, { includeSingleDocument: false }).map((d) => [d.path, d.code, d.range.start.offset]),
+      'incremental proxy report equals a full rebuild',
+    );
+    assert.equal(
+      validateWorkspace(proxy, { includeSingleDocument: false }).filter((d) => d.code === 'MDL401' && d.path === 'docs/a.md').length,
+      0,
+      'both dangling spellings resolve after the member creation',
+    );
   });
 
   it('case 17: updateFile on federated proxy throws Error (read-only enforcement)', () => {

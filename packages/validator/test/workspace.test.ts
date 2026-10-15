@@ -1445,6 +1445,60 @@ describe('performance — 1000 synthetic documents', () => {
     // eslint-disable-next-line no-console
     console.log(`  scoped pass over ${result.affected.size} files: ${scopedMs.toFixed(2)}ms vs full ${fullMs.toFixed(2)}ms`);
   });
+
+  it('the dangling registry stays O(references) and a create stays an order of magnitude cheaper (T17: Issue #6 sentinel)', () => {
+    // Key-count bound: every registry key is some entry's link/token fold, so
+    // re-deriving the key universe from the entries and probing it bounds the
+    // private table from above — <=2 keys per reference (raw spelling plus its
+    // fold), never a per-document or per-repository term.
+    const files = syntheticCorpus();
+    const started = process.hrtime.bigint();
+    const index = createWorkspaceIndex(files, defaultConfig());
+    const buildMs = Number(process.hrtime.bigint() - started) / 1e6;
+
+    let references = 0;
+    const universe = new Set<string>();
+    for (const path of index.paths()) {
+      const entry = index.entryOf(path);
+      if (!entry) continue;
+      for (const link of entry.links) {
+        references += 1;
+        // Root-level corpus with bare destinations: fold === raw spelling.
+        universe.add(link.path);
+      }
+      for (const fence of entry.fenceLinks) {
+        references += 1;
+        universe.add(fence.token);
+      }
+    }
+    let registeredKeys = 0;
+    for (const key of universe) {
+      if (index.danglingReferrersOf!(key).length > 0) registeredKeys += 1;
+    }
+    assert.ok(
+      registeredKeys <= 2 * references,
+      `dangling registry holds ${registeredKeys} keys, bound is 2×${references}`,
+    );
+
+    // A create that resolves a dangling key: one parse plus a Map probe per
+    // dangling referrer — the update budget of the corpus above, not a rebuild.
+    const danglingFiles = new Map([...files].filter(([p]) => p !== 'terminal.md'));
+    const danglingIndex = createWorkspaceIndex(danglingFiles, defaultConfig());
+    assert.ok(
+      danglingIndex.danglingReferrersOf!('terminal.md').includes('doc-0999.md'),
+      'the chain tail names the absent terminal',
+    );
+    const createStart = process.hrtime.bigint();
+    const createResult = updateFile(danglingIndex, 'terminal.md', doc('docs.terminal'));
+    const createMs = Number(process.hrtime.bigint() - createStart) / 1e6;
+    assert.ok(createResult.affected.has('doc-0999.md'), 'creating the target wakes its dangling referrer');
+    assert.ok(createResult.affected.size < 5, `the wake stays local, got ${createResult.affected.size}`);
+    assert.ok(createMs < buildMs / 10, `create ${createMs.toFixed(2)}ms is not < build/10 (${(buildMs / 10).toFixed(2)}ms)`);
+    // eslint-disable-next-line no-console
+    console.log(
+      `  dangling registry: ${registeredKeys} keys for ${references} references; create after dangle ${createMs.toFixed(2)}ms (build ${buildMs.toFixed(1)}ms)`,
+    );
+  });
 });
 
 describe('report ordering', () => {
@@ -1517,6 +1571,167 @@ describe('report ordering', () => {
   });
 });
 
+describe('dangling wake registry (Issue #6 — new-target backfill)', () => {
+  it('creating a missing link target wakes the dangling referrer and clears MDL401 incrementally (T1)', () => {
+    const files = new Map<string, string>([['docs/a.md', doc('docs.a', relations(), 'See [x](./missing.md).')]]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    assert.equal(byCode(validateWorkspace(index, { includeSingleDocument: false }), 'MDL401').length, 1);
+    // The ./ spelling keys under BOTH its raw form and the document-directory
+    // fold — the fold is the key the created file is found by.
+    assert.deepEqual(index.danglingReferrersOf!('docs/missing.md'), ['docs/a.md']);
+
+    const { affected } = updateFile(index, 'docs/missing.md', doc('docs.missing'));
+    assert.ok(affected.has('docs/a.md'), 'the dangling referrer must be re-validated');
+    assert.equal(
+      byCode(validateWorkspace(index, { includeSingleDocument: false, paths: [...affected] }), 'MDL401').length,
+      0,
+      'MDL401 clears through the affected set alone',
+    );
+    files.set('docs/missing.md', doc('docs.missing'));
+    assert.deepEqual(
+      validateWorkspace(index, { includeSingleDocument: false }).map((d) => [d.path, d.code, d.range.start.offset]),
+      validateWorkspace(createWorkspaceIndex(files, defaultConfig()), { includeSingleDocument: false }).map((d) => [
+        d.path,
+        d.code,
+        d.range.start.offset,
+      ]),
+      'incremental result equals a full rebuild',
+    );
+  });
+
+  it('a root-relative dangling spelling wakes on its single raw key (T2)', () => {
+    const files = new Map<string, string>([['a.md', doc('docs.a', relations(), 'See [x](docs/missing.md).')]]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    assert.equal(byCode(validateWorkspace(index, { includeSingleDocument: false }), 'MDL401').length, 1);
+
+    const { affected } = updateFile(index, 'docs/missing.md', doc('docs.missing'));
+    assert.ok(affected.has('a.md'), 'the root-relative raw key registers and wakes');
+    assert.equal(byCode(validateWorkspace(index, { includeSingleDocument: false, paths: [...affected] }), 'MDL401').length, 0);
+  });
+
+  it('create → delete keeps the per-path view honest in BOTH directions (T3: the set/delete guard)', () => {
+    const files = new Map<string, string>([['a.md', doc('docs.a', relations(), 'See [x](./missing.md).')]]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    updateFile(index, 'missing.md', doc('docs.missing'));
+    files.set('missing.md', doc('docs.missing'));
+    assert.equal(byCode(validateWorkspace(index, { includeSingleDocument: false }), 'MDL401').length, 0, 'clean after creation');
+
+    const { affected } = removeFile(index, 'missing.md');
+    files.delete('missing.md');
+    assert.ok(affected.has('a.md'), 'the delete must wake the referrer — only the registry remembers the old name');
+    const scoped = validateWorkspace(index, { includeSingleDocument: false, paths: [...affected] });
+    assert.equal(byCode(scoped, 'MDL401').length, 1, 'MDL401 comes back');
+    assert.deepEqual(
+      scoped.map((d) => [d.path, d.code, d.range.start.offset]),
+      validateWorkspace(createWorkspaceIndex(files, defaultConfig()), { includeSingleDocument: false }).map((d) => [
+        d.path,
+        d.code,
+        d.range.start.offset,
+      ]),
+      'the per-path view equals a rebuild — a set-only registry would leave a stale "clean" view here',
+    );
+  });
+
+  it('editing the link away revokes the old dangling keys (T5: unindex symmetry)', () => {
+    const files = new Map<string, string>([['a.md', doc('docs.a', relations(), 'See [x](./missing.md).')]]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    assert.ok(index.danglingReferrersOf!('missing.md').includes('a.md'));
+
+    updateFile(index, 'a.md', doc('docs.a', relations(), 'No links now.'));
+    const { affected } = updateFile(index, 'missing.md', doc('docs.missing'));
+    assert.ok(!affected.has('a.md'), 'the changed document no longer names the target, so it is not woken');
+  });
+
+  it('set registers a created document in the case-insensitive table; delete unregisters it (T6: win32 maintenance)', () => {
+    const index = createWorkspaceIndex(new Map<string, string>(), defaultConfig(), [], { caseInsensitive: true });
+    assert.equal(index.caseInsensitiveLookup!('Docs/B.MD'), null);
+    updateFile(index, 'docs/b.md', doc('docs.b'));
+    assert.equal(index.caseInsensitiveLookup!('Docs/B.MD'), 'docs/b.md', 'a file created after the scan must be CI-findable');
+    removeFile(index, 'docs/b.md');
+    assert.equal(index.caseInsensitiveLookup!('Docs/B.MD'), null, 'and unfindable again after removal');
+  });
+
+  it('danglingReferrersOf answers the scoped and alias spellings of a member target (T7: query contract)', () => {
+    const files = new Map<string, string>([
+      ['docs/scoped.md', doc('docs.scoped', relations(), '[m](@member-a//m.md).')],
+      ['docs/alias.md', doc('docs.alias', relations(), '[m](../member-a/m.md).')],
+      ['docs/other.md', doc('docs.other', relations(), '[x](./unrelated.md).')],
+    ]);
+    const index = createWorkspaceIndex(files, defaultConfig());
+    assert.deepEqual(index.danglingReferrersOf!('@member-a//m.md'), ['docs/scoped.md'], 'a scoped destination is its own terminal key');
+    assert.deepEqual(index.danglingReferrersOf!('member-a/m.md'), ['docs/alias.md'], 'the alias fold keys the normalized spelling');
+    assert.deepEqual(index.danglingReferrersOf!('nope.md'), [], 'unregistered spellings answer empty');
+  });
+
+  it('a scripted create/modify/delete scenario keeps the per-path publication equal to a rebuild (T8)', () => {
+    // ~20-line Publisher replicating the LSP's per-path publish cache
+    // (publishOne): only the affected set is ever re-published, and a path's
+    // view is exactly its own diagnostics. This is the channel Issue #6 makes
+    // honest — a missed wake leaves one view stale while the index itself is
+    // already correct.
+    class Publisher {
+      private readonly views = new Map<string, string>();
+      constructor(private readonly index: WorkspaceIndex) {}
+      publish(paths: Iterable<string>): void {
+        for (const path of paths) this.views.set(path, viewOf(this.index, path));
+      }
+      view(path: string): string {
+        return this.views.get(path) ?? '';
+      }
+    }
+    const viewOf = (index: WorkspaceIndex, path: string): string =>
+      validateWorkspace(index, { includeSingleDocument: false, paths: [path] })
+        .filter((d) => d.path === path)
+        .map((d) => `${d.code}:${d.range.start.offset}:${d.message}`)
+        .sort()
+        .join('|');
+
+    const config = { ...defaultConfig(), links: { ...defaultConfig().links, codeFences: 'corpus' as const } };
+    const fenceTarget = '#!/usr/bin/env python3\n';
+    const files = new Map<string, string>([
+      ['a.md', doc('docs.a', relations(), 'See [gone](./missing.md) and [ok](./present.md).')],
+      ['b.md', doc('docs.b', '', ['```bash', 'python docs/target.py', '```'].join('\n'))],
+      ['present.md', doc('docs.present')],
+    ]);
+    const index = createWorkspaceIndex(files, config);
+    const publisher = new Publisher(index);
+    publisher.publish(index.paths());
+    const assertEqualsRebuild = (step: string) => {
+      const rebuilt = createWorkspaceIndex(files, config);
+      for (const path of new Set([...index.paths(), ...rebuilt.paths()])) {
+        assert.equal(publisher.view(path), viewOf(rebuilt, path), `${step}: published view of ${path}`);
+      }
+    };
+
+    // create the dangling link target, then the fence target
+    let result = updateFile(index, 'missing.md', doc('docs.missing'));
+    files.set('missing.md', doc('docs.missing'));
+    publisher.publish([...result.affected]);
+    assertEqualsRebuild('after create missing.md');
+
+    result = updateFile(index, 'docs/target.py', fenceTarget);
+    files.set('docs/target.py', fenceTarget);
+    publisher.publish([...result.affected]);
+    assertEqualsRebuild('after create docs/target.py');
+
+    // modify → delete → re-create: the full lifecycle both directions
+    result = updateFile(index, 'missing.md', doc('docs.missing-two'));
+    files.set('missing.md', doc('docs.missing-two'));
+    publisher.publish([...result.affected]);
+    assertEqualsRebuild('after modify missing.md');
+
+    result = removeFile(index, 'docs/target.py');
+    files.delete('docs/target.py');
+    publisher.publish([...result.affected]);
+    assertEqualsRebuild('after delete docs/target.py');
+
+    result = updateFile(index, 'docs/target.py', `${fenceTarget}# rev 2\n`);
+    files.set('docs/target.py', `${fenceTarget}# rev 2\n`);
+    publisher.publish([...result.affected]);
+    assertEqualsRebuild('after re-create docs/target.py');
+  });
+});
+
 describe('incremental vs full rebuild equivalence (fuzz)', () => {
   // The review's incremental-consistency property, run harder: random edits
   // over a corpus that contains cycles, dangling targets, duplicates and
@@ -1586,6 +1801,91 @@ describe('incremental vs full rebuild equivalence (fuzz)', () => {
       }
       updateFiles(index, changes);
       assert.equal(signature(index), signature(createWorkspaceIndex(files, defaultConfig())), `round ${round}`);
+    }
+  });
+
+  it('a declared universe with creates keeps per-path published views equal to a rebuild (T9: Issue #6)', () => {
+    // Why the signature comparison was upgraded: `signature` re-validates EVERY
+    // document each round, so a missed wake is invisible to it. This fuzz
+    // models the LSP instead — a pre-declared universe whose files start
+    // partially absent (every absent path is a dangling key), random
+    // update/create/delete per round, and ONLY the affected set is
+    // re-validated into a per-path view; each view must equal a full rebuild's.
+    // The create direction never ran in the old fuzz, which is exactly why
+    // Issue #6's missing-target half stayed unexposed.
+    const MD = 8;
+    const PY = 4;
+    const PY_STUB = '#!/usr/bin/env python3\n';
+    const mdPath = (i: number): string => `f${i}.md`;
+    const pyPath = (i: number): string => `tools/t${i}.py`;
+    const config = { ...defaultConfig(), links: { ...defaultConfig().links, codeFences: 'corpus' as const } };
+    const rng = mulberry32(20261015);
+    const content = (i: number): string =>
+      doc(
+        ids[i % ids.length]!,
+        relations({ type: 'depends_on', target: ids[Math.floor(rng() * 4)]!, reason: 'r' }),
+        `See [next](${mdPath((i + 1) % MD)}) and [far](${mdPath((i + 3) % MD)}).\n\n\`\`\`bash\npython ${pyPath(i % PY)}\n\`\`\`\n`,
+      );
+
+    const viewOf = (index: WorkspaceIndex, path: string): string =>
+      validateWorkspace(index, { includeSingleDocument: false, paths: [path] })
+        .filter((d) => d.path === path)
+        .map((d) => `${d.code}:${d.range.start.offset}:${d.message}`)
+        .sort()
+        .join('|');
+
+    const files = new Map<string, string>();
+    const index = createWorkspaceIndex(files, config);
+    const published = new Map<string, string>();
+    const publish = (paths: Iterable<string>): void => {
+      for (const p of paths) published.set(p, viewOf(index, p));
+    };
+
+    // Seed: a random half of the universe exists, the rest only dangles.
+    for (let i = 0; i < MD; i++) {
+      if (rng() < 0.5) {
+        const text = content(i);
+        files.set(mdPath(i), text);
+        updateFile(index, mdPath(i), text);
+      }
+    }
+    for (let i = 0; i < PY; i++) {
+      if (rng() < 0.5) {
+        files.set(pyPath(i), PY_STUB);
+        updateFile(index, pyPath(i), PY_STUB);
+      }
+    }
+    publish(index.paths());
+
+    for (let round = 0; round < 150; round++) {
+      const py = rng() < 0.35;
+      const i = Math.floor(rng() * MD);
+      const path = py ? pyPath(Math.floor(rng() * PY)) : mdPath(i);
+      let result;
+      if (!files.has(path)) {
+        const text = py ? PY_STUB : content(i);
+        result = updateFile(index, path, text);
+        files.set(path, text);
+      } else if (rng() < 0.3) {
+        result = removeFile(index, path);
+        files.delete(path);
+      } else {
+        const text = py ? `${PY_STUB}# rev ${round}\n` : content(i);
+        result = updateFile(index, path, text);
+        files.set(path, text);
+      }
+      publish([...result.affected]);
+
+      const rebuilt = createWorkspaceIndex(files, config);
+      const rebuiltViews = new Map<string, string[]>();
+      for (const d of validateWorkspace(rebuilt, { includeSingleDocument: false })) {
+        const list = rebuiltViews.get(d.path) ?? [];
+        list.push(`${d.code}:${d.range.start.offset}:${d.message}`);
+        rebuiltViews.set(d.path, list);
+      }
+      for (const [path2, seen] of published) {
+        assert.equal(seen, (rebuiltViews.get(path2) ?? []).sort().join('|'), `round ${round}: published view of ${path2} is stale`);
+      }
     }
   });
 });

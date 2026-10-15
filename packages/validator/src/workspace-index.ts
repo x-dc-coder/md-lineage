@@ -151,6 +151,20 @@ export interface WorkspaceIndex {
   referrersOf(id: string): readonly DocPath[];
   /** Paths whose Markdown links resolve to `path`; empty for unknown paths. */
   linkReferrersOf(path: DocPath): readonly DocPath[];
+  /**
+   * Paths whose links or code-fence tokens NAME `path` by its folded key even
+   * though it resolved to nothing when they were indexed (Issue #6's dangling
+   * wake registry, optional like the other extensions).
+   *
+   * This is a wake-registry query, not a references query: registration is
+   * unconditional (existence-independent raw fold keys), so an entry may
+   * outlive the dangling state it was created for — a caller re-validates the
+   * returned paths and gets the same answer as a rebuild. The public
+   * `linkReferrersOf` keeps its "resolving destinations only" contract; the
+   * read-only federation proxy holds no reference edges and does not implement
+   * this.
+   */
+  danglingReferrersOf?(path: DocPath): readonly DocPath[];
   /** Heading anchors of `path`; empty for unknown paths. */
   anchorsOf(path: DocPath): ReadonlySet<string>;
   /**
@@ -275,6 +289,18 @@ class IndexImpl implements WorkspaceIndex {
    */
   private readonly fenceReferrersByPath = new Map<string, Set<DocPath>>();
   /**
+   * Dangling wake registry (Issue #6): referrers keyed by the RAW FOLDED
+   * spelling of every link destination and fence token, registered
+   * unconditionally — existence-independent, so a target created later wakes
+   * the documents that named it (and, via `delete`, un-named it again).
+   * Links and fence tokens share this one map; it is private and feeds the
+   * affected set only, exactly like `fenceReferrersByPath` (Issue #5): the
+   * public `linkReferrersOf` contract stays "resolving destinations only".
+   * Keys are a superset of the resolved reverse edges, so a wake is always
+   * safe (re-validation is idempotent) — a MISS would be the bug.
+   */
+  private readonly danglingReferrersByPath = new Map<string, Set<DocPath>>();
+  /**
    * Workspace files the caller scanned but did not index as documents (schemas,
    * configs, images). Metadata handed in by the scanner — never read off disk
    * here — so MDL401 can tell "absent from the repository" from "not Markdown".
@@ -360,6 +386,14 @@ class IndexImpl implements WorkspaceIndex {
     return sorted(this.fenceReferrersByPath.get(path));
   }
 
+  /**
+   * Paths that name `path` regardless of whether it resolved when they were
+   * indexed (Issue #6's wake registry — see `danglingReferrersByPath`).
+   */
+  danglingReferrersOf(path: DocPath): readonly DocPath[] {
+    return sorted(this.danglingReferrersByPath.get(path));
+  }
+
   anchorsOf(path: DocPath): ReadonlySet<string> {
     return this.entries.get(path)?.anchors ?? EMPTY_STRINGS;
   }
@@ -387,6 +421,11 @@ class IndexImpl implements WorkspaceIndex {
     const next = parseDocument(path, content, this.config);
     this.entries.set(path, next);
     this.reindex(path, next);
+    // A file created after the scan never reached the case-insensitive table
+    // (built once in the constructor): register it here, or a `B.MD` spelling
+    // misses the new file for the index's whole lifetime (win32; Issue #6's
+    // "new file not reflected" lifecycle class).
+    this.caseInsensitive?.set(path.toLowerCase(), path);
     this.collectAffected(affected, next);
     // Incoming links are keyed by path, not by this document's content, so the
     // reverse map is unchanged by the swap — but a deleted or emptied target is
@@ -394,6 +433,12 @@ class IndexImpl implements WorkspaceIndex {
     // once here, after the swap.
     for (const p of this.linkReferrersOf(path)) affected.add(p);
     for (const p of this.fenceReferrersOf(path)) affected.add(p);
+    // The dangling registry is existence-independent: a key taken while the
+    // target was missing wakes its referrers here too, in BOTH directions —
+    // creation clears their MDL401/MDL404, and `delete` (same query below)
+    // brings them back. Without the delete-side query a create→delete sequence
+    // would leave a stale "clean" view (Issue #6 fuzz counterexample).
+    for (const p of this.danglingReferrersOf(path)) affected.add(p);
     return affected;
   }
 
@@ -410,12 +455,23 @@ class IndexImpl implements WorkspaceIndex {
     // call here is enough.
     for (const p of this.linkReferrersOf(path)) affected.add(p);
     for (const p of this.fenceReferrersOf(path)) affected.add(p);
+    // Same dangling query as `set`: a target that was created after its
+    // referrers indexed must hand those referrers their MDL401/MDL404 back
+    // (Issue #6 — set/delete both consult the registry, no migration bookkeeping).
+    for (const p of this.danglingReferrersOf(path)) affected.add(p);
     for (const rel of previous.relations) {
       for (const target of this.idToPaths(rel.target)) affected.add(target);
     }
     this.collectAffected(affected, previous);
     this.unindex(path, previous);
     this.entries.delete(path);
+    // Drop the lowercase key only while it still maps to THIS path: a known
+    // non-document may share it (the constructor lets documents win), and its
+    // mapping must survive this document's removal.
+    if (this.caseInsensitive) {
+      const lower = path.toLowerCase();
+      if (this.caseInsensitive.get(lower) === path) this.caseInsensitive.delete(lower);
+    }
     return affected;
   }
 
@@ -454,10 +510,20 @@ class IndexImpl implements WorkspaceIndex {
       for (const target of this.linkTargetPaths(link.path, entry.path)) {
         referrersSet(this.referrersByPath, target).add(path);
       }
+      // Unconditional (Issue #6): registration never consults index state, so
+      // `unindex` recomputes the SAME keys even when the target was created
+      // between this entry's insert and its removal — a conditional register
+      // would leak keys and break the reverse-edge symmetry.
+      for (const key of this.danglingLinkKeys(link.path, entry.path)) {
+        referrersSet(this.danglingReferrersByPath, key).add(path);
+      }
     }
     for (const fence of entry.fenceLinks) {
       for (const target of this.fenceTargetPaths(fence.token, entry.path)) {
         referrersSet(this.fenceReferrersByPath, target).add(path);
+      }
+      for (const key of this.danglingFenceKeys(fence.token, entry.path)) {
+        referrersSet(this.danglingReferrersByPath, key).add(path);
       }
     }
   }
@@ -472,12 +538,43 @@ class IndexImpl implements WorkspaceIndex {
       for (const target of this.linkTargetPaths(link.path, entry.path)) {
         dropReferrer(this.referrersByPath, target, path);
       }
+      for (const key of this.danglingLinkKeys(link.path, entry.path)) {
+        dropReferrer(this.danglingReferrersByPath, key, path);
+      }
     }
     for (const fence of entry.fenceLinks) {
       for (const target of this.fenceTargetPaths(fence.token, entry.path)) {
         dropReferrer(this.fenceReferrersByPath, target, path);
       }
+      for (const key of this.danglingFenceKeys(fence.token, entry.path)) {
+        dropReferrer(this.danglingReferrersByPath, key, path);
+      }
     }
+  }
+
+  /**
+   * The dangling-registry keys of one link destination (Issue #6): the same
+   * `foldedKeys` `resolveLinkPath` judges, so a wake key and a resolution
+   * candidate are one vocabulary by construction. The exclusions mirror
+   * `linkTargetPaths`'s key constraint: a destination every document may share
+   * (a URL scheme), the empty same-page path, and the protocol-relative /
+   * backslash host forms never become keys.
+   */
+  private danglingLinkKeys(dest: string, from: DocPath): readonly DocPath[] {
+    if (dest === '' || dest.startsWith('//') || dest.startsWith('\\') || looksLikeUrlScheme(dest)) return EMPTY_PATHS;
+    return foldedKeys(from, dest);
+  }
+
+  /**
+   * The dangling-registry keys of one fence token (Issue #6): the raw token
+   * plus its corpus fold. `null` escapes the corpus root (MDL403's
+   * jurisdiction) and `''` IS the corpus root, which always exists — neither
+   * is a wake key.
+   */
+  private danglingFenceKeys(token: string, from: DocPath): readonly DocPath[] {
+    const folded = resolveCorpusPath(from, token);
+    if (folded === null || folded === '') return EMPTY_PATHS;
+    return token === folded ? [token] : [token, folded];
   }
 
   /**
@@ -813,8 +910,26 @@ function normalizeLabel(label: string): string {
 
 /** `./sibling.md` and `../up.md` against the linking document's directory. */
 function normalizeRelative(fromPath: DocPath, linkPath: string): string {
+  const scoped = federatedScopePrefix(fromPath);
+  if (scoped !== null) {
+    // Federated coordinate (Issue #7): the `@scope//` prefix survives byte for
+    // byte and the fold applies to the member-internal part only — folding it
+    // away collapsed member paths into home coordinates and broke every
+    // member-internal relative destination.
+    const rest = fromPath.slice(scoped.length);
+    const slash = rest.lastIndexOf('/');
+    const dir = slash >= 0 ? rest.slice(0, slash + 1) : '';
+    return scoped + foldSegments(dir, linkPath);
+  }
   const slash = fromPath.lastIndexOf('/');
   const dir = slash >= 0 ? fromPath.slice(0, slash + 1) : '';
+  return foldSegments(dir, linkPath);
+}
+
+/** Segment folding shared by both `normalizeRelative` branches: '' and '.'
+ * drop, '..' pops with no boundary check (over-pops are absorbed, matching the
+ * unscoped behavior byte for byte). */
+function foldSegments(dir: string, linkPath: string): string {
   const parts = (dir + linkPath.replace(/^\.[\\/]/, '')).split('/');
   const out: string[] = [];
   for (const part of parts) {
@@ -826,6 +941,27 @@ function normalizeRelative(fromPath: DocPath, linkPath: string): string {
     out.push(part);
   }
   return out.join('/');
+}
+
+/** The `@scope//` prefix of a federated coordinate, null for home paths. */
+function federatedScopePrefix(path: DocPath): string | null {
+  return /^@[a-z][a-z0-9-]*\/\//.exec(path)?.[0] ?? null;
+}
+
+/**
+ * The spelling variants one destination is judged under, in resolution
+ * priority order: the scope-aware fold first (document-directory semantics),
+ * then the raw trailing-slash-trimmed form. `resolveLinkPath` resolves through
+ * exactly these candidates and Issue #6's dangling registry keys on them, so a
+ * wake key and a resolution candidate can never drift apart. A destination
+ * that is itself a federated absolute coordinate (`@scope//…`) or a
+ * `/`-absolute path is already terminal — it never folds.
+ */
+function foldedKeys(from: DocPath, dest: string): readonly DocPath[] {
+  const trimmed = dest.endsWith('/') && dest.length > 1 ? dest.slice(0, -1) : dest;
+  const normalized =
+    federatedScopePrefix(trimmed) !== null || trimmed.startsWith('/') ? trimmed : normalizeRelative(from, trimmed);
+  return normalized === trimmed ? [trimmed] : [normalized, trimmed];
 }
 
 /** Normalize the accepted input shapes to one iterable of pairs. */
@@ -840,26 +976,36 @@ function mapEntries(
 /**
  * Resolve a link destination against the index.
  *
- * Exact match first (the common case). A `./`- or `../`-relative destination is
- * normalized against the linking document, so a tree pointing at a sibling or a
- * parent resolves correctly.
+ * Candidates, in priority order (Issue #7):
+ *   1. the scope-aware `./`/`../`-normalized destination (document-directory
+ *      fold — GitHub and mainstream Markdown renderer semantics),
+ *   2. `@scope//` + destination when the linking document is federated (the
+ *      member-root-relative fallback — member repositories win over home),
+ *   3. the raw destination as an exact key (root-relative home spelling, and
+ *      physical-alias coordinates).
+ * Absolute paths and federated absolute destinations keep exact-match-only
+ * behavior (candidate 1 === 3). A `/`-absolute destination never folds.
  */
 export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, rawLinkPath: string): readonly DocPath[] {
   // Same normalization splitLink applies, for direct callers (LSP/MCP) that
   // hand over a destination without going through the link scan.
   const linkPath = normalizeSeparators(rawLinkPath);
-  // Priority when both resolve: document-relative wins (GitHub and mainstream
-  // Markdown renderer semantics); exact root-relative match is the fallback.
-  // Absolute paths keep exact-match-only behavior.
   const trimmed = linkPath.endsWith('/') && linkPath.length > 1 ? linkPath.slice(0, -1) : linkPath;
-  const normalized = trimmed.startsWith('/') ? trimmed : normalizeRelative(fromPath, trimmed);
-  if (normalized !== trimmed && index.entryOf(normalized)) return [normalized];
-  if (index.entryOf(trimmed)) return [trimmed];
+  const candidates = [...foldedKeys(fromPath, trimmed)];
+  const fromScope = federatedScopePrefix(fromPath);
+  if (fromScope !== null && federatedScopePrefix(trimmed) === null) {
+    const memberAbs = fromScope + trimmed;
+    if (!candidates.includes(memberAbs)) candidates.splice(1, 0, memberAbs);
+  }
+  for (const candidate of candidates) {
+    if (index.entryOf(candidate)) return [candidate];
+  }
   // Not a document, but the caller may have scanned it as a workspace file
   // (a schema, a config …): it exists, so MDL401 must not report it. No entry
   // comes back, which keeps MDL402 from judging fragments of non-Markdown.
-  if (normalized !== trimmed && index.knowsPath(normalized)) return [normalized];
-  if (index.knowsPath(trimmed)) return [trimmed];
+  for (const candidate of candidates) {
+    if (index.knowsPath(candidate)) return [candidate];
+  }
   if (linkPath !== trimmed) {
     const normalizedRaw = linkPath.startsWith('/') ? linkPath : normalizeRelative(fromPath, linkPath);
     if (normalizedRaw !== linkPath && index.knowsPath(normalizedRaw)) return [normalizedRaw];
@@ -868,8 +1014,10 @@ export function resolveLinkPath(index: WorkspaceIndex, fromPath: DocPath, rawLin
   // Case-insensitive filesystem fallback (win32 only, injectable): the file
   // exists under a different spelling, and the platform's FS would find it.
   if (index.caseInsensitiveLookup) {
-    const ci = index.caseInsensitiveLookup(normalized) ?? index.caseInsensitiveLookup(trimmed);
-    if (ci) return [ci];
+    for (const candidate of candidates) {
+      const ci = index.caseInsensitiveLookup(candidate);
+      if (ci) return [ci];
+    }
   }
   return EMPTY_PATHS;
 }

@@ -728,6 +728,43 @@ describe('workspace/didChangeWatchedFiles', () => {
       h.close();
     }
   });
+
+  it('T16 (Issue #6): creating a watched home file re-publishes its dangling Markdown linkers clean', async () => {
+    const h = harness();
+    try {
+      writeFileSync(
+        resolve(h.root, 'docs/a.md'),
+        '---\nmdlineage:\n  schema: 1\n  id: docs.a\n  kind: guide\n  status: active\n---\n\nSee [gone](./missing.md).\n',
+      );
+      await initialize(h);
+      const home = uri(h, 'docs/a.md');
+      assert.ok((await waitForDiagnostics(h, home)).some((d) => d.code === 'MDL401'), 'the link dangles at startup');
+
+      // An external creation: the watcher event plus the file on disk. The
+      // home-side chain routes through `set()`, so the dangling registry wake
+      // is automatic — no LSP-side bridge involved.
+      writeFileSync(
+        resolve(h.root, 'docs/missing.md'),
+        '---\nmdlineage:\n  schema: 1\n  id: docs.missing\n  kind: guide\n  status: active\n---\n\n# Missing\n',
+      );
+      h.send({
+        jsonrpc: '2.0',
+        method: 'workspace/didChangeWatchedFiles',
+        params: { changes: [{ uri: uri(h, 'docs/missing.md'), type: 1 /* Created */ }] },
+      });
+      const deadline = Date.now() + 8000;
+      while (Date.now() < deadline) {
+        if (!diagnosticsFor(h, home).some((d) => d.code === 'MDL401')) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      assert.ok(
+        !diagnosticsFor(h, home).some((d) => d.code === 'MDL401'),
+        'the home referrer is re-published clean after the target exists',
+      );
+    } finally {
+      h.close();
+    }
+  });
 });
 
 describe('severity mapping', () => {
@@ -1899,6 +1936,74 @@ describe('initialize root negotiation', () => {
 });
 
 describe('LSP Federation (Issue #4 Phase 2 PR-b: T12-T17)', () => {
+  it('T15 (Issue #6): didOpen of a member file re-publishes home dangling referrers clean, alias and scoped spellings', async () => {
+    const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-i6-bridge-'));
+    try {
+      const homeDir = resolve(tmp, 'home');
+      const memberDir = resolve(tmp, 'member-a');
+      mkdirSync(resolve(homeDir, 'docs'), { recursive: true });
+      mkdirSync(resolve(memberDir, 'docs'), { recursive: true });
+
+      writeFileSync(
+        resolve(homeDir, 'mdlineage.config.yaml'),
+        `configVersion: 1
+federations:
+  member-a:
+    local:
+      path: ../member-a
+`,
+      );
+      // Two home documents dangling on the SAME not-yet-existing member file,
+      // one per spelling.
+      writeFileSync(
+        resolve(homeDir, 'docs/scoped.md'),
+        '---\nmdlineage:\n  schema: 1\n  id: docs.scoped\n  kind: guide\n  status: active\n---\n\nSee [m](@member-a//docs/new.md).\n',
+      );
+      writeFileSync(
+        resolve(homeDir, 'docs/alias.md'),
+        '---\nmdlineage:\n  schema: 1\n  id: docs.alias\n  kind: guide\n  status: active\n---\n\nSee [m](../member-a/docs/new.md).\n',
+      );
+
+      const h = harness(homeDir);
+      try {
+        await initialize(h);
+        const scopedUri = uri(h, 'docs/scoped.md');
+        const aliasUri = uri(h, 'docs/alias.md');
+        assert.ok(
+          (await waitForDiagnostics(h, scopedUri)).some((d) => d.code === 'MDL401'),
+          'the scoped-spelled link dangles at startup',
+        );
+        assert.ok(
+          (await waitForDiagnostics(h, aliasUri)).some((d) => d.code === 'MDL401'),
+          'the alias-spelled link dangles at startup',
+        );
+
+        // The member file comes into existence through the editor: member
+        // directories are not watched (2026-10-11 decision), so this member
+        // branch event is the only one that can resolve the home links — the
+        // homeDanglingWake bridge must re-publish both home documents.
+        const before = h.received.length;
+        const memberUri = pathUri(resolve(memberDir, 'docs/new.md'));
+        didOpen(
+          h,
+          memberUri,
+          1,
+          '---\nmdlineage:\n  schema: 1\n  id: docs.new\n  kind: guide\n  status: active\n---\n\n# New\n',
+        );
+
+        await waitForDiagnosticsSet(h, scopedUri, before);
+        await waitForDiagnosticsSet(h, aliasUri, before);
+        assert.equal(diagnosticsFor(h, scopedUri).length, 0, 'the scoped-spelled home referrer is re-published clean');
+        assert.equal(diagnosticsFor(h, aliasUri).length, 0, 'the alias-spelled home referrer is re-published clean');
+        assert.equal(diagnosticsFor(h, memberUri).length, 0, 'the member document itself is clean');
+      } finally {
+        h.close();
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   it('T12: member document diagnostics are published to member URI and capped to warning', async () => {
     const tmp = mkdtempSync(resolve(tmpdir(), 'mdl-lsp-t12-'));
     try {
