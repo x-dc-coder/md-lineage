@@ -1730,6 +1730,74 @@ describe('dangling wake registry (Issue #6 — new-target backfill)', () => {
     publisher.publish([...result.affected]);
     assertEqualsRebuild('after re-create docs/target.py');
   });
+
+  it('removeFile forgets a scanned markdown path so MDL401 and MDL404 return', () => {
+    // The scanner records every in-universe path in knownPaths, including the
+    // markdown documents it also indexes. Deleting the document must drop that
+    // known entry, or resolveLinkPath still treats the file as present.
+    const config = { ...defaultConfig(), links: { ...defaultConfig().links, codeFences: 'corpus' as const } };
+    const body = ['See [b](b.md) and [schema](../schemas/x.json).', '', '```bash', 'python ../b.md', '```', ''].join('\n');
+    const files = new Map<string, string>([
+      ['docs/a.md', doc('docs.a', relations(), body)],
+      ['b.md', doc('docs.b')],
+    ]);
+    const index = createWorkspaceIndex(files, config, ['docs/a.md', 'b.md', 'schemas/x.json', 'docs', 'docs/']);
+    const before = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(before, 'MDL401').length, 0);
+    assert.equal(byCode(before, 'MDL404').length, 0);
+
+    const { affected } = removeFile(index, 'b.md');
+    assert.ok(affected.has('docs/a.md'), 'the referrer is woken');
+    assert.equal(index.entryOf('b.md'), null);
+    assert.equal(index.knowsPath('b.md'), false, 'the deleted document is no longer a known path');
+    assert.equal(index.knowsPath('schemas/x.json'), true, 'unrelated scanned files stay known');
+    assert.equal(index.knowsPath('docs/'), true, 'directory spellings stay known');
+
+    const after = validateWorkspace(index, { includeSingleDocument: false, paths: [...affected] });
+    assert.equal(byCode(after, 'MDL401').length, 1);
+    assert.equal(byCode(after, 'MDL401')[0]?.data?.path, 'b.md');
+    assert.equal(byCode(after, 'MDL404').length, 1);
+    assert.equal(byCode(after, 'MDL404')[0]?.data?.token, '../b.md');
+  });
+
+  it('member removeFile forgets the member known path across the federation proxy', () => {
+    const home = createWorkspaceIndex(
+      new Map([['docs/a.md', doc('docs.a', relations(), 'See [m](../member-a/docs/m.md).')]]),
+      defaultConfig(),
+      ['docs/a.md', 'docs', 'docs/'],
+    );
+    const member = createWorkspaceIndex(
+      new Map([['docs/m.md', doc('docs.m')]]),
+      defaultConfig(),
+      ['docs/m.md', 'docs', 'docs/'],
+    );
+    const proxy = createFederatedIndex(
+      home,
+      new Map([['member-a', { scope: 'member-a', index: member, alias: 'member-a' }]]),
+    );
+    assert.equal(byCode(validateWorkspace(proxy, { includeSingleDocument: false }), 'MDL401').length, 0);
+
+    removeFile(member, 'docs/m.md');
+    assert.equal(proxy.knowsPath('@member-a//docs/m.md'), false);
+    assert.equal(proxy.entryOf('@member-a//docs/m.md'), null);
+    const after = byCode(validateWorkspace(proxy, { includeSingleDocument: false }), 'MDL401');
+    assert.equal(after.length, 1);
+    assert.equal(after[0]?.path, 'docs/a.md');
+  });
+
+  it('delete restores a case-insensitive known file the document had hidden', () => {
+    const index = createWorkspaceIndex(
+      new Map([['Assets/Logo.PNG', doc('docs.logo')]]),
+      defaultConfig(),
+      ['assets/logo.png', 'Assets/Logo.PNG'],
+      { caseInsensitive: true },
+    );
+    assert.equal(index.caseInsensitiveLookup!('assets/logo.png'), 'Assets/Logo.PNG');
+    removeFile(index, 'Assets/Logo.PNG');
+    assert.equal(index.knowsPath('Assets/Logo.PNG'), false);
+    assert.equal(index.knowsPath('assets/logo.png'), true);
+    assert.equal(index.caseInsensitiveLookup!('ASSETS/LOGO.PNG'), 'assets/logo.png');
+  });
 });
 
 describe('incremental vs full rebuild equivalence (fuzz)', () => {

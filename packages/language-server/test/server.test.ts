@@ -2551,6 +2551,7 @@ federations:
 
       // Both home and member have a document with id "docs.shared-name".
       // In member, a doc refers to docs.shared-name with a bare id (its own internal doc).
+      // Home has its own bare referrer, which the rename must still rewrite.
       const homeDoc = `---
 mdlineage:
   schema: 1
@@ -2559,6 +2560,19 @@ mdlineage:
   status: active
 ---
 # Home Doc
+`;
+      const homeRef = `---
+mdlineage:
+  schema: 1
+  id: docs.home-ref
+  kind: guide
+  status: active
+  relations:
+    - type: depends_on
+      target: docs.shared-name
+      reason: "home internal reference"
+---
+# Home Ref
 `;
       const memberDoc1 = `---
 mdlineage:
@@ -2583,6 +2597,7 @@ mdlineage:
 # Member Doc 2
 `;
       writeFileSync(resolve(homeDir, 'docs/home.md'), homeDoc);
+      writeFileSync(resolve(homeDir, 'docs/ref.md'), homeRef);
       writeFileSync(resolve(memberDir, 'docs/m1.md'), memberDoc1);
       writeFileSync(resolve(memberDir, 'docs/m2.md'), memberDoc2);
 
@@ -2599,7 +2614,32 @@ mdlineage:
         });
 
         assert.ok(!response.error, 'Rename should succeed because member bare id reference is internal to member');
-        assert.ok(response.result?.changes, 'WorkspaceEdit returned');
+        const changes = response.result?.changes as Record<string, unknown> | undefined;
+        assert.ok(changes, 'WorkspaceEdit returned');
+        const keys = Object.keys(changes);
+        assert.ok(
+          keys.some((key) => key.endsWith('/docs/home.md')),
+          `declaration edit missing: ${keys.join(', ')}`,
+        );
+        assert.ok(
+          keys.some((key) => key.endsWith('/docs/ref.md')),
+          `home referrer edit missing: ${keys.join(', ')}`,
+        );
+        assert.equal(
+          keys.some((key) => key.includes('/member-a/')),
+          false,
+          `member bare target must stay untouched: ${keys.join(', ')}`,
+        );
+
+        const sameBareName = await request(h, 'textDocument/rename', {
+          textDocument: { uri: homeUri },
+          position: at(3, 10),
+          newName: 'docs.member-referencing',
+        });
+        assert.ok(
+          !sameBareName.error,
+          `a member-only id must not block a home rename: ${sameBareName.error?.message ?? ''}`,
+        );
       } finally {
         h.close();
       }

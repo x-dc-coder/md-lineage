@@ -817,7 +817,11 @@ function rename(context: ServerContext, params: RenameParams): WorkspaceEdit | n
   // Renaming onto an id another document already claims would fabricate
   // MDL301 in every touched file the moment the edit lands; the same
   // ResponseError contract as a broken pattern applies.
-  const claimants = context.index.idToPaths(params.newName);
+  // Bare ids are repository-local. The federated `idToPaths` union would treat
+  // a member-only id as a home collision and refuse a legal rename.
+  const claimants = context.index.idToPathsIn
+    ? context.index.idToPathsIn(params.newName, path)
+    : context.index.idToPaths(params.newName);
   if (claimants.length > 0) {
     throw new ResponseError(
       ErrorCodes.InvalidParams,
@@ -847,8 +851,12 @@ function rename(context: ServerContext, params: RenameParams): WorkspaceEdit | n
     ));
   }
 
-  // Every referrer's `target:` value, replaced where it is authored.
+  // Every home referrer's `target:` value, replaced where it is authored.
+  // `referrersOf` on the federation proxy unions every repository's bare id.
+  // A member's bare target names that member's own document, and writing it
+  // would edit a read-only repository. Envelope references are refused above.
   for (const referrer of context.index.referrersOf(oldId)) {
+    if (scopeOfPath(referrer) !== 'home') continue;
     const referrerEntry = context.index.entryOf(referrer);
     if (!referrerEntry) continue;
     const refText = textOf(context, referrer);

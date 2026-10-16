@@ -301,11 +301,13 @@ class IndexImpl implements WorkspaceIndex {
    */
   private readonly danglingReferrersByPath = new Map<string, Set<DocPath>>();
   /**
-   * Workspace files the caller scanned but did not index as documents (schemas,
-   * configs, images). Metadata handed in by the scanner — never read off disk
-   * here — so MDL401 can tell "absent from the repository" from "not Markdown".
+   * Workspace paths the scanner handed in, including markdown documents.
+   * Metadata only — never read off disk here — so MDL401 can tell "absent from
+   * the repository" from "present but not a document". `delete` removes the
+   * path: the scanner snapshot otherwise keeps a removed document "known", and
+   * `resolveLinkPath` then hides MDL401/MDL404 for the rest of the session.
    */
-  private readonly known: ReadonlySet<DocPath>;
+  private readonly known: Set<DocPath>;
   readonly config: Config;
   /** lower(path) → canonical path; built only under caseInsensitive. */
   private readonly caseInsensitive?: Map<string, DocPath>;
@@ -465,12 +467,26 @@ class IndexImpl implements WorkspaceIndex {
     this.collectAffected(affected, previous);
     this.unindex(path, previous);
     this.entries.delete(path);
-    // Drop the lowercase key only while it still maps to THIS path: a known
-    // non-document may share it (the constructor lets documents win), and its
-    // mapping must survive this document's removal.
+    // The scanner records markdown documents in `known` as well as `entries`.
+    // Leaving the path there makes `knowsPath` true after the document is gone,
+    // so a link to a deleted file stays silent instead of becoming MDL401.
+    this.known.delete(path);
+    // Drop the lowercase key only while it still maps to THIS path. A known
+    // file under another spelling may share it (the constructor lets documents
+    // win); that spelling has to become the lookup again once the document goes.
     if (this.caseInsensitive) {
       const lower = path.toLowerCase();
-      if (this.caseInsensitive.get(lower) === path) this.caseInsensitive.delete(lower);
+      if (this.caseInsensitive.get(lower) === path) {
+        let survivor: DocPath | undefined;
+        for (const candidate of this.known) {
+          if (candidate.toLowerCase() === lower) {
+            survivor = candidate;
+            break;
+          }
+        }
+        if (survivor === undefined) this.caseInsensitive.delete(lower);
+        else this.caseInsensitive.set(lower, survivor);
+      }
     }
     return affected;
   }
