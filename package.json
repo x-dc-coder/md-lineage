@@ -1,6 +1,6 @@
 {
   "name": "md-lineage",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "private": true,
   "description": "MDLineage monorepo: transport-independent metadata validation for Markdown documents.",
   "type": "module",
