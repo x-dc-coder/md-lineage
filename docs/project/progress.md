@@ -12,7 +12,7 @@ mdlineage:
       target: docs.open-source-landscape
       reason: 实现决策中的借鉴来源引用开源项目景观调研
   created_at: 2026-09-21
-  updated_at: 2026-10-16
+  updated_at: 2026-10-17
 ---
 
 # Project progress tracker
@@ -46,12 +46,15 @@ Master status table for MDLineage. The product has four pillars (defined in `REA
 | **Issue #6 — 增量校验「新建目标」回灌悬空引用方（MDL401/MDL404 共同缺口）** | P1, P2 | ✅ Done (2026-10-15) | dev: grok-build (subagent); design: glm-5.3 + Atria-Dawn 双独立设计经 orchestrator 仲裁合并（含 400 轮增量模糊与 5000 文档性能原型实测） | `IndexImpl` 私有悬空唤醒注册表 `danglingReferrersByPath`（links 与 fence tokens 共用一块；existence-independent raw 折叠键双拼写，与 `resolveLinkPath` 共用 `foldedKeys` 单一来源；无条件登记 + `unindex` 对称撤销）、`set`/`delete` 双向查表（仲裁：delete 也必须查，无迁移记账）、win32 `caseInsensitive` 表补 `set` 登记 + `delete` 条目清理（顺带修同类「新文件未反映」缺口）、`WorkspaceIndex` 可选查询 `danglingReferrersOf`（联邦代理不实现）、LSP `homeDanglingWake` bridge（成员变更经 alias+scoped 双拼写回灌主仓悬空引用方；home watchedFiles 链路由 `set()` 自动覆盖零改动） | 新增 12 项测试全绿（workspace T1–T9/T17：创建/删除双向、创建→删除守卫、unindex 对称、CI 表维护、查询契约、剧本式 Publisher 发布等价、150 轮声明宇宙 create/update/delete 模糊、1000 文档哨兵悬空表 ≤2×引用数；fence (c) 双拼写围栏；LSP T15 bridge 端到端 + T16 home 回灌）；原型 5000 文档合成语料：build 1390 ms、悬空表 17550 键 / 22500 登记（≤2 键/引用，O(引用数)）、build 开销 <1%、`updateFile` 基线不变、内存约 1–2 MB，病理坏仓上限 2× 引用总数线性无二次增长；全套 1070 pass + 2 skip / 140 suites；`check .` 零诊断；`baseline verify` 无漂移 | main |
 | **增量删除后诊断回灌，与主仓重命名隔离** | P1, P2 | ✅ Done (2026-10-16) | dev: grok-4.7; review: Atria-Dawn + glm-5.3 | `IndexImpl.delete` 从 `known` 移除被删文档路径，大小写不敏感表把键交还给仍在的已知文件；LSP `rename` 占用检查改用 `idToPathsIn`，编辑循环跳过非 home 引用方。多余 `..` 折进仓库根维持既有设计 | workspace 新增 3 项测试；T16c 断言 WorkspaceEdit 不含成员 URI，且成员独有 id 不阻塞主仓重命名；全套 1075 tests / 140 suites（1073 pass + 2 skip） | main |
 | **Release v0.5.2 — 删除后诊断回灌与重命名隔离** | — | ✅ Done (2026-10-16) | bump → tag `v0.5.2` → GitHub Release | 7 包 0.5.1 → 0.5.2（patch：增量删除与主仓重命名） | Release 资产由 release.yml 挂载（7 tgz + 3 schema） | tag `v0.5.2` |
+| **研读复盘列入目录规范（过程目录）** | — | ✅ Done (2026-10-17) | 规范正文 + 本仓库 layout | `研读复盘/` 作为按需过程目录，不占领域插槽。看板与带日期实录分成两条 layout 规则 | `config validate` 通过；`check .` 无新诊断 | main |
+| **Release v0.5.3 — 研读复盘目录规范** | — | ✅ Done (2026-10-17) | bump → tag `v0.5.3` → GitHub Release | 7 包 0.5.2 → 0.5.3（patch：目录规范） | Release 资产由 release.yml 挂载（7 tgz + 3 schema） | tag `v0.5.3` |
 | Repository-wide analysis (dup concepts, contradictions, orphans, themes) | P1 | ⬜ Not started | TBD | batch analysis, topic clusters, evaluation sets | recall/precision targets | roadmap Phase 3 |
 
 ## Decision log
 
 | Date | Decision | Rationale |
 |---|---|---|
+| 2026-10-17 | `研读复盘/` 作为可选过程目录写入目录规范，不并入五个核心骨架，也不占用领域插槽 | 名称和职责跨领域固定，但不是每个仓库都已有研读笔记，故不写进「任何项目均具备」。领域插槽一个仓库只留一个顶层名字。layout 拆成 `README.md`（reference）与 `YYYY-MM-DD-*.md`（report）两条规则，`authority` 均为 supporting |
 | 2026-10-16 | 删除文档时同步移出 `known`；LSP 重命名裸 id 只改主仓。多余 `..` 的折叠不改 | 扫描把 markdown 同时写入 `known`，`removeFile` 只删 entries 后 `knowsPath` 仍为真，MDL401/MDL404 在会话内沉默。联邦 `referrersOf` 对裸 id 取并集，rename 会把成员仓内部 target 写进 WorkspaceEdit。`foldSegments` 吸收越界 `..` 有注释锁定，不作为缺陷 |
 | 2026-10-15 | 悬空反向边无条件登记（existence-independent raw 折叠键双拼写），否决「仅目标不可解析时登记」 | 条件登记使 unindex 按索引状态重算，而 reindex/unindex 之间目标可能已被创建 → 漏减泄漏、反向边不对称；无条件登记 = 超集唤醒注册表（误唤醒安全，重校验同结果，漏唤醒才是 bug）。原型 400 轮 create/modify/delete 模糊（per-path 发布缓存模型）证实「set/delete 双向查表、无迁移记账」增量==重建（对照组 200 轮 68 次 stale） |
 | 2026-10-15 | 悬空键与 `resolveLinkPath` 共用同一 scope-aware 折叠（`foldedKeys` 单一来源） | 反向键与解析器分叉 = 静默不一致；共用后唤醒键与解析候选永不漂移，#7 的成员坐标系语义对悬空登记自动生效 |

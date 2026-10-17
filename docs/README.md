@@ -9,7 +9,7 @@ mdlineage:
     - documentation-index
     - mdlineage
   created_at: 2026-10-01
-  updated_at: 2026-10-01
+  updated_at: 2026-10-17
 ---
 
 # MDLineage 项目文档全景导航
@@ -70,7 +70,7 @@ mdlineage:
 
 ---
 
-## 5. 研读复盘（研读复盘/ · 领域特化插槽）
+## 5. 研读复盘（研读复盘/ · 过程目录）
 
 | 文档名称 | 主题说明 | 适用场景 |
 |---|---|---|
