@@ -244,6 +244,17 @@ function intentDiagnostics(
     );
   }
 
+  // The whitelist is the mirror of forbidStatus and the status analogue of
+  // intent.kinds: a status outside the declared set means the document's
+  // lifecycle contradicts the directory's purpose. A missing status is not
+  // this check's business (MDL102/MDL501 own the required-field contract).
+  if (intent.statuses && intent.statuses.length > 0 && status !== undefined && !intent.statuses.includes(status)) {
+    push502(
+      { rule: 'intent.statuses', status, allowed: intent.statuses },
+      `Directory intent violation: status '${status}' is not in [${intent.statuses.join(', ')}] for '${rule.match}'`,
+    );
+  }
+
   if (intent.maxDepth !== undefined) {
     const depth = directoryDepth(matchPrefix(rule.match), normalizedPath);
     if (depth > intent.maxDepth) {

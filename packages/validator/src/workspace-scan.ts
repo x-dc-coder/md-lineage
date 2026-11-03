@@ -27,7 +27,7 @@ export interface WorkspaceUniverse {
 export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUniverse {
   const absRoot = resolve(root);
   const filter = new PathFilter({ config });
-  const hardPrune = filter.hardPrunePatterns();
+  const linkPrune = filter.linkHardPrunePatterns();
 
   const documents = new Map<string, string>();
   const knownPathsSet = new Set<string>();
@@ -60,6 +60,11 @@ export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUn
     }
 
     for (const entry of entries) {
+      // Dot entries are tool state, not workspace content: .git, .rivet,
+      // .venv, editor backups. The CLI's glob uses dot:false for exactly this
+      // reason; indexing them made every backup snapshot claim its original
+      // document's id (MDL301) and inflated knownPaths with VCS internals.
+      if (entry.name.startsWith('.')) continue;
       const logicalPath = logicalDir ? `${logicalDir}/${entry.name}` : entry.name;
       const physicalPath = join(physicalDir, entry.name);
 
@@ -86,20 +91,20 @@ export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUn
 
         if (st.isDirectory()) {
           const cleanDir = logicalPath.endsWith('/') ? logicalPath.slice(0, -1) : logicalPath;
-          if (hardPrune.some((pat) => matchesPattern(cleanDir, pat))) {
+          if (linkPrune.some((pat) => matchesPattern(cleanDir, pat))) {
             continue;
           }
-          if (filter.inUniverse(cleanDir)) {
+          if (filter.inLinkUniverse(cleanDir)) {
             knownPathsSet.add(cleanDir);
             knownPathsSet.add(cleanDir + '/');
           }
           queue.push({ logicalDir: logicalPath, physicalDir: realTarget, depth: depth + 1 });
         } else if (st.isFile()) {
-          if (!filter.inUniverse(logicalPath)) {
+          if (!filter.inLinkUniverse(logicalPath)) {
             continue;
           }
           knownPathsSet.add(logicalPath);
-          if (logicalPath.toLowerCase().endsWith('.md')) {
+          if (logicalPath.toLowerCase().endsWith('.md') && filter.inReportSet(logicalPath)) {
             try {
               const content = stripBom(readFileSync(realTarget, 'utf8'));
               documents.set(logicalPath, content);
@@ -110,20 +115,20 @@ export function scanWorkspaceUniverse(root: string, config: Config): WorkspaceUn
         }
       } else if (entry.isDirectory()) {
         const cleanDir = logicalPath.endsWith('/') ? logicalPath.slice(0, -1) : logicalPath;
-        if (hardPrune.some((pat) => matchesPattern(cleanDir, pat))) {
+        if (linkPrune.some((pat) => matchesPattern(cleanDir, pat))) {
           continue;
         }
-        if (filter.inUniverse(cleanDir)) {
+        if (filter.inLinkUniverse(cleanDir)) {
           knownPathsSet.add(cleanDir);
           knownPathsSet.add(cleanDir + '/');
         }
         queue.push({ logicalDir: logicalPath, physicalDir: physicalPath, depth });
       } else if (entry.isFile()) {
-        if (!filter.inUniverse(logicalPath)) {
+        if (!filter.inLinkUniverse(logicalPath)) {
           continue;
         }
         knownPathsSet.add(logicalPath);
-        if (logicalPath.toLowerCase().endsWith('.md')) {
+        if (logicalPath.toLowerCase().endsWith('.md') && filter.inReportSet(logicalPath)) {
           try {
             const content = stripBom(readFileSync(physicalPath, 'utf8'));
             documents.set(logicalPath, content);

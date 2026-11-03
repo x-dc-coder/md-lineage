@@ -256,7 +256,7 @@
             "type": "object",
             "minProperties": 1,
             "additionalProperties": false,
-            "description": "Declarative statement of what this directory is for. Documented here, and enforced where a key has a check: intent.kinds, intent.authority and intent.forbidStatus report MDL502 (directory-misplaced); intent.maxDepth and intent.naming report MDL504 (layout-constraint). intent.description, intent.topics, intent.statuses, intent.catalog and intent.tolerateLegacy are recorded for humans and catalog generation and are not enforced yet.",
+            "description": "Declarative statement of what this directory is for. Documented here, and enforced where a key has a check: intent.kinds, intent.authority, intent.statuses and intent.forbidStatus report MDL502 (directory-misplaced); intent.maxDepth and intent.naming report MDL504 (layout-constraint). intent.description, intent.topics, intent.catalog and intent.tolerateLegacy are recorded for humans and catalog generation and are not enforced yet.",
             "properties": {
               "description": {
                 "type": "string",
@@ -297,7 +297,7 @@
                   "minLength": 1
                 },
                 "minItems": 1,
-                "description": "Statuses expected in this directory."
+                "description": "Statuses allowed in this directory (whitelist, the mirror of forbidStatus); a document whose status is outside this set reports MDL502. A document without a status is not judged by this key."
               },
               "forbidStatus": {
                 "type": "array",

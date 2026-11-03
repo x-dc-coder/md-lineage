@@ -13,6 +13,7 @@ import { resolve, sep, relative, parse } from 'node:path';
 import {
   PathFilter,
   type Config,
+  type RuleOrigin,
 } from '@mdlineage/validator';
 import { gitCheckIgnored, repositoryRoot } from './git.js';
 
@@ -54,7 +55,9 @@ export interface ExpandedPath {
  */
 export function knownWorkspacePaths(cwd: string, options: DiscoveryOptions = {}): string[] {
   const filter = new PathFilter({ config: options.config, extraExclude: options.exclude });
-  const hardPrune = filter.hardPrunePatterns();
+  // The link universe prunes only the built-in black holes: a user exclude
+  // means "do not validate", not "does not exist".
+  const hardPrune = filter.linkHardPrunePatterns();
   const follow = options.config?.files.followSymlinks ?? true;
 
   const hits = globSync(['**/*'], {
@@ -73,7 +76,7 @@ export function knownWorkspacePaths(cwd: string, options: DiscoveryOptions = {})
     const isDir = posix.endsWith('/');
     const clean = isDir && posix.length > 1 ? posix.slice(0, -1) : posix;
 
-    if (!filter.inUniverse(clean)) {
+    if (!filter.inLinkUniverse(clean)) {
       continue;
     }
 
@@ -103,18 +106,61 @@ export function knownNonMarkdownPaths(cwd: string, options: DiscoveryOptions = {
  * `others` carries the non-Markdown files the scan met.
  * `excluded` names arguments whose matches were filtered out.
  */
+export interface ExcludedArg {
+  /** The argument as the caller spelled it. */
+  readonly arg: string;
+  /** Why nothing was validated: a rule source, or an include-pattern miss. */
+  readonly origin: RuleOrigin | 'include';
+  /** The pattern that decided it, when a rule did. */
+  readonly pattern?: string;
+}
+
+/**
+ * The one place an excluded argument is explained.
+ *
+ * Naming the wrong source is worse than naming none: a caller who sees
+ * "default exclude list" for their own `files.exclude` goes looking in the
+ * wrong file. `check` and `fix` share this text so the two cannot drift.
+ */
+export function formatExcludedMessage(
+  path: string,
+  origin: ExcludedArg['origin'],
+  verb: 'checked' | 'fixed' = 'checked',
+): string {
+  const suffix = `no files were ${verb}`;
+  switch (origin) {
+    case 'default':
+      return `mdlineage: ${path} matches the default exclude list (node_modules, dist, vendor); ${suffix}`;
+    case 'config':
+      return `mdlineage: ${path} matches files.exclude in config; ${suffix}`;
+    case 'cli':
+      return `mdlineage: ${path} matches --exclude; ${suffix}`;
+    case 'include':
+      return `mdlineage: ${path} matches no files.include pattern; ${suffix}`;
+  }
+}
+
 export function expandMarkdownPaths(
   args: readonly string[],
   cwd: string,
   options: DiscoveryOptions = {},
-): { files: ExpandedPath[]; others: ExpandedPath[]; missed: string[]; excluded: string[] } {
+): { files: ExpandedPath[]; others: ExpandedPath[]; missed: string[]; excluded: ExcludedArg[] } {
   const filter = new PathFilter({ config: options.config, extraExclude: options.exclude });
   const hardPrune = filter.hardPrunePatterns();
+  // The link scan must reach real files under a user exclude; only the
+  // built-in black holes are pruned.
+  const linkPrune = filter.linkHardPrunePatterns();
 
   const found = new Map<string, ExpandedPath>();
   const others = new Map<string, ExpandedPath>();
   const missed: string[] = [];
-  const excluded: string[] = [];
+  const excluded: ExcludedArg[] = [];
+
+  /** Attribute a filtered path to the rule that removed it (or to include). */
+  const explain = (rel: string): { origin: ExcludedArg['origin']; pattern?: string } => {
+    const hit = filter.exclusionMatch(rel);
+    return hit ? { origin: hit.origin, pattern: hit.pattern } : { origin: 'include' };
+  };
 
   for (const arg of args) {
     const absolute = resolve(cwd, arg);
@@ -131,18 +177,24 @@ export function expandMarkdownPaths(
       const matched = globSync([pattern], { cwd, ignore: hardPrune, nodir: true, mark: true });
       if (matched.length === 0) {
         const unfiltered = globSync([pattern], { cwd, nodir: true, mark: true });
-        if (unfiltered.length > 0) excluded.push(arg);
-        else missed.push(arg);
+        if (unfiltered.length > 0) {
+          const first = unfiltered[0];
+          const firstRel =
+            first === undefined ? arg : relativeForReport(resolve(cwd, first), cwd, first);
+          excluded.push({ arg, ...explain(firstRel) });
+        } else {
+          missed.push(arg);
+        }
         continue;
       }
       for (const hit of matched) {
         const full = resolve(cwd, hit);
         const rel = relativeForReport(full, cwd, hit);
-        if (filter.inReportSet(rel)) {
-          // Key on the individual hit: the shared glob arg would collapse
-          // every match into one map entry.
-          add(found, others, full, hit, cwd);
-        }
+        const isMd = full.toLowerCase().endsWith('.md');
+        if (isMd ? !filter.inReportSet(rel) : !filter.inLinkUniverse(rel)) continue;
+        // Key on the individual hit: the shared glob arg would collapse
+        // every match into one map entry.
+        add(found, others, full, hit, cwd);
       }
       continue;
     }
@@ -164,24 +216,29 @@ export function expandMarkdownPaths(
         add(found, others, full, rel, cwd, rel);
         addedAny = true;
       }
-      for (const hit of globSync([allPattern], { cwd: globCwd, ignore, nodir: true, mark: true, follow })) {
+      for (const hit of globSync([allPattern], { cwd: globCwd, ignore: linkPrune, nodir: true, mark: true, follow })) {
         const full = resolve(globCwd, hit);
         const rel = posixRelative(cwd, full);
         if (rel.toLowerCase().endsWith('.md')) continue;
-        if (!filter.inUniverse(rel)) continue;
+        if (!filter.inLinkUniverse(rel)) continue;
         add(found, others, full, rel, cwd, rel);
       }
       if (!addedAny) {
         const unfiltered = globSync([mdPattern], { cwd: globCwd, nodir: true, mark: true, follow });
-        if (unfiltered.length > 0) excluded.push(arg);
+        if (unfiltered.length > 0) {
+          const first = unfiltered[0];
+          const firstRel = first === undefined ? relDir : posixRelative(cwd, resolve(globCwd, first));
+          const dirHit = filter.exclusionMatch(relDir);
+          excluded.push({ arg, ...(dirHit ? { origin: dirHit.origin, pattern: dirHit.pattern } : explain(firstRel)) });
+        }
       }
       continue;
     }
 
     const rel = relativeForReport(absolute, cwd, arg);
     const isMd = absolute.toLowerCase().endsWith('.md');
-    if (isMd ? !filter.inReportSet(rel) : !filter.inUniverse(rel)) {
-      if (isMd) excluded.push(arg);
+    if (isMd ? !filter.inReportSet(rel) : !filter.inLinkUniverse(rel)) {
+      if (isMd) excluded.push({ arg, ...explain(rel) });
       continue;
     }
     add(found, others, absolute, arg, cwd);

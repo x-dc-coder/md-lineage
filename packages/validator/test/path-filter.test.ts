@@ -178,3 +178,81 @@ describe('PathFilter — M1 matrix: ../ prefix paths', () => {
     assert.equal(filter.inReportSet('../skip/a.md'), false);
   });
 });
+
+describe('PathFilter — link universe (inLinkUniverse)', () => {
+  it('keeps user-excluded paths in the link universe', () => {
+    const base = defaultConfig();
+    const config: Config = {
+      ...base,
+      files: { include: ['**/*.md'], exclude: ['private/**', ...BUILTIN_EXCLUDE_GLOBS] },
+    };
+    const filter = new PathFilter({ config });
+
+    // The report set drops them (they are not validated) …
+    assert.equal(filter.inReportSet('private/secret.md'), false);
+    assert.equal(filter.inReportSet('private/data.csv'), false);
+    // … but a link to an existing file must still resolve.
+    assert.equal(filter.inLinkUniverse('private/secret.md'), true);
+    assert.equal(filter.inLinkUniverse('private/data.csv'), true);
+  });
+
+  it('still drops the built-in black holes from the link universe', () => {
+    const filter = new PathFilter();
+    assert.equal(filter.inLinkUniverse('node_modules/pkg/README.md'), false);
+    assert.equal(filter.inLinkUniverse('dist/bundle.md'), false);
+    assert.equal(filter.inLinkUniverse('vendor/lib/index.js'), false);
+    assert.equal(filter.inLinkUniverse('sub/node_modules/pkg/a.md'), false);
+    assert.equal(filter.inLinkUniverse('docs/guide.md'), true);
+  });
+
+  it('applies the built-in black holes even when a config replaces files.exclude', () => {
+    const base = defaultConfig();
+    const config: Config = {
+      ...base,
+      files: { include: ['**/*.md'], exclude: ['private/**'] },
+    };
+    const filter = new PathFilter({ config });
+    assert.equal(filter.inReportSet('node_modules/pkg/a.md'), true, 'the report set keeps its historical semantics');
+    assert.equal(filter.inLinkUniverse('node_modules/pkg/a.md'), false, 'the link universe always drops built-ins');
+  });
+
+  it('honours a negation pull-back inside a built-in black hole', () => {
+    const base = defaultConfig();
+    const config: Config = {
+      ...base,
+      files: {
+        include: ['**/*.md'],
+        exclude: [...BUILTIN_EXCLUDE_GLOBS, '!node_modules/keep/**'],
+      },
+    };
+    const filter = new PathFilter({ config });
+    assert.equal(filter.inLinkUniverse('node_modules/keep/a.md'), true);
+    assert.equal(filter.inLinkUniverse('node_modules/other/a.md'), false);
+  });
+
+  it('linkHardPrunePatterns contains only the built-in black holes', () => {
+    const base = defaultConfig();
+    const config: Config = {
+      ...base,
+      files: { include: ['**/*.md'], exclude: ['private/**', ...BUILTIN_EXCLUDE_GLOBS] },
+    };
+    const filter = new PathFilter({ config, extraExclude: ['tmp/**'] });
+    const prune = filter.linkHardPrunePatterns();
+    assert.deepEqual([...prune].sort(), [...BUILTIN_EXCLUDE_GLOBS].sort());
+    assert.equal(prune.includes('private/**'), false, 'a user exclude must not prune the link scan');
+    assert.equal(prune.includes('tmp/**'), false, 'a CLI exclude must not prune the link scan');
+  });
+
+  it('linkHardPrunePatterns keeps a black hole a negation pulls back', () => {
+    const base = defaultConfig();
+    const config: Config = {
+      ...base,
+      files: {
+        include: ['**/*.md'],
+        exclude: [...BUILTIN_EXCLUDE_GLOBS, '!node_modules/keep/**'],
+      },
+    };
+    const filter = new PathFilter({ config });
+    assert.equal(filter.linkHardPrunePatterns().includes('**/node_modules/**'), false);
+  });
+});

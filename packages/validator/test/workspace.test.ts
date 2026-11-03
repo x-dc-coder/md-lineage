@@ -2342,3 +2342,111 @@ function mulberry32(seed: number): () => number {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 }
+
+describe('baseline occurrences (optional v1 field)', () => {
+  const twoBadRelations = () =>
+    new Map<string, string>([
+      [
+        'a.md',
+        [
+          '---',
+          'mdlineage:',
+          '  schema: 1',
+          '  id: docs.a',
+          '  kind: policy',
+          '  status: active',
+          '  relations:',
+          '    - type: depends_on',
+          '      target: docs.missing-one',
+          '      reason: r',
+          '    - type: depends_on',
+          '      target: docs.missing-two',
+          '      reason: r',
+          '---',
+          '',
+          '# a',
+          '',
+        ].join('\n'),
+      ],
+    ]);
+
+  it('a v1 baseline without occurrences keeps unlimited suppression', () => {
+    const index = createWorkspaceIndex(twoBadRelations(), defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    assert.equal(byCode(all, 'MDL302').length, 2, 'the fixture carries two violations of one code in one file');
+
+    const baseline: Baseline = { version: 1, codes: { MDL302: ['a.md'] } };
+    const suppressed = validateWorkspace(index, { includeSingleDocument: false, baseline });
+    assert.equal(byCode(suppressed, 'MDL302').length, 0, 'v1 without occurrences suppresses every occurrence');
+  });
+
+  it('a baseline with occurrences suppresses only the recorded quota', () => {
+    const index = createWorkspaceIndex(twoBadRelations(), defaultConfig());
+    const baseline: Baseline = {
+      version: 1,
+      codes: { MDL302: ['a.md'] },
+      occurrences: { MDL302: { 'a.md': 1 } },
+    };
+    const left = byCode(validateWorkspace(index, { includeSingleDocument: false, baseline }), 'MDL302');
+    assert.equal(left.length, 1, 'the second occurrence is not covered by the recorded quota');
+  });
+
+  it('a quota larger than the current count suppresses everything', () => {
+    const index = createWorkspaceIndex(twoBadRelations(), defaultConfig());
+    const baseline: Baseline = {
+      version: 1,
+      codes: { MDL302: ['a.md'] },
+      occurrences: { MDL302: { 'a.md': 5 } },
+    };
+    const left = byCode(validateWorkspace(index, { includeSingleDocument: false, baseline }), 'MDL302');
+    assert.equal(left.length, 0);
+  });
+
+  it('writeBaseline records occurrences and keeps the v1 shape', () => {
+    const index = createWorkspaceIndex(twoBadRelations(), defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    const next = JSON.parse(writeBaseline(all)) as Baseline;
+    assert.equal(next.version, 1);
+    assert.deepEqual(next.codes.MDL302, ['a.md']);
+    assert.equal(next.occurrences?.MDL302?.['a.md'], 2, 'the observed count is recorded');
+  });
+
+  it('writeBaseline keeps the larger of the previous quota and the current count', () => {
+    const index = createWorkspaceIndex(twoBadRelations(), defaultConfig());
+    const all = validateWorkspace(index, { includeSingleDocument: false });
+    const previous: Baseline = {
+      version: 1,
+      codes: { MDL302: ['a.md'] },
+      occurrences: { MDL302: { 'a.md': 4 } },
+    };
+    const next = JSON.parse(writeBaseline(all, previous)) as Baseline;
+    assert.equal(next.occurrences?.MDL302?.['a.md'], 4, 'shrinking the quota silently would weaken the gate');
+  });
+
+  it('parseBaseline accepts and normalizes occurrences, dropping junk', () => {
+    const parsed = parseBaseline(
+      JSON.stringify({
+        version: 1,
+        codes: { MDL302: ['a.md'] },
+        occurrences: { MDL302: { 'a.md': 2, 'b.md': 'x' }, MDL999: 5, MDL301: { 'c.md': 0 } },
+      }),
+    );
+    assert.equal(parsed.error, null);
+    assert.equal(parsed.baseline?.occurrences?.MDL302?.['a.md'], 2);
+    assert.equal(parsed.baseline?.occurrences?.MDL302?.['b.md'], undefined);
+    assert.equal(parsed.baseline?.occurrences?.MDL999, undefined);
+    assert.equal(parsed.baseline?.occurrences?.MDL301, undefined, 'a zero quota is not a quota');
+  });
+
+  it('pruneBaseline drops occurrences for pruned paths', () => {
+    const previous: Baseline = {
+      version: 1,
+      codes: { MDL302: ['a.md', 'b.md'] },
+      occurrences: { MDL302: { 'a.md': 2, 'b.md': 1 } },
+    };
+    const pruned = pruneBaseline(previous, [{ code: 'MDL302', path: 'a.md' }]);
+    assert.deepEqual(pruned.codes.MDL302, ['a.md']);
+    assert.equal(pruned.occurrences?.MDL302?.['b.md'], undefined);
+    assert.equal(pruned.occurrences?.MDL302?.['a.md'], 2);
+  });
+});

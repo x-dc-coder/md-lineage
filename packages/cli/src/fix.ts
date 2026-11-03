@@ -34,7 +34,7 @@ import {
   scopeOfPath,
 } from '@mdlineage/validator';
 import { buildProposals, applyProposalToContent, diffOf, type MetadataProposal } from '@mdlineage/mcp-server';
-import { expandMarkdownPaths } from './paths.js';
+import { expandMarkdownPaths, formatExcludedMessage } from './paths.js';
 import { createHash } from 'node:crypto';
 
 interface FixValues {
@@ -148,10 +148,12 @@ export function runFix(args: string[], values: FixValues): number {
     return 2;
   }
   for (const path of excluded) {
-    process.stderr.write(
-      `mdlineage: ${path} matches the default exclude list (node_modules, dist); no files were fixed\n`,
-    );
+    process.stderr.write(`${formatExcludedMessage(path.arg, path.origin, 'fixed')}\n`);
   }
+  // Same contract as `check`: an explicitly named target that matched nothing
+  // is a usage mistake, not a clean run.
+  const explicitTarget = paths.some((p) => p.trim() !== '' && p !== '.');
+  if (files.length === 0 && excluded.length > 0 && explicitTarget) return 2;
   if (rejected.length > 0) return 1;
 
   // A config the run could not use is reported the way `check` reports it and

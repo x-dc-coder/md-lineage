@@ -26,6 +26,7 @@ import {
   writeBaseline,
   pruneBaseline,
   diffAgainstBaseline,
+  shrunkenOccurrences,
   BASELINE_FILE_NAME,
   BASELINE_VERSION,
   type Baseline,
@@ -386,9 +387,13 @@ export async function verifyBaseline(root: string, options: BaselineOptions = {}
   const baseline = loaded.baseline;
   const { reported, suppressed } = diffAgainstBaseline(diagnostics, baseline);
   const stale = staleEntries(baseline, diagnostics);
+  // Occurrence accounting is only meaningful when the file opts in. A v1 file
+  // without `occurrences` keeps the historical "one entry, unlimited
+  // suppression" contract, so adopting the quota is a deliberate update.
+  const shrunken = shrunkenOccurrences(baseline, diagnostics);
   const ruleCount = countEntries(baseline);
 
-  if (reported.length === 0 && stale.length === 0) {
+  if (reported.length === 0 && stale.length === 0 && shrunken.length === 0) {
     const lines = [
       `mdlineage: baseline verified, ${suppressed.length} accepted violation${suppressed.length === 1 ? '' : 's'} (${ruleCount} (code, path) rules, ${suppressed.length} occurrences)`,
     ];
@@ -398,9 +403,13 @@ export async function verifyBaseline(root: string, options: BaselineOptions = {}
   const lines: string[] = [];
   for (const d of reported) lines.push(`+ ${d.path} ${d.code} ${d.message}`);
   for (const { code, path } of stale) lines.push(`- ${path} ${code} (no longer violated)`);
+  for (const s of shrunken) {
+    lines.push(`~ ${s.path} ${s.code} (occurrence ${s.expected} -> ${s.found})`);
+  }
   lines.push(
     `mdlineage: baseline mismatch: ${reported.length} new violation${reported.length === 1 ? '' : 's'}, ` +
-      `${stale.length} stale entr${stale.length === 1 ? 'y' : 'ies'}`,
+      `${stale.length} stale entr${stale.length === 1 ? 'y' : 'ies'}, ` +
+      `${shrunken.length} shrunken occurrence${shrunken.length === 1 ? '' : 's'}`,
   );
   return { exit: 1, lines };
 }

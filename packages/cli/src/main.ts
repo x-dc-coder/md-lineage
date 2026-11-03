@@ -34,7 +34,7 @@ import {
 } from './check.js';
 import { validateDocumentSync, loadConfig, defaultConfig, resolveFederations, stripBom, type Config, type ResolvedFederation } from '@mdlineage/validator';
 import { renderSarif } from './sarif.js';
-import { expandMarkdownPaths, UsageError, type ExpandedPath, type DiscoveryOptions } from './paths.js';
+import { expandMarkdownPaths, formatExcludedMessage, UsageError, type ExpandedPath, type DiscoveryOptions } from './paths.js';
 import { gitStatus, changedMarkdownFiles, readWorktree, repositoryRoot } from './git.js';
 import { updateBaseline, writeChangeSet, describeChangeSet, showBaseline, verifyBaseline, baselineRoot, BASELINE_FILE } from './baseline.js';
 import { startStdio } from '@mdlineage/language-server';
@@ -464,10 +464,13 @@ async function runPaths(options: RunOptions): Promise<number> {
     return 2;
   }
   for (const path of excluded) {
-    process.stderr.write(
-      `mdlineage: ${path} matches the default exclude list (node_modules, dist); no files were checked\n`,
-    );
+    process.stderr.write(`${formatExcludedMessage(path.arg, path.origin)}\n`);
   }
+  // An explicitly named target that matched nothing is a usage mistake, not a
+  // clean run: "0 files checked, no diagnostics" must never look like a pass.
+  // A whole-tree scan (no argument, or '.') keeps its historical exit code.
+  const explicitTarget = options.paths.some((p) => p.trim() !== '' && p !== '.');
+  if (files.length === 0 && excluded.length > 0 && explicitTarget) return 2;
 
   const checkOpts: CheckOptions = {
     ...toCheckOptions(options),

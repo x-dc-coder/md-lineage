@@ -309,3 +309,65 @@ describe('layout config parsing', () => {
     assert.equal(r.diagnostics[0]?.code, 'MDL900');
   });
 });
+
+describe('layout intent — MDL502 statuses whitelist', () => {
+  it('a status inside intent.statuses reports nothing', () => {
+    const config = configWith([{ match: 'docs/历史归档/**', intent: { statuses: ['archived'] } }]);
+    const content = doc(meta('policy', 'archived'));
+    const r = validateDocumentSync({ content, path: 'docs/历史归档/old.md', config });
+    assert.equal(r.diagnostics.some((x) => x.code === 'MDL502'), false);
+  });
+
+  it('a status outside intent.statuses reports MDL502 with rule data', () => {
+    const config = configWith([{ match: 'docs/历史归档/**', intent: { statuses: ['archived'] } }]);
+    const content = doc(meta('policy', 'active'));
+    const r = validateDocumentSync({ content, path: 'docs/历史归档/active.md', config });
+    const d = r.diagnostics.find((x) => x.code === 'MDL502');
+    assert.ok(d, 'a status outside the whitelist must report MDL502');
+    assert.equal(d.layer, 'policy-layout');
+    assert.equal(d.severity, 'warning');
+    assert.equal(d.data?.rule, 'intent.statuses');
+    assert.equal(d.data?.status, 'active');
+    assert.deepEqual(d.data?.allowed, ['archived']);
+    assert.match(d.message, /Directory intent violation/);
+  });
+
+  it('a document without a status does not report intent.statuses', () => {
+    const config = configWith([{ match: 'docs/**', intent: { statuses: ['archived'] } }]);
+    const content = doc({ id: 'docs.sample', kind: 'policy' });
+    const r = validateDocumentSync({ content, path: 'docs/no-status.md', config });
+    assert.equal(
+      r.diagnostics.some((x) => x.code === 'MDL502' && x.data?.rule === 'intent.statuses'),
+      false,
+      'a missing status is MDL102/MDL501 territory, not the whitelist check',
+    );
+  });
+
+  it('statuses and forbidStatus both matching report one MDL502 each', () => {
+    const config = configWith([
+      { match: 'docs/**', intent: { statuses: ['archived'], forbidStatus: ['deprecated'] } },
+    ]);
+    const content = doc(meta('policy', 'deprecated'));
+    const r = validateDocumentSync({ content, path: 'docs/old.md', config });
+    const rules = r.diagnostics
+      .filter((x) => x.code === 'MDL502')
+      .map((x) => x.data?.rule)
+      .sort();
+    assert.deepEqual(rules, ['intent.forbidStatus', 'intent.statuses']);
+  });
+
+  it('a status whitelist is suppressed by a live layout exception', () => {
+    const config = configWith(
+      [{ match: 'docs/历史归档/**', intent: { statuses: ['archived'] } }],
+      [{ path: 'docs/历史归档/legacy/**', reason: 'migration', expires: '2999-01-01' }],
+    );
+    const content = doc(meta('policy', 'active'));
+    const r = validateDocumentSync({
+      content,
+      path: 'docs/历史归档/legacy/a.md',
+      config,
+      nowMs: Date.parse('2026-01-01T00:00:00Z'),
+    });
+    assert.equal(r.diagnostics.some((x) => x.code === 'MDL502'), false);
+  });
+});

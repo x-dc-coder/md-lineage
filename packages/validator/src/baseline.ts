@@ -34,6 +34,16 @@ export interface Baseline {
   readonly generatedAt?: string;
   /** Diagnostic codes → paths with an accepted violation of that code. */
   readonly codes: Readonly<Record<string, readonly string[]>>;
+  /**
+   * Optional occurrence quota: code → path → how many occurrences are accepted.
+   *
+   * Without it a (code, path) pair suppresses EVERY occurrence, so a second
+   * broken link in an already-accepted file passes silently. The field is
+   * optional on purpose: a v1 file that predates it keeps the old unlimited
+   * semantics, so adopting it is a deliberate `baseline update`, never a
+   * surprise red build.
+   */
+  readonly occurrences?: Readonly<Record<string, Readonly<Record<string, number>>>>;
 }
 
 /** Parsing outcome: a usable baseline, or the reason none is available. */
@@ -89,8 +99,38 @@ export function parseBaseline(text: string): BaselineParseResult {
   }
 
   const generatedAt = typeof obj['generatedAt'] === 'string' ? (obj['generatedAt'] as string) : undefined;
+  const occurrences = parseOccurrences(obj['occurrences']);
 
-  return { baseline: { version: BASELINE_VERSION, codes: normalized, generatedAt }, error: null };
+  return {
+    baseline: {
+      version: BASELINE_VERSION,
+      codes: normalized,
+      generatedAt,
+      ...(occurrences ? { occurrences } : {}),
+    },
+    error: null,
+  };
+}
+
+/**
+ * Read the optional `occurrences` map, dropping anything malformed.
+ *
+ * Junk is dropped rather than fatal for the same reason a bad path row is:
+ * one hand-edited line must not disable the whole exemption set. A missing or
+ * unusable map simply keeps the v1 unlimited-suppression semantics.
+ */
+function parseOccurrences(raw: unknown): Record<string, Record<string, number>> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out: Record<string, Record<string, number>> = {};
+  for (const [code, byPath] of Object.entries(raw as Record<string, unknown>)) {
+    if (!byPath || typeof byPath !== 'object' || Array.isArray(byPath)) continue;
+    const inner: Record<string, number> = {};
+    for (const [path, count] of Object.entries(byPath as Record<string, unknown>)) {
+      if (typeof count === 'number' && Number.isInteger(count) && count > 0) inner[path] = count;
+    }
+    if (Object.keys(inner).length > 0) out[code] = inner;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 /** True when the baseline accepts a diagnostic of `code` at `path`. */
@@ -107,7 +147,7 @@ export interface BaselineSuppressed {
 
 /** Drop the diagnostics the baseline covers, leaving the rest in order. */
 export function suppressWithBaseline<T extends BaselineSuppressed>(diagnostics: readonly T[], baseline: Baseline): T[] {
-  return diagnostics.filter((d) => !baselineMatches(baseline, d.code, d.path));
+  return diffAgainstBaseline(diagnostics, baseline).reported;
 }
 
 /** Split a diagnostic set into what the baseline covers and what it does not. */
@@ -117,11 +157,56 @@ export function diffAgainstBaseline<T extends BaselineSuppressed>(
 ): { reported: T[]; suppressed: T[] } {
   const reported: T[] = [];
   const suppressed: T[] = [];
+  // Per-call consumption ledger. The quota is spent in diagnostic order, so
+  // the (quota + 1)-th occurrence of an accepted (code, path) is reported.
+  const used = new Map<string, number>();
   for (const d of diagnostics) {
-    if (baselineMatches(baseline, d.code, d.path)) suppressed.push(d);
-    else reported.push(d);
+    if (!baselineMatches(baseline, d.code, d.path)) {
+      reported.push(d);
+      continue;
+    }
+    const quota = baseline.occurrences?.[d.code]?.[d.path];
+    if (quota === undefined) {
+      suppressed.push(d);
+      continue;
+    }
+    const key = `${d.code}\u0000${d.path}`;
+    const spent = used.get(key) ?? 0;
+    if (spent < quota) {
+      used.set(key, spent + 1);
+      suppressed.push(d);
+    } else {
+      reported.push(d);
+    }
   }
   return { reported, suppressed };
+}
+
+/**
+ * (code, path) rows whose current occurrence count fell below the recorded
+ * quota — the "the debt shrank, record it out" direction of the ledger.
+ *
+ * A pair that vanished entirely is the stale-entry case and is left to the
+ * caller's stale check, so it is not reported twice.
+ */
+export function shrunkenOccurrences(
+  baseline: Baseline,
+  diagnostics: readonly BaselineSuppressed[],
+): Array<{ code: string; path: string; expected: number; found: number }> {
+  if (!baseline.occurrences) return [];
+  const found = new Map<string, number>();
+  for (const d of diagnostics) {
+    const key = `${d.code}\u0000${d.path}`;
+    found.set(key, (found.get(key) ?? 0) + 1);
+  }
+  const out: Array<{ code: string; path: string; expected: number; found: number }> = [];
+  for (const [code, byPath] of Object.entries(baseline.occurrences)) {
+    for (const [path, expected] of Object.entries(byPath)) {
+      const actual = found.get(`${code}\u0000${path}`) ?? 0;
+      if (actual > 0 && actual < expected) out.push({ code, path, expected, found: actual });
+    }
+  }
+  return out;
 }
 
 /**
@@ -141,34 +226,62 @@ export function writeBaseline(
   generatedAt: string = new Date().toISOString(),
 ): string {
   const codes: Record<string, Set<string>> = {};
+  const counts: Record<string, Record<string, number>> = {};
 
   for (const d of diagnostics) {
     pushPath(codes, d.code, d.path);
+    bumpCount(counts, d.code, d.path);
   }
 
   if (previous) {
     for (const [code, paths] of Object.entries(previous.codes)) {
-      for (const p of paths) pushPath(codes, code, p);
+      for (const p of paths) {
+        pushPath(codes, code, p);
+        // Keep the larger quota: shrinking it on regeneration would silently
+        // re-arm a violation the team already accepted (and a hand-edited
+        // baseline stays meaningful across updates). A previous entry from a
+        // pre-occurrences file counts as one; the current count wins when the
+        // debt grew.
+        const prior = previous.occurrences?.[code]?.[p];
+        raiseCount(counts, code, p, prior ?? 1);
+      }
     }
   }
 
   const out: Record<string, string[]> = {};
+  const outOccurrences: Record<string, Record<string, number>> = {};
   for (const code of Object.keys(codes).sort()) {
     const set = codes[code];
     out[code] = set ? dedupeSorted([...set]) : [];
+    const byPath = counts[code];
+    if (byPath) {
+      const sorted: Record<string, number> = {};
+      for (const p of Object.keys(byPath).sort()) {
+        const n = byPath[p];
+        if (n !== undefined) sorted[p] = n;
+      }
+      outOccurrences[code] = sorted;
+    }
   }
 
-  return (
-    JSON.stringify(
-      {
-        version: BASELINE_VERSION,
-        generatedAt,
-        codes: out,
-      },
-      null,
-      2,
-    ) + '\n'
-  );
+  const document: Record<string, unknown> = {
+    version: BASELINE_VERSION,
+    generatedAt,
+    codes: out,
+  };
+  if (Object.keys(outOccurrences).length > 0) document['occurrences'] = outOccurrences;
+
+  return JSON.stringify(document, null, 2) + '\n';
+}
+
+function bumpCount(counts: Record<string, Record<string, number>>, code: string, path: string): void {
+  const byPath = counts[code] ?? (counts[code] = {});
+  byPath[path] = (byPath[path] ?? 0) + 1;
+}
+
+function raiseCount(counts: Record<string, Record<string, number>>, code: string, path: string, n: number): void {
+  const byPath = counts[code] ?? (counts[code] = {});
+  byPath[path] = Math.max(byPath[path] ?? 0, n);
 }
 
 function pushPath(codes: Record<string, Set<string>>, code: string, path: string): void {
@@ -192,12 +305,27 @@ export function pruneBaseline(previous: Baseline, diagnostics: readonly Baseline
   for (const d of diagnostics) live.add(`${d.code}\u0000${d.path}`);
 
   const codes: Record<string, string[]> = {};
+  const occurrences: Record<string, Record<string, number>> = {};
   for (const [code, paths] of Object.entries(previous.codes)) {
     const kept = paths.filter((p) => live.has(`${code}\u0000${p}`));
-    if (kept.length > 0) codes[code] = dedupeSorted(kept);
+    if (kept.length === 0) continue;
+    codes[code] = dedupeSorted(kept);
+    const prior = previous.occurrences?.[code];
+    if (!prior) continue;
+    const keptCounts: Record<string, number> = {};
+    for (const p of codes[code]) {
+      const n = prior[p];
+      if (n !== undefined) keptCounts[p] = n;
+    }
+    if (Object.keys(keptCounts).length > 0) occurrences[code] = keptCounts;
   }
 
-  return { version: BASELINE_VERSION, codes, generatedAt: previous.generatedAt };
+  return {
+    version: BASELINE_VERSION,
+    codes,
+    generatedAt: previous.generatedAt,
+    ...(Object.keys(occurrences).length > 0 ? { occurrences } : {}),
+  };
 }
 
 /** Sorted, de-duplicated copy: a baseline file must be diff-friendly. */

@@ -1302,8 +1302,9 @@ describe('mdlineage baseline', () => {
       mkdirSync(join(repo.root, 'node_modules'), { recursive: true });
       writeFileSync(join(repo.root, 'node_modules', 'pkg.md'), '# no front matter\n');
       const out = runCli(['check', 'node_modules'], repo.root);
-      assert.match(out.stderr, /node_modules matches the default exclude list/);
-      assert.equal(out.stdout.trim(), 'mdlineage: 0 files checked, no diagnostics', 'nothing was checked');
+      assert.match(out.stderr, /node_modules matches the default exclude list \(node_modules, dist, vendor\)/);
+      assert.equal(out.status, 2, 'an explicitly named target that matched nothing is a usage mistake');
+      assert.equal(out.stdout.trim(), '', 'a usage error prints no clean-run summary');
       assert.equal(out.stdout.includes('MDL003'), false, 'the ignored file is not validated');
     } finally {
       repo.cleanup();
@@ -2359,7 +2360,7 @@ describe('Phase 3 (P2) — M1 path expansion & MDL801 CLI integration', () => {
       const target = '../other_repo/node_modules/pkg/n.md';
       const res = expandMarkdownPaths([target], repo, { config: defaultConfig() });
       assert.equal(res.files.length, 0, 'files must be empty for excluded explicit file');
-      assert.ok(res.excluded.includes(target), 'excluded list must include target');
+      assert.ok(res.excluded.some((e) => e.arg === target), 'excluded list must include target');
 
       const out = runCli(['check', target], repo);
       assert.ok(out.stderr.includes('matches the default exclude list'), 'stderr must mention exclusion');
@@ -2392,7 +2393,10 @@ describe('Phase 3 (P2) — M1 path expansion & MDL801 CLI integration', () => {
       const asGivens = res.files.map((f) => f.asGiven.replace(/\\/g, '/'));
       assert.ok(!asGivens.some((p) => p.includes('other_repo/docs/a.md')), '../other_repo/docs/a.md must not be in files');
       assert.ok(asGivens.some((p) => p.includes('../docs/a.md')), '../docs/a.md must be in files');
-      assert.ok(res.excluded.includes('../other_repo/docs/a.md'), '../other_repo/docs/a.md must be in excluded');
+      assert.ok(
+        res.excluded.some((e) => e.arg === '../other_repo/docs/a.md'),
+        '../other_repo/docs/a.md must be in excluded',
+      );
     } finally {
       rmSync(parent, { recursive: true, force: true });
     }
@@ -2462,6 +2466,241 @@ describe('Phase 3 (P2) — M1 path expansion & MDL801 CLI integration', () => {
       assert.equal(d801After, undefined, 'recent commit must clear MDL801');
     } finally {
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('MDL401 — the link universe is wider than the report set', () => {
+  const CONFIG_WITH_EXCLUDE = [
+    'configVersion: 1',
+    'metadata:',
+    '  required: true',
+    'files:',
+    '  include:',
+    '    - "**/*.md"',
+    '  exclude:',
+    '    - "private/**"',
+    '    - "**/node_modules/**"',
+    '    - "**/dist/**"',
+    '    - "**/vendor/**"',
+    '',
+  ].join('\n');
+
+  it('a link to a real file under files.exclude is not MDL401', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': CONFIG_WITH_EXCLUDE,
+      'docs/a.md': `${doc('docs.a')}
+
+[secret](../private/secret.md) and [data](../private/data.csv)
+`,
+      // No front matter on purpose: if the excluded document were validated,
+      // MDL003 would appear and the test would catch the leak.
+      'private/secret.md': '# secret\n\n[broken](nope.md)\n',
+      'private/data.csv': 'a,b\n1,2\n',
+    });
+    try {
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], ws.root);
+      const reports = reportsOf(out.stdout);
+      const md401 = reports.flatMap((r) => r.diagnostics).filter((d) => d.code === 'MDL401');
+      assert.deepEqual(md401, [], 'a real excluded target exists, so no MDL401');
+      assert.equal(
+        reports.some((r) => r.path.startsWith('private/')),
+        false,
+        'an excluded document stays out of the report set',
+      );
+      assert.equal(out.status, 0);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('a link to a missing file is still MDL401', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': CONFIG_WITH_EXCLUDE,
+      'docs/a.md': `${doc('docs.a')}
+
+[gone](../private/missing.md) and [gone-data](../private/missing.csv)
+`,
+      'private/data.csv': 'a,b\n1,2\n',
+    });
+    try {
+      const out = runCli(['check', '.', '--no-baseline', '--format', 'json'], ws.root);
+      const md401 = reportsOf(out.stdout)
+        .flatMap((r) => r.diagnostics)
+        .filter((d) => d.code === 'MDL401');
+      assert.equal(md401.length, 2, 'both missing targets are reported');
+    } finally {
+      ws.cleanup();
+    }
+  });
+});
+
+describe('baseline occurrences — the CLI gate', () => {
+  it('a second violation in an accepted file is reported once occurrences are recorded', () => {
+    const repo = scratchGitRepoWithBaseline();
+    try {
+      writeFileSync(join(repo.root, 'bad.md'), `${doc('docs.bad')}
+
+[one](missing-one.md)
+`);
+      runCli(['baseline', 'update'], repo.root);
+      const recorded = JSON.parse(readFileSync(join(repo.root, '.mdlineage-baseline.json'), 'utf8'));
+      assert.equal(recorded.occurrences.MDL401['bad.md'], 1, 'update records the observed count');
+      assert.equal(runCli(['baseline', 'verify'], repo.root).status, 0);
+
+      writeFileSync(join(repo.root, 'bad.md'), `${doc('docs.bad')}
+
+[one](missing-one.md)
+[two](missing-two.md)
+`);
+      const verify = runCli(['baseline', 'verify'], repo.root);
+      assert.equal(verify.status, 1, 'the excess occurrence is not covered by the quota');
+      assert.match(verify.stdout, /new violation/);
+      assert.match(verify.stdout, /missing-two\.md/);
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('a v1 baseline without occurrences keeps unlimited suppression', () => {
+    const repo = scratchGitRepoWithBaseline();
+    try {
+      writeFileSync(join(repo.root, 'bad.md'), `${doc('docs.bad')}
+
+[one](missing-one.md)
+`);
+      runCli(['baseline', 'update'], repo.root);
+      const file = join(repo.root, '.mdlineage-baseline.json');
+      const recorded = JSON.parse(readFileSync(file, 'utf8'));
+      delete recorded.occurrences;
+      writeFileSync(file, `${JSON.stringify(recorded, null, 2)}\n`);
+
+      writeFileSync(join(repo.root, 'bad.md'), `${doc('docs.bad')}
+
+[one](missing-one.md)
+[two](missing-two.md)
+`);
+      assert.equal(runCli(['baseline', 'verify'], repo.root).status, 0, 'a pre-occurrences file stays unlimited');
+    } finally {
+      repo.cleanup();
+    }
+  });
+
+  it('a shrunken occurrence count fails verify until it is recorded out', () => {
+    const repo = scratchGitRepoWithBaseline();
+    try {
+      writeFileSync(join(repo.root, 'bad.md'), `${doc('docs.bad')}
+
+[one](missing-one.md)
+[two](missing-two.md)
+`);
+      runCli(['baseline', 'update'], repo.root);
+      assert.equal(runCli(['baseline', 'verify'], repo.root).status, 0);
+
+      writeFileSync(join(repo.root, 'bad.md'), `${doc('docs.bad')}
+
+[one](missing-one.md)
+`);
+      const verify = runCli(['baseline', 'verify'], repo.root);
+      assert.equal(verify.status, 1, 'paying down debt must be recorded, not assumed');
+      assert.match(verify.stdout, /occurrence 2 -> 1/);
+    } finally {
+      repo.cleanup();
+    }
+  });
+});
+
+describe('exclusion attribution and exit codes', () => {
+  const EXCLUDE_CONFIG = [
+    'configVersion: 1',
+    'metadata:',
+    '  required: true',
+    'files:',
+    '  include:',
+    '    - "**/*.md"',
+    '  exclude:',
+    '    - "private/**"',
+    '    - "**/node_modules/**"',
+    '    - "**/dist/**"',
+    '    - "**/vendor/**"',
+    '',
+  ].join('\n');
+
+  it('an explicit config-excluded path names files.exclude and exits 2', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': EXCLUDE_CONFIG,
+      'private/x.md': '# x\n',
+    });
+    try {
+      const out = runCli(['check', 'private'], ws.root);
+      assert.equal(out.status, 2);
+      assert.match(out.stderr, /private matches files\.exclude in config; no files were checked/);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('an explicit --exclude that removes everything names the CLI flag and exits 2', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': EXCLUDE_CONFIG,
+      'docs/a.md': doc('docs.a'),
+    });
+    try {
+      const out = runCli(['check', 'docs', '--exclude', 'docs/**'], ws.root);
+      assert.equal(out.status, 2);
+      assert.match(out.stderr, /docs matches --exclude; no files were checked/);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('an explicit path outside files.include names the include miss and exits 2', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': [
+        'configVersion: 1',
+        'metadata:',
+        '  required: true',
+        'files:',
+        '  include:',
+        '    - "docs/**"',
+        '',
+      ].join('\n'),
+      'other/x.md': doc('docs.x'),
+    });
+    try {
+      const out = runCli(['check', 'other'], ws.root);
+      assert.equal(out.status, 2);
+      assert.match(out.stderr, /other matches no files\.include pattern; no files were checked/);
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('a whole-tree scan whose only documents are excluded stays exit 0', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': EXCLUDE_CONFIG,
+      'private/x.md': doc('docs.x'),
+    });
+    try {
+      const out = runCli(['check', '.'], ws.root);
+      assert.equal(out.status, 0, 'a repository-level scan is not a usage mistake');
+      assert.equal(out.stdout.trim(), 'mdlineage: 0 files checked, no diagnostics');
+    } finally {
+      ws.cleanup();
+    }
+  });
+
+  it('fix attributes the same sources', () => {
+    const ws = scratchWorkspace({
+      'mdlineage.config.yaml': EXCLUDE_CONFIG,
+      'private/x.md': '# no front matter\n',
+    });
+    try {
+      const out = runCli(['fix', 'private'], ws.root);
+      assert.equal(out.status, 2);
+      assert.match(out.stderr, /private matches files\.exclude in config; no files were fixed/);
+    } finally {
+      ws.cleanup();
     }
   });
 });

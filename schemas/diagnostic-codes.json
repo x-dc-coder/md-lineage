@@ -179,7 +179,7 @@
       "layer": "policy-layout",
       "severity": "warning",
       "message": "Document does not match directory intent",
-      "description": "A document under a path whose layout rule declares an intent block violates it: its kind, authority or status is outside the declared set (intent.kinds, intent.authority) or is explicitly forbidden (intent.forbidStatus). A matching, unexpired layout exception suppresses this code."
+      "description": "A document under a path whose layout rule declares an intent block violates it: its kind, authority or status is outside the declared set (intent.kinds, intent.authority, intent.statuses) or is explicitly forbidden (intent.forbidStatus). A matching, unexpired layout exception suppresses this code."
     },
     {
       "code": "MDL503",

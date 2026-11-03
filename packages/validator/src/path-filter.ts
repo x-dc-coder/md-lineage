@@ -18,9 +18,20 @@ export const BUILTIN_EXCLUDE_GLOBS = [
   '**/vendor/**',
 ] as const;
 
+/** Where a compiled exclude rule came from, so the CLI can name the real source. */
+export type RuleOrigin = 'default' | 'config' | 'cli';
+
 export interface CompiledRule {
   readonly pattern: string;
   readonly negate: boolean;
+  /** default = built-in black holes, config = files.exclude, cli = --exclude. */
+  readonly origin: RuleOrigin;
+}
+
+/** The rule that decided a path is excluded, for attribution in the CLI. */
+export interface ExclusionMatch {
+  readonly origin: RuleOrigin;
+  readonly pattern: string;
 }
 
 export interface PathFilterOptions {
@@ -45,27 +56,54 @@ export function normalizeFilterPath(path: string): string {
 export function compileRules(
   configExclude: readonly string[] = BUILTIN_EXCLUDE_GLOBS,
   extraExclude: readonly string[] = [],
+  origin: RuleOrigin = 'config',
+  extraOrigin: RuleOrigin = 'cli',
 ): CompiledRule[] {
-  const combined = [...configExclude, ...extraExclude];
+  const combined: Array<{ raw: string; origin: RuleOrigin }> = [
+    ...configExclude.map((raw) => ({ raw, origin })),
+    ...extraExclude.map((raw) => ({ raw, origin: extraOrigin })),
+  ];
   const rules: CompiledRule[] = [];
 
-  for (const raw of combined) {
+  for (const { raw, origin: ruleOrigin } of combined) {
     const trimmed = raw.trim();
     if (!trimmed) continue;
     if (trimmed.startsWith('!')) {
       rules.push({
         pattern: trimmed.slice(1).replace(/^\.\//, ''),
         negate: true,
+        origin: ruleOrigin,
       });
     } else {
       rules.push({
         pattern: trimmed.replace(/^\.\//, ''),
         negate: false,
+        origin: ruleOrigin,
       });
     }
   }
 
   return rules;
+}
+
+/** Order-insensitive comparison of two pattern lists. */
+function samePatterns(a: readonly string[], b: readonly string[]): boolean {
+  if (a.length !== b.length) return false;
+  const setB = new Set(b);
+  return a.every((p) => setB.has(p));
+}
+
+/**
+ * The rule that last decided a path, or null when the path is not excluded.
+ * Negations clear the match, mirroring `excludedByRules`' last-match-wins.
+ */
+export function exclusionMatch(path: string, rules: readonly CompiledRule[]): ExclusionMatch | null {
+  let match: ExclusionMatch | null = null;
+  for (const rule of rules) {
+    if (!matchesPattern(path, rule.pattern)) continue;
+    match = rule.negate ? null : { origin: rule.origin, pattern: rule.pattern };
+  }
+  return match;
 }
 
 function matchOne(normalized: string, pattern: string): boolean {
@@ -136,6 +174,17 @@ export function isPulledBackByNegation(path: string, rules: readonly CompiledRul
  */
 export class PathFilter {
   readonly rules: readonly CompiledRule[];
+  /**
+   * Rules for the LINK universe (MDL401 existence checks).
+   *
+   * The report set answers "should this document be validated"; the link
+   * universe answers "does this path exist". Conflating them made a link into
+   * a `files.exclude` directory report "target does not exist" even though the
+   * file was on disk. The link universe therefore keeps only the built-in
+   * black holes (node_modules/dist/vendor) plus the user's `!` pull-back
+   * rules, so an explicit negation can still re-admit a path inside one.
+   */
+  private readonly linkRules: readonly CompiledRule[];
   readonly literalIncludes: ReadonlySet<string>;
   readonly hasIncludeRules: boolean;
   readonly includePatterns: readonly string[];
@@ -143,7 +192,16 @@ export class PathFilter {
   constructor(options: PathFilterOptions = {}) {
     const config = options.config;
     const configExclude = config?.files?.exclude ?? BUILTIN_EXCLUDE_GLOBS;
-    this.rules = compileRules(configExclude, options.extraExclude ?? []);
+    const extraExclude = options.extraExclude ?? [];
+    // A config that inherits (or restates) the built-in list has not declared
+    // an exclude of its own, so the CLI must keep calling it the default list.
+    const declaredByUser = !samePatterns(configExclude, BUILTIN_EXCLUDE_GLOBS);
+    const ruleOrigin: RuleOrigin = declaredByUser ? 'config' : 'default';
+    this.rules = compileRules(configExclude, extraExclude, ruleOrigin);
+    // Only negations survive from the user's rules: a positive exclude says
+    // "do not validate", never "does not exist".
+    const userNegations = [...configExclude, ...extraExclude].filter((raw) => raw.trim().startsWith('!'));
+    this.linkRules = compileRules([...BUILTIN_EXCLUDE_GLOBS, ...userNegations]);
 
     const literalSet = new Set<string>();
     const includePats: string[] = [];
@@ -183,6 +241,48 @@ export class PathFilter {
   inUniverse(path: string): boolean {
     if (this.isLiteralInclude(path)) return true;
     return !excludedByRules(path, this.rules);
+  }
+
+  /** Which rule excluded this path, for the CLI's attribution message. */
+  exclusionMatch(path: string): ExclusionMatch | null {
+    return exclusionMatch(path, this.rules);
+  }
+
+  /**
+   * Determine whether a path exists for the purpose of link resolution
+   * (MDL401/402/404).
+   *
+   * A path excluded from VALIDATION still exists. Only the built-in black holes
+   * are treated as nonexistent — they are build/vendor output, not workspace
+   * content — and a literal include or `!` negation still pulls them back.
+   */
+  inLinkUniverse(path: string): boolean {
+    if (this.isLiteralInclude(path)) return true;
+    return !excludedByRules(path, this.linkRules);
+  }
+
+  /**
+   * Patterns safe to prune while collecting the link universe: the built-in
+   * black holes only. Pruning a user exclude here is what made the link scan
+   * blind to real files under `private/`, `papers/` and friends.
+   */
+  linkHardPrunePatterns(): string[] {
+    const out: string[] = [];
+    for (const pattern of BUILTIN_EXCLUDE_GLOBS) {
+      if (this.hasLinkPruneConflict(pattern)) continue;
+      out.push(pattern);
+    }
+    return out;
+  }
+
+  private hasLinkPruneConflict(excludePattern: string): boolean {
+    for (const rule of this.linkRules) {
+      if (rule.negate && matchesPattern(rule.pattern, excludePattern)) return true;
+    }
+    for (const lit of this.literalIncludes) {
+      if (matchesPattern(lit, excludePattern)) return true;
+    }
+    return false;
   }
 
   /**

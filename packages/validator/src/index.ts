@@ -86,8 +86,11 @@ export {
   matchesPattern,
   normalizeFilterPath,
   PathFilter,
+  exclusionMatch,
   type CompiledRule,
+  type ExclusionMatch,
   type PathFilterOptions,
+  type RuleOrigin,
 } from './path-filter.js';
 export type { Diagnostic, DiagnosticLayer, Severity, Position, Range } from './diagnostic.js';
 export { layerOf, severityOf, sortByRange } from './diagnostic.js';
@@ -132,6 +135,7 @@ export {
   baselineMatches,
   suppressWithBaseline,
   diffAgainstBaseline,
+  shrunkenOccurrences,
   writeBaseline,
   pruneBaseline,
 } from './baseline.js';
